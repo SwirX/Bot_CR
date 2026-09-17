@@ -242,6 +242,25 @@ flushed in small batches to keep writes in the single-digits-per-minute range.
 > Channel/role names are all configurable via env — no code changes needed if
 > your server renames things.
 
+### 🍪 YouTube cookies for `/play` (recommended)
+
+YouTube bot-flags datacenter-server IPs, which makes most `yt-dlp` extractions
+fail with *"Sign in to confirm you're not a bot"*. **YTMusic search still
+works** (the bot finds the right song every time), but the actual audio stream
+needs a trusted session. Fix it once with cookies:
+
+1. In a browser you're logged into YouTube with, install a cookies-exporter
+   extension (e.g. *Get cookies.txt LOCALLY*) and export cookies for
+   `youtube.com` as a Netscape-format `cookies.txt`.
+2. Place it on the server (e.g. `/home/ubuntu/Bot_CR/cookies.txt`).
+3. Point the bot at it in `.env`:
+   `YT_COOKIES_FILE=/home/ubuntu/Bot_CR/cookies.txt`
+4. Restart the bot. `/play` now streams reliably, and `/queue auto` radio
+   works too.
+
+> 🔒 Treat `cookies.txt` like a password — it grants YouTube access as that
+> account. Keep it out of version control and out of the repo.
+
 ---
 
 ## 🚀 Deploy (Render)
