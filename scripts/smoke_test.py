@@ -24,10 +24,11 @@ from discord.ext import commands  # noqa: E402
 
 EXPECTED_COMMANDS = {
     "8ball", "ban", "challenge", "claim", "coinflip", "compliment",
-    "current_voice_time", "del", "dice", "fact", "hello", "help", "history",
-    "hug", "joke", "kick", "leaderboard", "modlog", "online_members", "ping",
-    "rank", "set", "slap", "timeout", "today", "total_messages",
-    "total_voice_time", "unban", "untimeout", "warn",
+    "current_voice_time", "del", "dice", "fact", "fixname", "hello", "help",
+    "history", "hug", "joke", "kick", "leaderboard", "modlog", "mute",
+    "online_members", "ping", "rank", "set", "slap", "timeout", "today",
+    "total_messages", "total_voice_time", "unban", "unmute", "untimeout",
+    "warn",
 }
 
 
