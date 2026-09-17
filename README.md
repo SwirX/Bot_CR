@@ -58,6 +58,11 @@ command works as both `!prefix` and `/slash`.
   can never self-promote), `/profile`, `/whois @member` (staff),
   `/roles` (what your access means), `/hierarchy`, and a permission-aware
   `/dashboard` with quick-action buttons.
+- 🧩 **Cells** — `/cell add <@members...> [cell]` places members into a cell:
+  Cell Chiefs can pull people into their **own** cell, while leadership and bot
+  staff may name any cell. A plain Core Member is promoted to Cell Member
+  (higher ranks are never demoted) and moving a member out of another cell is
+  reported back.
 - 📋 **Tasks** — `/task create/assign/claim/complete/edit/cancel` +
   `/tasks` / `/tasks overdue` with priority colours and due dates; creation
   and assignment are permission-gated, and everything lives in Appwrite so the
@@ -133,6 +138,7 @@ All commands are hybrid (prefix **and** slash). `/help` / `!help` lists them.
 | `dashboard` | everyone | Permission-aware club overview |
 | `whois <member>` | staff | Internal record (club ID, warnings, prefs) |
 | `setprofile <member> role/cell/club-id` | leadership | Set club role / cell / club ID |
+| `cell add <@members...> [cell]` | chiefs+ | Add members to a cell (chiefs → their own; staff pick any) |
 | `notifications` | everyone | Toggle notification categories |
 | `tasks` / `tasks mine` | everyone | Your open tasks, colour-coded |
 | `tasks overdue` | everyone | Overdue tasks (staff: whole club) |
@@ -260,6 +266,7 @@ cogs/                     one file per feature; auto-discovered
   general.py              hello / ping / custom help
   _perms.py / _scopes.py  staff bypass + club permission-scope resolver
   members.py              link/unlink, profiles, hierarchy, notifications, dashboard
+  cells.py                /cell add — place members into a cell
   tasks.py                task CRUD + lists (priority/due/cell)
   competitions.py         competitions + registration
   events.py               events + RSVP attendance
