@@ -97,23 +97,28 @@ class Stats(commands.Cog):
         return activity, total_messages, total_voice
 
     # ── commands ───────────────────────────────────────────────
-    @commands.command()
+    @commands.hybrid_command(name="total_messages", description="Total messages sent in the server.")
     async def total_messages(self, ctx):
-        """Total messages sent in the server (persisted + pending)."""
-        counters = await store.get_counters()
+        """Persisted total plus anything still pending in memory."""
+        try:
+            counters = await store.get_counters()
+        except store.StoreError:
+            counters = {}
         total = int(counters.get("total_messages", 0)) + self.total_messages
         await ctx.send(f"Total messages sent in the server: {total}")
 
-    @commands.command()
+    @commands.hybrid_command(name="total_voice_time", description="Total voice time spent in the server.")
     async def total_voice_time(self, ctx):
-        """Total voice time spent in the server."""
-        counters = await store.get_counters()
+        try:
+            counters = await store.get_counters()
+        except store.StoreError:
+            counters = {}
         total = float(counters.get("total_voice_seconds", 0.0)) + self.total_voice_seconds
         await ctx.send(f"Total voice time in the server: {fmt_seconds(total)}")
 
-    @commands.command()
+    @commands.hybrid_command(name="current_voice_time",
+                             description="Time in your voice channel this session.")
     async def current_voice_time(self, ctx):
-        """Time everyone has spent in the voice channel you are in, this session."""
         if not ctx.author.voice:
             await ctx.send("You are not in a voice channel!")
             return
@@ -128,9 +133,8 @@ class Stats(commands.Cog):
             f"Total time spent in {channel.name} so far: {fmt_seconds(total)}"
         )
 
-    @commands.command()
+    @commands.hybrid_command(name="online_members", description="Number of members currently online/idle/dnd.")
     async def online_members(self, ctx):
-        """Number of members currently online/idle/dnd."""
         online = sum(1 for m in ctx.guild.members if m.status in ACTIVE_STATUSES)
         await ctx.send(f"Number of online members: {online}")
 
