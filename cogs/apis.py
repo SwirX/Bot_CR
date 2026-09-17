@@ -279,22 +279,35 @@ class Apis(commands.Cog):
         await ctx.send(f"💡 **{slip.get('advice', '...')}**")
 
     # ── lyrics (LRCLIB) ────────────────────────────────────────
-    @commands.hybrid_command(name="lyrics", description="Lyrics for a song (artist + title).")
+    @commands.hybrid_command(name="lyrics",
+                             description="Lyrics for a song — omit the name to use the current track.")
     @commands.cooldown(1, 15, commands.BucketType.user)
-    async def lyrics(self, ctx, *, query: str):
-        """Search MLRC/LRCLIB for lyrics — /lyrics imagine dragons believer."""
+    async def lyrics(self, ctx, *, query: str | None = None):
+        """Search LRCLIB for lyrics. With no query, look up the current track."""
+        if not query:
+            music = self.bot.get_cog("Music")
+            player = music and music.players.get(ctx.guild.id)
+            if player is None or player.current is None:
+                await ctx.send("🎤 Give a song name, or play something first:\n"
+                               "`/lyrics imagine dragons believer`")
+                return
+            track = player.current
+            query = f"{track.artist} {track.title}".strip() or track.title
+            label = track.title
+        else:
+            label = query
         async with ctx.typing():
             data = await self._session_get(
                 "https://lrclib.net/api/search", params={"q": query})
         if not data:
-            await ctx.send(f"🎤 No lyrics found for **{query}**.")
+            await ctx.send(f"🎤 No lyrics found for **{label}**.")
             return
         track = data[0]  # best match first
         text = track.get("plainLyrics")
         if not text:
             synced = track.get("syncedLyrics")
             text = synced or "Lyrics found but not available as text."
-        title = track.get("trackName", query)
+        title = track.get("trackName", label)
         artist = track.get("artistName", "?")
         album = track.get("albumName") or "Single"
         embed = discord.Embed(
