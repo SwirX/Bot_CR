@@ -9,3 +9,6 @@ python_dateutil==2.9.0.post0
 appwrite==24.0.0
 # Bump often: YouTube breaks older extractors, so keep this reasonably current.
 yt-dlp==2026.8.19
+# YTMusic powers query search and the /queue auto radio (yt-dlp's ytsearch is
+# bot-detected and unreliable).
+ytmusicapi==1.12.3
