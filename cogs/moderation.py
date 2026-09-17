@@ -1,35 +1,34 @@
 import discord
 from discord.ext import commands
 
+
 class Moderation(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
     @commands.command(name="del")
-    @commands.has_permissions(administrator=True)
+    @commands.has_permissions(manage_messages=True)
     async def delete_messages(self, ctx, number: int):
-        # Check if the command is used in a text channel
+        """Delete the last N messages in this channel (1–100) plus the command itself."""
         if not isinstance(ctx.channel, discord.TextChannel):
             await ctx.send("This command can only be used in text channels.")
             return
 
-        # Fetch the last 'number' messages in the channel
-        messages_to_delete = []
-        async for message in ctx.channel.history(limit=number):
-            messages_to_delete.append(message)
-            print(f"Message to delete: {message.author} - {message.content}")
-
-        # Delete the messages
-        if messages_to_delete:
+        # The bulk-delete API only accepts 2..100 messages per call.
+        number = max(1, min(number, 100))
+        try:
+            deleted = await ctx.channel.purge(limit=number, before=ctx.message)
             try:
-                await ctx.channel.delete_messages(messages_to_delete)
-                print(f"Deleted {len(messages_to_delete)} messages in #{ctx.channel.name}.")
-            except discord.Forbidden:
-                print("The bot does not have permission to delete messages in this channel.")
-            except discord.HTTPException as e:
-                print(f"Failed to delete messages: {e}")
-        else:
-            print("No messages to delete.")
+                await ctx.message.delete()
+            except discord.HTTPException:
+                pass  # Command message already gone or cannot be deleted
+            reply = f"Deleted {len(deleted)} message(s) in #{ctx.channel.name}."
+            await ctx.send(reply, delete_after=3)
+        except discord.Forbidden:
+            await ctx.send("I don't have permission to delete messages here.", delete_after=5)
+        except discord.HTTPException as exc:
+            await ctx.send(f"Failed to delete messages: {exc}", delete_after=5)
+
 
 async def setup(bot):
     await bot.add_cog(Moderation(bot))
