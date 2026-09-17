@@ -44,6 +44,18 @@ YTDL_OPTS = {
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
+
+def _header_option(headers: dict) -> str:
+    """Render yt-dlp's ``http_headers`` as an ffmpeg ``-headers`` argument.
+
+    ffmpeg wants CRLF-terminated ``Name: value`` pairs in a single argument.
+    discord.py shlex-splits ``before_options``, so the surrounding quotes keep
+    the pairs together and the embedded newlines reach ffmpeg intact. Passing
+    the same headers yt-dlp used avoids googlevideo 403s mid-stream.
+    """
+    pairs = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+    return f'-headers "{pairs}"'
+
 IDLE_LEAVE_SECONDS = 60
 
 
@@ -76,6 +88,7 @@ class Track:
     thumbnail: str = ""
     artist: str = ""
     requester_id: int | None = None
+    headers: dict = field(default_factory=dict)
     votes: set = field(default_factory=set)
 
 
@@ -128,9 +141,12 @@ class MusicPlayer:
     def _make_source(self, track: Track):
         if self._audio_factory is not None:
             return self._audio_factory(track)
+        before = FFMPEG_BEFORE
+        if track.headers:
+            before = f"{before} {_header_option(track.headers)}"
         audio = discord.FFmpegPCMAudio(
             track.url,
-            before_options=FFMPEG_BEFORE,
+            before_options=before,
             options="-vn",
         )
         return discord.PCMVolumeTransformer(audio, volume=self.volume)
@@ -393,6 +409,7 @@ class Music(commands.Cog):
             duration=info.get("duration"),
             thumbnail=info.get("thumbnail") or "",
             artist=info.get("artist") or info.get("channel") or info.get("uploader") or "",
+            headers=info.get("http_headers") or {},
         )
 
     async def _search(self, query: str) -> Track:
