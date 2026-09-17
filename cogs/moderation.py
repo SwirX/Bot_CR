@@ -1,5 +1,6 @@
 import logging
 from datetime import timedelta
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -202,24 +203,35 @@ class Moderation(commands.Cog):
 
     # ── fixname ──────────────────────────────────────────────
     @commands.hybrid_command(name="fixname",
-                             description="Re-apply a member's cursive nickname (from their real name).")
+                             description="Set a member's cursive nickname — pass their real full name (optional).")
     @mod_perms(manage_nicknames=True)
-    
-    async def fixname(self, ctx, member: discord.Member):
-        """Reset a nickname to the cursive form of the verified real name.
+    async def fixname(self, ctx, member: discord.Member, *, name: Optional[str] = None):
+        """Reset a nickname to the cursive form of a real full name.
 
-        Uses the real name collected during DM onboarding; falls back to the
-        current display name when there is no stored record (e.g. legacy
-        members), so \"normal\" names get the same cursive treatment.
+        Pass the member's real full name to override the stored record — the
+        name is persisted so future re-applies reuse it. Without a name, the
+        real name collected during DM onboarding is used, falling back to the
+        current display name (e.g. legacy members who never onboarded).
         """
         if member == self.bot.user:
             await ctx.send("Nice try. I like my name. 🤖")
             return
-        try:
-            record = await store.get_member(member.id)
-        except StoreError:
-            record = None
-        source = (record or {}).get("real_name") or member.display_name.strip() or member.name
+        if name is not None:
+            given = name.strip()
+            if not given:
+                await ctx.send("⚠️ The name can't be empty.")
+                return
+            try:
+                await store.merge_member(member.id, {"real_name": given})
+            except StoreError as exc:
+                LOG.warning("fixname: could not persist real_name for %s: %s", member.id, exc)
+            source = given
+        else:
+            try:
+                record = await store.get_member(member.id)
+            except StoreError:
+                record = None
+            source = (record or {}).get("real_name") or member.display_name.strip() or member.name
         nick = cursive_nickname(source)
         if not nick:
             await ctx.send("⚠️ Couldn't build a name for that member.")
@@ -233,7 +245,8 @@ class Moderation(commands.Cog):
             await ctx.send(f"⚠️ Failed to set the nickname: {exc}")
             return
         await ctx.send(f"✏️ Fixed **{member.display_name}** → `{nick}`")
-        await self._log(ctx, "fixname", member, "nickname reset to the cursive real-name form")
+        saved = " (real name saved)" if name is not None else ""
+        await self._log(ctx, "fixname", member, f"nickname reset to the cursive real-name form{saved}")
 
     # ── role management ───────────────────────────────────────
     async def _check_role(self, ctx, role: discord.Role) -> bool:
