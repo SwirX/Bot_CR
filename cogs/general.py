@@ -3,90 +3,122 @@ from discord.ext import commands
 
 
 class HelpView(discord.ui.View):
-    """Interactive help: category dropdown + overview + close button."""
+    """Interactive help: section buttons + overview + close button.
+
+    Sections map real cogs onto the categories people think in (fun,
+    entertainment, cell management, …) rather than raw cog names, and the
+    General section — hello, ping, help — is front and centre so everyday
+    commands are never buried.
+    """
+
+    # (button label, emoji, cog qualified names folded into the section)
+    SECTIONS = (
+        ("General", "🏠", ("General",)),
+        ("Fun", "🎉", ("Fun", "Engagement")),
+        ("Entertainment", "🎧", ("Music",)),
+        ("Cell Management", "🔬", ("Cells",)),
+        ("Events & Meetings", "📅", ("Events", "Meetings")),
+        ("Competitions", "🏆", ("Competitions",)),
+        ("Polls", "🗳️", ("Polls",)),
+        ("Members & Stats", "👥", ("Members", "Stats", "BirthdayTracker", "Onboarding")),
+        ("Moderation & Rules", "🛡️", ("Moderation", "Rules")),
+        ("Server Ops", "⚙️", ("DashBoard", "Apis", "Tasks", "Welcome", "Goodbye")),
+    )
 
     def __init__(self, bot, *, timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.bot = bot
-        self.categories = {}
+        self.categories: dict[str, tuple] = {}
         for cog in bot.cogs.values():
             cmds = [c for c in cog.walk_commands() if not c.hidden and c.parent is None]
             if cmds:
                 self.categories[cog.qualified_name] = (cog, cmds)
 
-        options = [
-            discord.SelectOption(
-                label="All commands",
-                value="__all__",
-                description="Browse every command with usage and help text",
-            )
-        ]
-        for name in sorted(self.categories):
-            cog, cmds = self.categories[name]
-            first_line = (cog.__doc__ or "").strip().splitlines()
-            blurb = first_line[0][:96] if first_line else f"{len(cmds)} commands"
-            options.append(
-                discord.SelectOption(label=name, value=name, description=blurb)
-            )
+        # Keep only sections whose cogs actually loaded commands.
+        self.sections: dict[str, tuple[str, ...]] = {}
+        for label, _emoji, cog_names in self.SECTIONS:
+            present = tuple(name for name in cog_names if name in self.categories)
+            if present:
+                self.sections[label] = present
 
-        self.select = discord.ui.Select(
-            placeholder="Choose a category…",
-            options=options[:25],  # Discord caps a select at 25 options
-        )
-        self.select.callback = self.on_select
-        self.add_item(self.select)
+        # One button per section (max five per row), then home/close below.
+        for idx, (label, emoji, _cog_names) in enumerate(self.SECTIONS):
+            if label not in self.sections:
+                continue
+            button = discord.ui.Button(
+                label=label, emoji=emoji,
+                style=discord.ButtonStyle.secondary, row=idx // 5,
+            )
+            button.callback = self._section_callback(label)
+            self.add_item(button)
+
+    def _section_callback(self, label: str):
+        async def callback(interaction: discord.Interaction):
+            try:
+                await interaction.response.edit_message(
+                    embed=self.build_section_embed(label), view=self
+                )
+            except discord.HTTPException:
+                pass
+        return callback
+
+    def _section_names(self, label: str) -> list[str]:
+        """Sorted command names that belong to a section."""
+        names = []
+        for cog_name in self.sections[label]:
+            _cog, cmds = self.categories[cog_name]
+            names.extend(c.name for c in cmds)
+        return sorted(names)
 
     def build_overview_embed(self) -> discord.Embed:
         prefix = self.bot.command_prefix
         embed = discord.Embed(
             title="📚 Bot_CR Commands",
             description=(
-                f"Prefix `{prefix}command` or the slash `/command` — they do the "
-                "same thing. Use the dropdown to see a category's full usage."
+                f"Prefix `{prefix}command` or slash `/command` — they do the "
+                "same thing. Tap a button below to see a section's full usage."
             ),
             color=discord.Color.blue(),
         )
-        for name in sorted(self.categories):
-            _cog, cmds = self.categories[name]
+        for label in self.sections:
+            names = self._section_names(label)
             embed.add_field(
-                name=name,
-                value=", ".join(f"`{c.name}`" for c in cmds) or "—",
+                name=f"{label}",
+                value=", ".join(f"`{n}`" for n in names) or "—",
                 inline=False,
             )
         embed.set_footer(text=f"{len(self.bot.commands)} commands available")
         return embed
 
-    def build_category_embed(self, name: str):
-        cog, cmds = self.categories[name]
+    def build_section_embed(self, label: str) -> discord.Embed:
+        cog_names = self.sections[label]
+        blurbs = []
+        for cog_name in cog_names:
+            cog, _cmds = self.categories[cog_name]
+            first_line = (cog.__doc__ or "").strip().splitlines()
+            if first_line:
+                blurbs.append(first_line[0])
         embed = discord.Embed(
-            title=f"📚 {name} commands",
-            description=(cog.__doc__ or "").strip(),
+            title=f"📚 {label} commands",
+            description="\n".join(blurbs) or None,
             color=discord.Color.blurple(),
         )
         lines = []
-        for command in sorted(cmds, key=lambda c: c.name):
-            usage = command.name
-            for param in command.clean_params.values():
-                usage += f" <{param.name}>" if param.required else f" [{param.name}]"
-            doc = command.description or command.short_doc or ""
-            lines.append(f"`{usage}` — {doc}")
+        for cog_name in cog_names:
+            cog, cmds = self.categories[cog_name]
+            if len(cog_names) > 1:
+                lines.append(f"**{cog_name}**")
+            for command in sorted(cmds, key=lambda c: c.name):
+                usage = command.name
+                for param in command.clean_params.values():
+                    usage += f" <{param.name}>" if param.required else f" [{param.name}]"
+                doc = command.description or command.short_doc or ""
+                lines.append(f"`{usage}` — {doc}")
         for chunk in (lines[i:i + 12] for i in range(0, len(lines), 12)):
             embed.add_field(name="\u200b", value="\n".join(chunk), inline=False)
         return embed
 
-    async def on_select(self, interaction: discord.Interaction):
-        value = self.select.values[0] if self.select.values else "__all__"
-        if value == "__all__":
-            embed = self.build_overview_embed()
-        else:
-            embed = self.build_category_embed(value)
-        self.select.placeholder = "Jump to another category…"
-        try:
-            await interaction.response.edit_message(embed=embed, view=self)
-        except discord.HTTPException:
-            pass
-
-    @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, label="All")
+    @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, label="All", row=2)
     async def home(self, interaction: discord.Interaction, _button: discord.ui.Button):
         try:
             await interaction.response.edit_message(
@@ -95,7 +127,7 @@ class HelpView(discord.ui.View):
         except discord.HTTPException:
             pass
 
-    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, label="Close")
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, label="Close", row=2)
     async def close(self, interaction: discord.Interaction, _button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
