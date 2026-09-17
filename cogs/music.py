@@ -1,9 +1,10 @@
-"""Music streaming for Bot_CR (yt-dlp + ffmpeg).
+"""Music streaming for Bot_CR (YTMusic search + yt-dlp + ffmpeg).
 
 Joins the author's voice channel and streams the best audio source from YouTube
-(a query is searched, a URL is used directly), with a queue, majority vote-skip,
-per-track loop, volume control and an interactive now-playing panel that also
-looks up lyrics on LRCLIB.
+(queries are searched via YTMusic, URLs are used directly), with a queue, a
+``/queue auto`` YTMusic-radio generator, majority vote-skip, per-track loop,
+volume control and an interactive now-playing panel that also looks up lyrics
+on LRCLIB. The bot auto-disconnects after being idle for a bit.
 
 The playback state machine lives in :class:`MusicPlayer` and is deliberately
 voice-independent where possible (``voice`` is injected), so the queue / vote /
@@ -14,6 +15,8 @@ import asyncio
 import concurrent.futures
 import logging
 import re
+import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -26,6 +29,11 @@ try:
 except ImportError:  # pragma: no cover - exercised at deploy time
     yt_dlp = None
 
+try:
+    from ytmusicapi import YTMusic
+except ImportError:  # pragma: no cover - exercised at deploy time
+    YTMusic = None
+
 from cogs._perms import is_bot_admin
 
 LOG = logging.getLogger("bot.music")
@@ -33,6 +41,17 @@ LOG = logging.getLogger("bot.music")
 USER_AGENT = "Bot_CR/1.0 (robotics-club Discord bot; contact: server staff)"
 
 URL_RE = re.compile(r"^https?://", re.I)
+
+# ytmusicapi is not thread-safe, and its calls run via asyncio.to_thread.
+_YT_MUSIC: "YTMusic | None" = None
+_YT_MUSIC_LOCK = threading.Lock()
+
+
+def _ytmusic() -> "YTMusic":
+    global _YT_MUSIC
+    if _YT_MUSIC is None:
+        _YT_MUSIC = YTMusic()
+    return _YT_MUSIC
 
 YTDL_OPTS = {
     "format": "bestaudio/best",
@@ -57,6 +76,7 @@ def _header_option(headers: dict) -> str:
     return f'-headers "{pairs}"'
 
 IDLE_LEAVE_SECONDS = 60
+IDLE_CHECK_SECONDS = 10
 
 
 def skip_threshold(listener_count: int) -> int:
@@ -84,6 +104,7 @@ class Track:
     title: str
     url: str
     webpage_url: str = ""
+    video_id: str = ""
     duration: int | None = None
     thumbnail: str = ""
     artist: str = ""
@@ -107,12 +128,51 @@ class MusicPlayer:
         self.now_playing_message = None
         self.now_playing_view = None
         self._audio_factory = audio_factory
-        self._leave_task: asyncio.Task | None = None
+        self._watchdog_task: asyncio.Task | None = None
+        self._last_active = time.monotonic()
+
+    def _touch(self):
+        """Note recent activity so the idle watchdog doesn't disconnect."""
+        self._last_active = time.monotonic()
+
+    def start_watchdog(self):
+        """Ensure the idle-leave watchdog is running for this voice session."""
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.create_task(self._watchdog())
+
+    async def _watchdog(self):
+        """Leave the channel after IDLE_LEAVE_SECONDS with nothing queued/playing.
+
+        Unlike a one-shot sleep task, this also covers joining without a
+        playable track (e.g. a failed search) and survives track hand-offs.
+        """
+        try:
+            while True:
+                await asyncio.sleep(IDLE_CHECK_SECONDS)
+                if self.voice is None or not self.voice.is_connected():
+                    return
+                if self.voice.is_playing() or self.voice.is_paused():
+                    continue  # actively playing (or deliberately paused) — not idle
+                if self.queue or self.current is not None:
+                    continue  # something is waiting; don't interrupt it
+                if time.monotonic() - self._last_active >= IDLE_LEAVE_SECONDS:
+                    await self.voice.disconnect()
+                    await self._update_panel(
+                        stopped="Left the voice channel after being idle.")
+                    return
+        except asyncio.CancelledError:
+            return
+
+    async def _cancel_watchdog(self):
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
 
     # ── queue / playback ────────────────────────────────────────
     async def enqueue(self, track: Track):
         """Add a track; start playback immediately if nothing is playing."""
         self.queue.append(track)
+        self._touch()
         if self.voice and self.voice.is_playing():
             return False
         await self.play_next()
@@ -122,7 +182,6 @@ class MusicPlayer:
         """Start the next track — queue head, or loop the current one."""
         if self.voice is None or not self.voice.is_connected() or self.voice.is_playing():
             return
-        await self._cancel_leave()
         if self.loop and self.current is not None:
             track = self.current
         elif self.queue:
@@ -130,7 +189,8 @@ class MusicPlayer:
         else:
             track = None
         if track is None:
-            await self._idle_and_leave()
+            self.current = None
+            self._touch()  # count the idle window from when the last track ended
             return
         self.current = track
         self.current.votes.clear()
@@ -162,27 +222,9 @@ class MusicPlayer:
         except Exception:  # pragma: no cover - defensive
             LOG.exception("after-hook crashed")
 
-    async def _idle_and_leave(self):
-        """Queue empty — sit tight briefly, then leave if nobody queues more."""
-        self.current = None
-        if self._leave_task is None:
-            self._leave_task = asyncio.create_task(self._leave_soon())
-
-    async def _leave_soon(self):
-        await asyncio.sleep(IDLE_LEAVE_SECONDS)
-        if self.voice and self.voice.is_connected() and not self.voice.is_playing():
-            self.current = None
-            await self.voice.disconnect()
-            await self._update_panel(stopped="Queue finished — left the voice channel.")
-
-    async def _cancel_leave(self):
-        if self._leave_task is not None:
-            self._leave_task.cancel()
-            self._leave_task = None
-
     # ── control ─────────────────────────────────────────────────
     async def stop(self, label: str = "⏹️ Stopped."):
-        await self._cancel_leave()
+        await self._cancel_watchdog()
         self.queue.clear()
         self.current = None
         if self.voice and self.voice.is_playing():
@@ -361,7 +403,7 @@ class NowPlayingView(discord.ui.View):
 
 
 class Music(commands.Cog):
-    """Queue music from YouTube with yt-dlp — /play, /skip, /queue and more."""
+    """Queue music from YouTube — /play, /queue auto, /skip, /loop and more."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -379,8 +421,8 @@ class Music(commands.Cog):
 
     def _cleanup(self, guild_id: int):
         player = self.players.pop(guild_id, None)
-        if player is not None and player._leave_task is not None:
-            player._leave_task.cancel()
+        if player is not None and player._watchdog_task is not None:
+            player._watchdog_task.cancel()
 
     async def cog_unload(self):
         for player in list(self.players.values()):
@@ -391,29 +433,100 @@ class Music(commands.Cog):
 
     # ── lookup helpers ──────────────────────────────────────────
     @staticmethod
-    def _extract_audio(query: str) -> Track:
-        """Blocking yt-dlp search/extract — run via asyncio.to_thread."""
+    def _extract_audio(url: str) -> Track:
+        """Blocking yt-dlp stream extraction for a video URL (to_thread)."""
         if yt_dlp is None:
             raise RuntimeError("yt-dlp is not installed")
-        target = query if URL_RE.match(query) else f"ytsearch1:{query}"
+        if not URL_RE.match(url):
+            raise RuntimeError(f"not a resolvable URL: {url!r}")
         with yt_dlp.YoutubeDL(YTDL_OPTS) as ydl:
-            info = ydl.extract_info(target, download=False)
+            info = ydl.extract_info(url, download=False)
         if info.get("entries"):
             info = info["entries"][0]
         if not info or not info.get("url"):
             raise RuntimeError("no playable audio source found")
         return Track(
-            title=info.get("title") or query,
+            title=info.get("title") or url,
             url=info["url"],
-            webpage_url=info.get("webpage_url") or info.get("original_url") or "",
+            webpage_url=info.get("webpage_url") or info.get("original_url") or url,
+            video_id=info.get("id") or "",
             duration=info.get("duration"),
             thumbnail=info.get("thumbnail") or "",
             artist=info.get("artist") or info.get("channel") or info.get("uploader") or "",
             headers=info.get("http_headers") or {},
         )
 
+    @staticmethod
+    def _search_sync(query: str) -> Track:
+        """Resolve a query to a playable Track (blocking — run via to_thread).
+
+        Direct URLs go straight to yt-dlp. Anything else is searched through
+        YTMusic, which is far more reliable than yt-dlp's ``ytsearch`` (which
+        is bot-detected); the matched video is then stream-extracted with
+        yt-dlp and its metadata is enriched from the YTMusic result.
+        """
+        if URL_RE.match(query):
+            return Music._extract_audio(query)
+        if YTMusic is None:
+            raise RuntimeError("ytmusicapi is not installed")
+        with _YT_MUSIC_LOCK:
+            results = _ytmusic().search(query, filter="songs", limit=1)
+        if not results:
+            raise RuntimeError(f"no YTMusic results for {query!r}")
+        result = results[0]
+        video_id = result.get("videoId")
+        if not video_id:
+            raise RuntimeError("YTMusic result has no videoId")
+        track = Music._extract_audio(f"https://www.youtube.com/watch?v={video_id}")
+        track.title = result.get("title") or track.title
+        artists = ", ".join(a.get("name") for a in (result.get("artists") or [])
+                            if a.get("name"))
+        track.artist = artists or track.artist
+        track.video_id = video_id
+        secs = result.get("duration_seconds")
+        if secs:
+            track.duration = int(secs)
+        thumbs = result.get("thumbnails") or []
+        if thumbs and thumbs[-1].get("url"):
+            track.thumbnail = thumbs[-1]["url"]
+        return track
+
+    @staticmethod
+    def _radio_seed_ids(video_id: str, limit: int) -> list[str]:
+        """Nearest-neighbour video IDs for a track's YouTube Music radio."""
+        if YTMusic is None:
+            raise RuntimeError("ytmusicapi is not installed")
+        with _YT_MUSIC_LOCK:
+            data = _ytmusic().get_watch_playlist(
+                videoId=video_id, radio=True, limit=limit)
+        seeds: list[str] = []
+        for entry in data.get("tracks") or []:
+            vid = entry.get("videoId")
+            if vid and vid not in seeds:
+                seeds.append(vid)
+            if len(seeds) >= limit:
+                break
+        return seeds
+
     async def _search(self, query: str) -> Track:
-        return await asyncio.to_thread(self._extract_audio, query)
+        return await asyncio.to_thread(self._search_sync, query)
+
+    async def _resolve_tracks(self, video_ids: list[str]) -> list[Track]:
+        """Stream-extract several videos in parallel (radio queue generation)."""
+        results = await asyncio.gather(
+            *(asyncio.to_thread(self._extract_audio,
+                                f"https://www.youtube.com/watch?v={vid}")
+              for vid in video_ids),
+            return_exceptions=True,
+        )
+        tracks: list[Track] = []
+        for vid, res in zip(video_ids, results):
+            if isinstance(res, Exception):
+                LOG.warning("Auto-queue: failed to resolve %s: %s", vid, res)
+                continue
+            res.video_id = vid
+            tracks.append(res)
+        return tracks
 
     async def _ensure_voice(self, ctx) -> MusicPlayer | None:
         if ctx.author.voice is None or ctx.author.voice.channel is None:
@@ -427,12 +540,16 @@ class Music(commands.Cog):
                 await ctx.send(f"⚠️ I'm already playing in {existing.channel.mention}.")
                 return None
             player.voice = existing
+            player.start_watchdog()
+            player._touch()
             return player
         try:
             player.voice = await channel.connect()
         except (discord.Forbidden, discord.ClientException) as exc:
             await ctx.send(f"⛔ Couldn't join the channel: {exc}")
             return None
+        player.start_watchdog()
+        player._touch()
         return player
 
     async def _send_panel(self, ctx, player: MusicPlayer):
@@ -531,14 +648,57 @@ class Music(commands.Cog):
         level = await player.set_volume(max(1, min(percent, 100)))
         await ctx.send(f"🔊 Volume set to {round(level * 100)}%.")
 
-    @commands.hybrid_command(name="queue", description="Show the current queue.")
+    @commands.hybrid_command(name="queue",
+                             description="Show the queue — or pass `auto` to generate a radio queue.")
     @commands.guild_only()
-    async def queue(self, ctx):
+    async def queue(self, ctx, mode: str | None = None):
+        """Show the queue, or generate a 📻 radio queue from the current track.
+
+        `!queue auto` (or `/queue auto`) pulls a related-tracks radio for the
+        song that's currently playing and adds it to the queue.
+        """
+        if mode is not None and mode.strip().lower() in ("auto", "radio", "seed"):
+            await self._queue_auto(ctx, self._player(ctx.guild.id))
+            return
         player = self._player(ctx.guild.id)
         if player.current is None and not player.queue:
             await ctx.send("🎵 The queue is empty. Add songs with `/play`.")
             return
         await ctx.send(embed=player.embed())
+
+    async def _queue_auto(self, ctx, player: MusicPlayer, size: int = 8):
+        """Generate a radio queue from the currently playing track."""
+        if player.voice is None or not player.voice.is_connected():
+            await ctx.send("🎧 I need to be in a voice channel first — use `/play`.")
+            return
+        if player.current is None or not player.current.video_id:
+            await ctx.send("🎵 Play something first, then run `/queue auto` "
+                           "to generate a 📻 radio queue.")
+            return
+        await ctx.defer()
+        current = player.current
+        try:
+            seed_ids = await asyncio.to_thread(
+                self._radio_seed_ids, current.video_id, size)
+        except Exception as exc:
+            LOG.warning("Auto-queue seed failed for %r: %s", current.title, exc)
+            await ctx.send("⚠️ Couldn't generate a radio for the current track.")
+            return
+        if not seed_ids:
+            await ctx.send("⚠️ No related tracks found for the current track.")
+            return
+        await ctx.send(f"📻 Building a radio queue from **{current.title}**…")
+        tracks = await self._resolve_tracks(seed_ids)
+        if not tracks:
+            await ctx.send("⚠️ Couldn't resolve any of the radio tracks.")
+            return
+        for track in tracks:
+            track.requester_id = ctx.author.id
+            await player.enqueue(track)
+        await player._update_panel()
+        await ctx.send(
+            f"➕ **{len(tracks)}** songs from the radio of **{current.title}** "
+            f"added to the queue.")
 
     @commands.hybrid_command(name="nowplaying", description="Show the current track.")
     @commands.guild_only()
