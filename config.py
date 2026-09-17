@@ -63,6 +63,14 @@ ROLE_ARCHON = _env("ROLE_ARCHON", "Archon")
 ROLE_BOT_DEVELOPER = _env("ROLE_BOT_DEVELOPER", "Bot Developer")
 ROLE_BOT_ADMIN = _env("ROLE_BOT_ADMIN", "Bot Admin")
 
+# Extra Discord user IDs (comma-separated) that are always treated as bot
+# staff, regardless of guild roles — e.g. the club's bot operator. Survives
+# role reshuffles. Example: BOT_ADMIN_USER_IDS=407922956757499905
+BOT_ADMIN_USER_IDS = {
+    int(i) for i in _env("BOT_ADMIN_USER_IDS", "").split(",")
+    if i.strip().isdigit()
+}
+
 # Leadership roles — /setlead may replace the holders of these.
 ROLE_PRESIDENT = _env("ROLE_PRESIDENT", "President")
 ROLE_VICE_PRESIDENT = _env("ROLE_VICE_PRESIDENT", "Vice President")
