@@ -83,6 +83,7 @@ class Fun(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.quiz_runs: dict = {}
 
     @commands.hybrid_command(name="8ball", description="Ask the magic 8-ball a question.")
     @commands.cooldown(1, 3, commands.BucketType.user)
@@ -212,6 +213,201 @@ class Fun(commands.Cog):
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def quote(self, ctx):
         await ctx.send(f"💬 {random.choice(QUOTES)}")
+
+    # ── robot status ──────────────────────────────────────────
+    @commands.hybrid_command(name="robot", description="Check on the club's robot buddy.")
+    @commands.cooldown(1, 10, commands.BucketType.user)
+    async def robot(self, ctx):
+        """A playful telemetry readout for the club mascot."""
+        battery = random.randint(40, 100)
+        sensors = random.randint(3, 4)
+        motor = "CALIBRATING" if random.random() < 0.12 else "ONLINE"
+        lines = [
+            "🤖 **ROBOT STATUS**",
+            f"CPU:        ONLINE",
+            f"Motors:     {motor}",
+            f"Sensors:    {sensors}/4",
+            f"Battery:    {battery}%",
+            "",
+            "System nominal." if motor == "ONLINE" else "One motor recalibrating — all good. 🔧",
+            f"*Ping: {round(self.bot.latency * 1000)} ms*" if hasattr(self.bot, "latency") else "",
+        ]
+        await ctx.send("```\n" + "\n".join(lines) + "\n```")
+
+    # ── robotics quiz ─────────────────────────────────────────
+    @commands.hybrid_command(name="quiz", description="A 5-question robotics + engineering quiz.")
+    @commands.cooldown(1, 10, commands.BucketType.user)
+    async def quiz(self, ctx):
+        """Five multiple-choice questions; the view tracks your score."""
+        questions = random.sample(QUIZ_BANK, min(5, len(QUIZ_BANK)))
+        if self.quiz_runs is None:
+            self.quiz_runs = {}
+        self.quiz_runs[ctx.author.id] = {"questions": questions, "index": 0, "score": 0}
+        first = questions[0]
+        embed = quiz_embed(first, 1, len(questions), 0)
+        await ctx.send(embed=embed, view=QuizView(self, ctx.author.id))
+
+
+class QuizView(discord.ui.View):
+    """Four-option multiple choice; advances through the quiz and scores it."""
+
+    LETTERS = ("🇦", "🇧", "🇨", "🇩")
+
+    def __init__(self, cog: Fun, user_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user_id = user_id
+
+    def _state(self):
+        return self.cog.quiz_runs.get(self.user_id) or {}
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "🔒 This quiz belongs to someone else — run `/quiz` yourself!",
+                ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="🇦", style=discord.ButtonStyle.secondary, custom_id="quiz:0")
+    async def a(self, interaction, button):
+        await self._answer(interaction, 0)
+
+    @discord.ui.button(label="🇧", style=discord.ButtonStyle.secondary, custom_id="quiz:1")
+    async def b(self, interaction, button):
+        await self._answer(interaction, 1)
+
+    @discord.ui.button(label="🇨", style=discord.ButtonStyle.secondary, custom_id="quiz:2")
+    async def c(self, interaction, button):
+        await self._answer(interaction, 2)
+
+    @discord.ui.button(label="🇩", style=discord.ButtonStyle.secondary, custom_id="quiz:3")
+    async def d(self, interaction, button):
+        await self._answer(interaction, 3)
+
+    async def _answer(self, interaction, choice: int):
+        state = self._state()
+        questions = state.get("questions") or []
+        index = state.get("index", 0)
+        if index >= len(questions):
+            await interaction.response.edit_message(embed=self._summary(state), view=None)
+            return
+        question = questions[index]
+        correct = choice == question["answer"]
+        if correct:
+            state["score"] = state.get("score", 0) + 1
+        state["index"] = index + 1
+        await interaction.response.edit_message(
+            embed=quiz_result_embed(question, choice, state["score"],
+                                    state["index"], len(questions)),
+            view=self)
+        if state["index"] >= len(questions):
+            self.cog.quiz_runs.pop(self.user_id, None)
+            await interaction.followup.send(
+                f"📊 Final score: **{state['score']}/{len(questions)}**", ephemeral=True)
+
+    def _summary(self, state):
+        return discord.Embed(
+            title="🏁 Quiz complete!",
+            description=f"Score: **{state.get('score', 0)}/{len(state.get('questions') or [])}** 🎉",
+            color=discord.Color.green())
+
+
+def quiz_embed(question: dict, number: int, total: int, score: int) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🔬 Robotics Quiz — Q{number}/{total}",
+        description=question["q"],
+        color=discord.Color.blue(),
+    )
+    for i, option in enumerate(question["options"]):
+        embed.add_field(name=f"Option {QuizView.LETTERS[i]}", value=option, inline=True)
+    if score:
+        embed.set_footer(text=f"Score: {score}")
+    return embed
+
+
+def quiz_result_embed(question: dict, choice: int, score: int, number: int,
+                     total: int) -> discord.Embed:
+    correct = choice == question["answer"]
+    embed = discord.Embed(
+        title=f"{'✅ Correct!' if correct else '❌ Not quite.'}",
+        description=f"**{question['q']}**\n\n"
+                    f"{QuizView.LETTERS[choice]} {question['options'][choice]} "
+                    f"{'✔️' if correct else '✘'}\n"
+                    f"*{question.get('explain', '')}*",
+        color=discord.Color.green() if correct else discord.Color.red(),
+    )
+    if number < total:
+        embed.set_footer(text=f"Score: {score} · next question coming up…")
+    return embed
+
+
+QUIZ_BANK = [
+    {
+        "q": "A PID controller has three terms. What does 'D' stand for?",
+        "options": ["Damping", "Derivative", "Delay", "Distance"],
+        "answer": 1,
+        "explain": "Derivative — it anticipates the error's rate of change to dampen overshoot.",
+    },
+    {
+        "q": "Which sensor would you use to measure how far the robot is from a wall?",
+        "options": ["Gyroscope", "Ultrasonic sensor", "Thermistor", "Encoder"],
+        "answer": 1,
+        "explain": "Ultrasonic sensors measure distance via sound-wave time-of-flight.",
+    },
+    {
+        "q": "In a DC motor, what does an H-bridge do?",
+        "options": ["Changes the motor's speed", "Reverses the motor's direction",
+                    "Cools the motor", "Amplifies voltage"],
+        "answer": 1,
+        "explain": "An H-bridge switches the polarity of the supply, reversing rotation.",
+    },
+    {
+        "q": "What unit is rotational speed measured in?",
+        "options": ["RPM", "Volts", "Ohms", "Hertz"],
+        "answer": 0,
+        "explain": "RPM = revolutions per minute.",
+    },
+    {
+        "q": "Which protocol is commonly used to daisy-chain many servos?",
+        "options": ["I2C", "PWM directly", "UART only", "SPI only"],
+        "answer": 0,
+        "explain": "I2C uses addressable buses so many devices share two wires.",
+    },
+    {
+        "q": "What does 'GPIO' stand for?",
+        "options": ["General Purpose Input/Output", "Great Power In One",
+                    "General Processing Input Only", "Giga-Power I/O"],
+        "answer": 0,
+        "explain": "GPIO pins can be configured as inputs or outputs.",
+    },
+    {
+        "q": "A gear ratio of 3:1 (driver:driven) gives the output what?",
+        "options": ["3× speed, ⅓ torque", "⅓ speed, 3× torque",
+                    "Same speed, 3× torque", "3× speed and torque"],
+        "answer": 1,
+        "explain": "Reduction gearing trades speed for torque.",
+    },
+    {
+        "q": "Which of these is a brushless motor controller?",
+        "options": ["ESC", "LDR", "NPN transistor", "Capacitor"],
+        "answer": 0,
+        "explain": "ESC — Electronic Speed Controller — drives brushless motors.",
+    },
+    {
+        "q": "What signal does an encoder output?",
+        "options": ["Pulses proportional to rotation", "Analog voltage only",
+                    "Radio waves", "A PID value"],
+        "answer": 0,
+        "explain": "Encoders emit pulses that count rotation or position.",
+    },
+    {
+        "q": "Voltage × Current = ?",
+        "options": ["Resistance", "Power", "Charge", "Torque"],
+        "answer": 1,
+        "explain": "P = V × I, measured in watts.",
+    },
+]
 
 
 async def setup(bot):

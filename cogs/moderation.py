@@ -345,6 +345,49 @@ class Moderation(commands.Cog):
         await self._log(ctx, "setlead", ctx.author,
                         f"role={role.name} granted={len(granted)} revoked={len(revoked)}")
 
+    # ── channel controls ───────────────────────────────────────
+    @commands.hybrid_command(name="slowmode", description="Set the channel slowmode (seconds).")
+    @commands.guild_only()
+    @mod_perms(manage_channels=True)
+    async def slowmode(self, ctx, seconds: int, channel: discord.TextChannel = None):
+        channel = channel or ctx.channel
+        delay = max(0, min(int(seconds), 21600))
+        try:
+            await channel.edit(slowmode_delay=delay)
+        except discord.Forbidden:
+            await ctx.send("⛔ I need *Manage Channels* to change slowmode.")
+            return
+        if delay:
+            await ctx.send(f"🐌 Slowmode in {channel.mention} set to **{delay}s**.")
+        else:
+            await ctx.send(f"🐌 Slowmode removed in {channel.mention}.")
+
+    @commands.hybrid_command(name="lock", description="Lock a channel (members can't send).")
+    @commands.guild_only()
+    @mod_perms(manage_channels=True)
+    async def lock(self, ctx, channel: discord.TextChannel = None):
+        await self._set_lock(ctx, channel or ctx.channel, locked=True)
+
+    @commands.hybrid_command(name="unlock", description="Unlock a channel.")
+    @commands.guild_only()
+    @mod_perms(manage_channels=True)
+    async def unlock(self, ctx, channel: discord.TextChannel = None):
+        await self._set_lock(ctx, channel or ctx.channel, locked=False)
+
+    async def _set_lock(self, ctx, channel: discord.TextChannel, *, locked: bool):
+        try:
+            await channel.set_permissions(
+                ctx.guild.default_role,
+                send_messages=False if locked else None,
+                reason=f"{'lock' if locked else 'unlock'} by {ctx.author.name}",
+            )
+        except discord.Forbidden:
+            await ctx.send("⛔ I need *Manage Channels* to change permissions there.")
+            return
+        emoji = "🔒" if locked else "🔓"
+        state = "locked" if locked else "unlocked"
+        await ctx.send(f"{emoji} {channel.mention} is now **{state}**.")
+
     # ── modlog ─────────────────────────────────────────────────
     @commands.hybrid_command(name="modlog", description="Show recent moderation actions.")
     @mod_perms(moderate_members=True)
