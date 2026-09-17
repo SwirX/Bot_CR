@@ -37,6 +37,8 @@ class Stats(commands.Cog):
         self.message_deltas = {}         # user_id -> messages since last flush
         self.voice_seconds = {}          # user_id -> seconds since last flush
         self.voice_join = {}             # user_id -> monotonic timestamp of join
+        self.voice_credited = {}         # user_id -> seconds already sent to the store
+        self.voice_credited_stage = {}   # next credited values, committed only on successful flush
 
     # ── events ─────────────────────────────────────────────────
     @commands.Cog.listener()
@@ -52,14 +54,27 @@ class Stats(commands.Cog):
 
         # Close the previous segment when the channel changed or the user left.
         if before.channel != after.channel and member.id in self.voice_join:
-            start = self.voice_join.pop(member.id)
-            elapsed = now - start
-            self.total_voice_seconds += elapsed
-            self.voice_seconds[member.id] = self.voice_seconds.get(member.id, 0.0) + elapsed
+            self._close_voice_segment(member.id, now)
 
         # Open a new segment whenever the user is in a voice channel.
         if after.channel is not None and member.id not in self.voice_join:
             self.voice_join[member.id] = now
+
+    def _close_voice_segment(self, user_id: int, now: float) -> None:
+        """Close a session and add the *unflushed* remainder to the totals.
+
+        ``voice_credited`` tracks how many of this session's seconds have
+        already been persisted by earlier flushes, so closing a session never
+        double-counts or drops previously flushed time.
+        """
+        start = self.voice_join.pop(user_id, None)
+        if start is None:
+            return
+        credited = self.voice_credited.pop(user_id, 0.0)
+        self.voice_credited_stage.pop(user_id, None)
+        delta = (now - start) - credited
+        self.total_voice_seconds += delta
+        self.voice_seconds[user_id] = self.voice_seconds.get(user_id, 0.0) + delta
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -94,10 +109,7 @@ class Stats(commands.Cog):
                     self.voice_join[user_id] = now
         # Close sessions whose members left while we were away/offline.
         for uid in [uid for uid in self.voice_join if uid not in still_in_voice]:
-            start = self.voice_join.pop(uid)
-            elapsed = now - start
-            self.total_voice_seconds += elapsed
-            self.voice_seconds[uid] = self.voice_seconds.get(uid, 0.0) + elapsed
+            self._close_voice_segment(uid, now)
 
     # ── flushing ───────────────────────────────────────────────
     @tasks.loop(seconds=config.DASHBOARD_REFRESH_SECONDS)
@@ -114,8 +126,27 @@ class Stats(commands.Cog):
                 await store.bump_counters(messages=messages, voice_seconds=voice_seconds)
         except StoreError as exc:
             LOG.error("Stats flush failed: %s", exc)
+            return
+        # The store now holds every second counted so far — commit the open
+        # sessions' credited baseline so the next flush only sends the delta.
+        # Stale uids (closed mid-flush) are dropped so a later rejoin starts
+        # from a clean slate.
+        for uid, dur in self.voice_credited_stage.items():
+            if uid in self.voice_join:
+                self.voice_credited[uid] = dur
+        self.voice_credited_stage.clear()
 
     def _drain(self):
+        now = time.monotonic()
+        # Persist open sessions incrementally: queue the seconds accumulated
+        # since the last flush (deltas), staged so a failed store write never
+        # advances the credited baseline.
+        for uid, start in self.voice_join.items():
+            dur = now - start
+            delta = dur - self.voice_credited.get(uid, 0.0)
+            self.total_voice_seconds += delta
+            self.voice_seconds[uid] = self.voice_seconds.get(uid, 0.0) + delta
+            self.voice_credited_stage[uid] = dur
         activity = {}
         for uid, n in self.message_deltas.items():
             activity[uid] = {"messages": n}
@@ -139,11 +170,11 @@ class Stats(commands.Cog):
         await ctx.send(f"Total messages sent in the server: {total}")
 
     async def view_total_voice_seconds(self) -> float:
-        """Persisted total + pending closed segments + live open sessions.
+        """Persisted total + pending closed segments + unflushed open seconds.
 
         The dashboard renders the same number so the board and the command
-        never disagree. Open sessions are included so active voice channels
-        show progress immediately instead of waiting for the next flush.
+        never disagree. Open sessions are counted as ``now - start - credited``
+        so already-flushed seconds are never added twice.
         """
         try:
             counters = await store.get_counters()
@@ -152,13 +183,16 @@ class Stats(commands.Cog):
         return (
             float(counters.get("total_voice_seconds", 0.0))
             + self.total_voice_seconds
-            + self._open_voice_seconds()
+            + self._open_unflushed_seconds()
         )
 
-    def _open_voice_seconds(self) -> float:
-        """Live seconds from every session currently open in a voice channel."""
+    def _open_unflushed_seconds(self) -> float:
+        """Live, not-yet-flushed seconds of every open voice session."""
         now = time.monotonic()
-        return sum(now - start for start in self.voice_join.values())
+        return sum(
+            (now - start) - self.voice_credited.get(uid, 0.0)
+            for uid, start in self.voice_join.items()
+        )
 
     @commands.hybrid_command(name="total_voice_time", description="Total voice time spent in the server.")
     async def total_voice_time(self, ctx):
