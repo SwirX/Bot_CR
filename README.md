@@ -95,11 +95,14 @@ command works as both `!prefix` and `/slash`.
 
 ## ⚡ Commands
 
-All commands are hybrid (prefix **and** slash). `/help` / `!help` lists them.
+All commands are hybrid (prefix **and** slash). `/help` / `!help` opens the
+interactive menu — **one button per section** (General, Fun, Entertainment,
+Cell Management, Events & Meetings, Competitions, Polls, Members & Stats,
+Moderation & Rules, Server Ops), with General front and centre.
 
 | Command | Who | What it does |
 |---|---|---|
-| `help` | everyone | Custom help, grouped by cog |
+| `help` | everyone | Interactive help with section buttons, grouped by topic |
 | `hello`, `ping` | everyone | Hello / latency check |
 | `rank [member]` | everyone | Level, XP and progress bar |
 | `leaderboard` | everyone | Top 10 by XP |
