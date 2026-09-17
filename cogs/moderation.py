@@ -6,6 +6,7 @@ from discord.ext import commands
 
 from data.store import store
 from data.store import StoreError
+from cogs.onboarding import cursive_nickname
 
 LOG = logging.getLogger("bot.moderation")
 
@@ -110,11 +111,9 @@ class Moderation(commands.Cog):
             return
         await ctx.send(f"🔓 Unbanned <@{user_id}> — {reason}")
 
-    # ── timeout ────────────────────────────────────────────────
-    @commands.hybrid_command(name="timeout", description="Timeout a member (minutes).")
-    @commands.has_permissions(moderate_members=True)
-    @commands.bot_has_permissions(moderate_members=True)
-    async def timeout(self, ctx, member: discord.Member, minutes: int, *, reason: str = "No reason provided"):
+    # ── timeout / mute (shared core) ──────────────────────────
+    async def _apply_timeout(self, ctx, member, minutes, reason, action, label):
+        """Core timeout/mute — permission-checked, capped, modlog-backed."""
         if not await self._can_target(ctx, member):
             return
         minutes = max(1, min(minutes, 10080))  # Discord caps timeouts at 28 days
@@ -124,13 +123,11 @@ class Moderation(commands.Cog):
         except discord.Forbidden:
             await ctx.send("⛔ I don't have permission to timeout that member.")
             return
-        await ctx.send(f"🔇 Timed out **{member.display_name}** for {minutes} min — {reason}")
-        await self._log(ctx, "timeout", member, reason)
+        await ctx.send(f"🔇 {label} **{member.display_name}** for {minutes} min — {reason}")
+        await self._log(ctx, action, member, reason)
 
-    @commands.hybrid_command(name="untimeout", description="Remove a member's timeout.")
-    @commands.has_permissions(moderate_members=True)
-    @commands.bot_has_permissions(moderate_members=True)
-    async def untimeout(self, ctx, member: discord.Member, *, reason: str = "Timeout lifted"):
+    async def _remove_timeout(self, ctx, member, reason, action, label):
+        """Core untimeout/unmute — shares the same guardrails."""
         if not await self._can_target(ctx, member):
             return
         try:
@@ -138,8 +135,35 @@ class Moderation(commands.Cog):
         except discord.Forbidden:
             await ctx.send("⛔ I don't have permission to modify that member's timeout.")
             return
-        await ctx.send(f"🔓 Timeout lifted for **{member.display_name}**")
-        await self._log(ctx, "untimeout", member, reason)
+        await ctx.send(f"{label} for **{member.display_name}**")
+        await self._log(ctx, action, member, reason)
+
+    @commands.hybrid_command(name="timeout", description="Timeout a member (minutes).")
+    @commands.has_permissions(moderate_members=True)
+    @commands.bot_has_permissions(moderate_members=True)
+    async def timeout(self, ctx, member: discord.Member, minutes: int, *, reason: str = "No reason provided"):
+        await self._apply_timeout(ctx, member, minutes, reason, "timeout", "Timed out")
+
+    @commands.hybrid_command(name="untimeout", description="Remove a member's timeout.")
+    @commands.has_permissions(moderate_members=True)
+    @commands.bot_has_permissions(moderate_members=True)
+    async def untimeout(self, ctx, member: discord.Member, *, reason: str = "Timeout lifted"):
+        await self._remove_timeout(ctx, member, reason, "untimeout", "Timeout lifted")
+
+    @commands.hybrid_command(name="mute",
+                             description="Mute a member for N minutes (Discord timeout).")
+    @commands.has_permissions(moderate_members=True)
+    @commands.bot_has_permissions(moderate_members=True)
+    async def mute(self, ctx, member: discord.Member, minutes: int = 60, *,
+                   reason: str = "No reason provided"):
+        await self._apply_timeout(ctx, member, minutes, reason, "mute", "Muted")
+
+    @commands.hybrid_command(name="unmute",
+                             description="Remove a member's mute (timeout).")
+    @commands.has_permissions(moderate_members=True)
+    @commands.bot_has_permissions(moderate_members=True)
+    async def unmute(self, ctx, member: discord.Member, *, reason: str = "Mute lifted"):
+        await self._remove_timeout(ctx, member, reason, "unmute", "Unmuted")
 
     # ── warn ───────────────────────────────────────────────────
     @commands.hybrid_command(name="warn", description="Warn a member (recorded in the modlog).")
@@ -154,6 +178,41 @@ class Moderation(commands.Cog):
             LOG.error("Warn counter update failed: %s", exc)
         await ctx.send(f"⚠️ Warned **{member.display_name}** — {reason}")
         await self._log(ctx, "warn", member, reason)
+
+    # ── fixname ──────────────────────────────────────────────
+    @commands.hybrid_command(name="fixname",
+                             description="Re-apply a member's cursive nickname (from their real name).")
+    @commands.has_permissions(manage_nicknames=True)
+    @commands.bot_has_permissions(manage_nicknames=True)
+    async def fixname(self, ctx, member: discord.Member):
+        """Reset a nickname to the cursive form of the verified real name.
+
+        Uses the real name collected during DM onboarding; falls back to the
+        current display name when there is no stored record (e.g. legacy
+        members), so \"normal\" names get the same cursive treatment.
+        """
+        if member == self.bot.user:
+            await ctx.send("Nice try. I like my name. 🤖")
+            return
+        try:
+            record = await store.get_member(member.id)
+        except StoreError:
+            record = None
+        source = (record or {}).get("real_name") or member.display_name.strip() or member.name
+        nick = cursive_nickname(source)
+        if not nick:
+            await ctx.send("⚠️ Couldn't build a name for that member.")
+            return
+        try:
+            await member.edit(nick=nick, reason=f"fixname by {ctx.author.name}")
+        except discord.Forbidden:
+            await ctx.send("⛔ I need the *Manage Nicknames* permission for that.")
+            return
+        except discord.HTTPException as exc:
+            await ctx.send(f"⚠️ Failed to set the nickname: {exc}")
+            return
+        await ctx.send(f"✏️ Fixed **{member.display_name}** → `{nick}`")
+        await self._log(ctx, "fixname", member, "nickname reset to the cursive real-name form")
 
     # ── modlog ─────────────────────────────────────────────────
     @commands.hybrid_command(name="modlog", description="Show recent moderation actions.")
