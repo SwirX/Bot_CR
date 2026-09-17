@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 import config
 from data.store import store
 from data.store import StoreError
+from cogs._ui import PaginatorView
 
 LOG = logging.getLogger("bot.engagement")
 
@@ -160,14 +161,14 @@ class Engagement(commands.Cog):
         embed.add_field(name="Progress", value=f"{bar}", inline=False)
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="leaderboard", description="Top 10 members by XP.")
+    @commands.hybrid_command(name="leaderboard", description="Server XP leaderboard (paginated).")
     @commands.cooldown(1, 10, commands.BucketType.channel)
     async def leaderboard(self, ctx):
         try:
-            members = await store.list_members(limit=10, order_by="xp")
+            members = await store.list_members(limit=100, order_by="xp")
         except StoreError:
             members = []
-        lines = []
+        rows = []
         for i, record in enumerate(members, start=1):
             uid = int(record.get("user_id") or 0)
             xp = int(record.get("xp", 0)) + self.xp_pending.get(uid, 0)
@@ -176,10 +177,25 @@ class Engagement(commands.Cog):
                 or record.get("username")
                 or (self.bot.get_user(uid).name if self.bot.get_user(uid) else "???")
             )
-            lines.append(f"`{i:>2}.` **{name}** — level {level_from_xp(xp)} ({xp} XP)")
-        if not lines:
-            lines = ["No XP recorded yet — start chatting!"]
-        await ctx.send("🏆 **Leaderboard**\n" + "\n".join(lines))
+            rows.append(f"`{i:>2}.` **{name}** — level {level_from_xp(xp)} ({xp} XP)")
+        if not rows:
+            await ctx.send("🏆 No XP recorded yet — start chatting!")
+            return
+        page_size = 10
+        pages = []
+        total_pages = (len(rows) + page_size - 1) // page_size
+        for p in range(total_pages):
+            embed = discord.Embed(
+                title="🏆 Leaderboard",
+                description="\n".join(rows[p * page_size:(p + 1) * page_size]),
+                color=discord.Color.gold(),
+            )
+            embed.set_footer(text=f"Page {p + 1}/{total_pages}")
+            pages.append(embed)
+        if len(pages) == 1:
+            await ctx.send(embed=pages[0])
+        else:
+            await ctx.send(embed=pages[0], view=PaginatorView(pages))
 
     # ── daily challenge commands ───────────────────────────────
     @commands.hybrid_group(name="challenge", description="Daily challenges.")

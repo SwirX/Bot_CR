@@ -7,6 +7,7 @@ from discord.ext import commands
 from data.store import store
 from data.store import StoreError
 from cogs.onboarding import cursive_nickname
+from cogs._ui import ConfirmView, PaginatorView
 
 LOG = logging.getLogger("bot.moderation")
 
@@ -77,13 +78,22 @@ class Moderation(commands.Cog):
     async def kick(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
         if not await self._can_target(ctx, member):
             return
-        try:
-            await member.kick(reason=f"{ctx.author.name}: {reason}")
-        except discord.Forbidden:
-            await ctx.send("⛔ I don't have permission to kick that member.")
-            return
-        await ctx.send(f"👢 Kicked **{member.display_name}** — {reason}")
-        await self._log(ctx, "kick", member, reason)
+
+        async def do_kick(interaction: discord.Interaction):
+            try:
+                await member.kick(reason=f"{ctx.author.name}: {reason}")
+            except discord.Forbidden:
+                await interaction.followup.send(
+                    "⛔ I don't have permission to kick that member.", ephemeral=True)
+                return
+            except discord.HTTPException as exc:
+                await interaction.followup.send(f"⚠️ Kick failed: {exc}", ephemeral=True)
+                return
+            await interaction.followup.send(f"👢 Kicked **{member.display_name}** — {reason}")
+            await self._log(ctx, "kick", member, reason)
+
+        view = ConfirmView(do_kick)
+        await ctx.send(f"👢 Kick **{member.display_name}**? — {reason}", view=view)
 
     # ── ban / unban ────────────────────────────────────────────
     @commands.hybrid_command(name="ban", description="Ban a member from the server.")
@@ -92,13 +102,22 @@ class Moderation(commands.Cog):
     async def ban(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
         if not await self._can_target(ctx, member):
             return
-        try:
-            await member.ban(reason=f"{ctx.author.name}: {reason}", delete_message_days=0)
-        except discord.Forbidden:
-            await ctx.send("⛔ I don't have permission to ban that member.")
-            return
-        await ctx.send(f"🔨 Banned **{member.display_name}** — {reason}")
-        await self._log(ctx, "ban", member, reason)
+
+        async def do_ban(interaction: discord.Interaction):
+            try:
+                await member.ban(reason=f"{ctx.author.name}: {reason}", delete_message_days=0)
+            except discord.Forbidden:
+                await interaction.followup.send(
+                    "⛔ I don't have permission to ban that member.", ephemeral=True)
+                return
+            except discord.HTTPException as exc:
+                await interaction.followup.send(f"⚠️ Ban failed: {exc}", ephemeral=True)
+                return
+            await interaction.followup.send(f"🔨 Banned **{member.display_name}** — {reason}")
+            await self._log(ctx, "ban", member, reason)
+
+        view = ConfirmView(do_ban)
+        await ctx.send(f"🔨 Ban **{member.display_name}**? — {reason}", view=view)
 
     @commands.hybrid_command(name="unban", description="Unban a user by their ID.")
     @commands.has_permissions(ban_members=True)
@@ -217,8 +236,8 @@ class Moderation(commands.Cog):
     # ── modlog ─────────────────────────────────────────────────
     @commands.hybrid_command(name="modlog", description="Show recent moderation actions.")
     @commands.has_permissions(moderate_members=True)
-    async def modlog(self, ctx, limit: int = 10):
-        limit = max(1, min(limit, 25))
+    async def modlog(self, ctx, limit: int = 50):
+        limit = max(10, min(limit, 100))
         try:
             entries = await store.list_modlog(limit=limit)
         except StoreError as exc:
@@ -234,7 +253,15 @@ class Moderation(commands.Cog):
             mod = e.get("moderator_name") or "staff"
             reason = e.get("reason") or ""
             lines.append(f"`{when}` **{e.get('action', '?')}** {target} — {reason} *(by {mod})*")
-        await ctx.send("🛡️ **Recent moderation actions**\n" + "\n".join(lines))
+        page_size = 10
+        pages = [
+            "🛡️ **Recent moderation actions**\n" + "\n".join(lines[i:i + page_size])
+            for i in range(0, len(lines), page_size)
+        ]
+        if len(pages) == 1:
+            await ctx.send(pages[0])
+        else:
+            await ctx.send(pages[0], view=PaginatorView(pages))
 
 
 async def setup(bot):

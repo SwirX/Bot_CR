@@ -10,6 +10,27 @@ from cogs.stats import ACTIVE_STATUSES, fmt_seconds
 LOG = logging.getLogger("bot.dashboard")
 
 
+class DashboardRefreshView(discord.ui.View):
+    """'Refresh now' button attached to the dashboard embed.
+
+    Persistent (``timeout=None`` + fixed custom_id) so it keeps working on the
+    posted message after a bot restart via ``bot.add_view``.
+    """
+
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="🔄 Refresh now", style=discord.ButtonStyle.primary,
+                       custom_id="dashboard_refresh")
+    async def refresh(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        try:
+            embed = await self.cog.create_dashboard_embed()
+            await interaction.response.edit_message(embed=embed)
+        except discord.HTTPException:
+            pass
+
+
 class DashBoard(commands.Cog):
     """Live server stats embed that reads persisted counters.
 
@@ -21,6 +42,7 @@ class DashBoard(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.dashboard_message = None
+        self.dashboard_view = None
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -41,8 +63,14 @@ class DashBoard(commands.Cog):
                 if msg.author == self.bot.user:
                     self.dashboard_message = msg
                     break
+            # Re-register the persistent refresh button so it works after restarts.
+            self.dashboard_view = DashboardRefreshView(self)
+            self.bot.add_view(self.dashboard_view)
+            embed = await self.create_dashboard_embed()
             if self.dashboard_message is None:
-                self.dashboard_message = await channel.send(embed=await self.create_dashboard_embed())
+                self.dashboard_message = await channel.send(embed=embed, view=self.dashboard_view)
+            else:
+                await self.dashboard_message.edit(embed=embed, view=self.dashboard_view)
             return
 
     async def update_dashboard(self):
@@ -52,7 +80,7 @@ class DashBoard(commands.Cog):
             return
         embed = await self.create_dashboard_embed()
         try:
-            await self.dashboard_message.edit(embed=embed)
+            await self.dashboard_message.edit(embed=embed, view=self.dashboard_view)
         except discord.NotFound:
             self.dashboard_message = None
             await self.setup_dashboard()
