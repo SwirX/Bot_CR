@@ -14,6 +14,7 @@ loop math is unit-testable without a real Discord voice connection.
 import asyncio
 import concurrent.futures
 import logging
+import os
 import re
 import threading
 import time
@@ -41,6 +42,12 @@ LOG = logging.getLogger("bot.music")
 USER_AGENT = "Bot_CR/1.0 (robotics-club Discord bot; contact: server staff)"
 
 URL_RE = re.compile(r"^https?://", re.I)
+
+# YouTube's "Sign in to confirm you're not a bot" block on datacenter IPs.
+_BOT_BLOCKED = re.compile(r"sign in to confirm you.*not a bot", re.I)
+COOKIES_HINT = ("YouTube is bot-flagging this server's network, so it needs "
+                "login cookies before it will stream. Add a cookies.txt for "
+                "youtube.com and set `YT_COOKIES_FILE` — see README for how.")
 
 # ytmusicapi is not thread-safe, and its calls run via asyncio.to_thread.
 _YT_MUSIC: "YTMusic | None" = None
@@ -433,14 +440,32 @@ class Music(commands.Cog):
 
     # ── lookup helpers ──────────────────────────────────────────
     @staticmethod
+    def _ytdl_opts() -> dict:
+        """Base yt-dlp options (+ cookiefile from ``YT_COOKIES_FILE``).
+
+        Env is read lazily so setting ``YT_COOKIES_FILE`` in ``.env`` works
+        without restarting at import time.
+        """
+        opts = dict(YTDL_OPTS)
+        cookies = os.environ.get("YT_COOKIES_FILE")
+        if cookies:
+            opts["cookiefile"] = cookies
+        return opts
+
+    @staticmethod
     def _extract_audio(url: str) -> Track:
         """Blocking yt-dlp stream extraction for a video URL (to_thread)."""
         if yt_dlp is None:
             raise RuntimeError("yt-dlp is not installed")
         if not URL_RE.match(url):
             raise RuntimeError(f"not a resolvable URL: {url!r}")
-        with yt_dlp.YoutubeDL(YTDL_OPTS) as ydl:
-            info = ydl.extract_info(url, download=False)
+        try:
+            with yt_dlp.YoutubeDL(Music._ytdl_opts()) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            if _BOT_BLOCKED.search(str(exc)):
+                raise RuntimeError(COOKIES_HINT) from exc
+            raise
         if info.get("entries"):
             info = info["entries"][0]
         if not info or not info.get("url"):
@@ -575,7 +600,10 @@ class Music(commands.Cog):
                 track = await self._search(query)
             except Exception as exc:
                 LOG.warning("Search failed for %r: %s", query, exc)
-                await ctx.send("⚠️ Couldn't find something playable for that query.")
+                if _BOT_BLOCKED.search(str(exc)) or str(exc) == COOKIES_HINT:
+                    await ctx.send(f"⚠️ {COOKIES_HINT}")
+                else:
+                    await ctx.send("⚠️ Couldn't find something playable for that query.")
                 return
         track.requester_id = ctx.author.id
         started = await player.enqueue(track)
