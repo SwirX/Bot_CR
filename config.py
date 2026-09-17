@@ -50,6 +50,7 @@ CHANNEL_VERIFICATION = _env("CHANNEL_VERIFICATION", "•📑•-verification")
 CHANNEL_ANNOUNCEMENTS = _env("CHANNEL_ANNOUNCEMENTS", "⦿announcements⦿")
 CHANNEL_DASHBOARD = _env("CHANNEL_DASHBOARD", "⦿dashboard⦿")
 CHANNEL_BOTLOG = _env("CHANNEL_BOTLOG", "🤖bot-development")
+CHANNEL_MAIN = _env("CHANNEL_MAIN", "「💬」main-chat")
 
 # ── Role names ─────────────────────────────────────────────────────────
 ROLE_TEMP = _env("ROLE_TEMP", "⛔ | None")
