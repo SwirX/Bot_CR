@@ -41,11 +41,12 @@ command works as both `!prefix` and `/slash`.
 - 🌐 **Public-API commands** — `/weather`, `/define`, `/meme`, `/crypto`,
   `/spacex`, `/github`, `/advice` and `/lyrics`, all keyless, selected from
   openpublicapis.com.
-- 🎵 **Music** — `/play <song>` streams YouTube audio (yt-dlp + ffmpeg) into
-  your voice channel: `/pause`, `/resume`, `/skip` (majority vote — requester
-  and staff skip instantly), `/stop`, `/loop`, `/volume`, `/queue`,
-  `/nowplaying`, plus an interactive panel with pause / vote-skip / loop /
-  stop / lyrics buttons.
+- 🎵 **Music** — `/play <song>` streams YouTube audio (YTMusic search + yt-dlp
+  + ffmpeg) into your voice channel: `/pause`, `/resume`, `/skip` (majority
+  vote — requester and staff skip instantly), `/stop`, `/loop`, `/volume`,
+  `/queue` (plus `/queue auto` to generate a 📻 YTMusic radio queue from the
+  current track), `/nowplaying`, an interactive panel with pause / vote-skip /
+  loop / stop / lyrics buttons, and auto-disconnect after a minute of idle.
 - 🤖 **Private meeting rooms** — `/meeting create @a @b [name]` spins up a
   private VC (auto-deleted when empty), `/meeting end` cleans it up.
 - 🔐 **Club permission scopes** — an authorization layer instead of scattered
@@ -75,13 +76,14 @@ command works as both `!prefix` and `/slash`.
   one source of truth for attendance.
 - 🗳️ **Polls & votes** — `/poll create` (transparent or anonymous,
   single/multiple choice) posts a panel with **one button per option**: tap to
-  vote and the counts go up **live on the message**, including for anonymous
-  polls — anonymity only ever hides *who* voted. `/poll results` (anytime) and
-  `/poll close`. Transparent polls show who voted for what ("who's coming to
-  the competition?"); anonymous polls hash the voter so only counts are ever
-  visible — ideal for secret Chief ballots, with an optional locked-results
-  mode. Every vote carries a timestamp and polls record `created_at` /
-  `closed_at`, all persisted in Appwrite for the dashboard.
+  vote and the count goes up **live on the message**. Transparent polls show
+  the per-option breakdown and who voted for what ("who's coming to the
+  competition?"); anonymous polls hash the voter and show only the aggregate
+  total on the panel, so anonymity hides both *who* voted and *how*, until
+  `/poll close` reveals the final counts. Single-choice polls confirm when a
+  tap **changes** your existing vote, and an optional locked-results mode hides
+  everything until close. Every vote carries a timestamp and polls record
+  `created_at` / `closed_at`, all persisted in Appwrite for the dashboard.
 - 🔔 **Notifications** — `/notifications` toggles task/event/competition/
   announcement preferences (stored per member).
 - 🔬 **Robotics fun** — `/robot` telemetry readout and a multiple-choice
@@ -129,11 +131,12 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `setlead <role> <@members...>` | staff | Replace leadership holders (Lead/VP/President) |
 | `weather <city>`, `define <word>`, `meme` | everyone | Open-Meteo / dictionary / meme |
 | `crypto [coin]`, `spacex`, `github <user>`, `advice` | everyone | Live data APIs |
-| `lyrics <song>` | everyone | LRCLIB lyrics |
+| `lyrics [song]` | everyone | LRCLIB lyrics — omit the song to look up the current track |
 | `play <song>` | everyone | Stream music (joins your voice channel) |
+| `queue [auto]` | everyone | Show the queue, or generate a radio queue from the current track |
 | `pause`, `resume` | everyone | Pause / resume music |
 | `skip` | everyone | Vote to skip (requester/staff: instant) |
-| `stop`, `loop`, `volume <1-100>`, `queue`, `nowplaying` | everyone | Music control |
+| `stop`, `loop`, `volume <1-100>`, `nowplaying` | everyone | Music control |
 | `meeting create <@members...> [name]`, `meeting end` | everyone | Private VC room |
 | `link <club-id> [real-name]`, `unlink` | everyone | Link/unlink your club account |
 | `profile [member]` | everyone | Club profile (respects visibility) |
