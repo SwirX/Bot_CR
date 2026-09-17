@@ -139,6 +139,7 @@ def _poll_embed(poll: dict) -> discord.Embed:
     total = sum(counts)
     closed = bool(poll.get("closed"))
     hidden = bool(poll.get("hide_results")) and not closed
+    anonymous = (poll.get("mode") or "transparent") == "anonymous"
     description = f"`{poll.get('poll_id')}` · {_badges(poll)}"
     if not hidden:
         description += f" · **{total}** vote" + ("" if total == 1 else "s")
@@ -150,11 +151,18 @@ def _poll_embed(poll: dict) -> discord.Embed:
     for i, opt in enumerate(opts):
         if hidden:
             value = "🔒 results hidden until close"
+        elif anonymous and not closed:
+            value = "🔏 per-option counts stay private until close"
         else:
             value = f"👥 {counts[i]} vote" + ("" if counts[i] == 1 else "s")
         embed.add_field(name=f"{i + 1}. {opt}", value=value, inline=False)
     status = "🔒 closed" if closed else "🔓 open"
-    hint = "results hidden" if hidden else "tap a button to vote"
+    if hidden:
+        hint = "results hidden"
+    elif anonymous and not closed:
+        hint = "aggregate total only · per-option hidden"
+    else:
+        hint = "tap a button to vote"
     embed.set_footer(
         text=(f"{status} · {hint} · Results: /poll results {poll.get('poll_id')}")
     )
@@ -279,7 +287,14 @@ class PollVoteView(discord.ui.View):
             prior = [v for v in votes if v.get("v") == vid]
             votes = [v for v in votes if v.get("v") != vid]
             if prior and prior[0].get("i") == idx:
-                msg = f"🗳️ Your vote on **{poll.get('question')}** was removed."
+                msg = (f"🗳️ You already voted **{opts[idx]}** on "
+                       f"**{poll.get('question')}** — that vote was removed.")
+            elif prior:
+                votes.append(_vote_payload(mode, self.poll_id,
+                                           interaction.user.id, idx))
+                old = opts[prior[0].get("i")]
+                msg = (f"🗳️ You already voted **{old}** on **{poll.get('question')}**"
+                       f" — your vote has been **changed** to **{opts[idx]}**.")
             else:
                 votes.append(_vote_payload(mode, self.poll_id,
                                            interaction.user.id, idx))
@@ -456,7 +471,13 @@ class Polls(commands.Cog):
             prior = [v for v in votes if v.get("v") == vid]
             votes = [v for v in votes if v.get("v") != vid]
             if prior and prior[0].get("i") == idx:
-                msg = f"🗳️ Your vote on **{p.get('question')}** was removed."
+                msg = (f"🗳️ You already voted **{opts[idx]}** on "
+                       f"**{p.get('question')}** — that vote was removed.")
+            elif prior:
+                votes.append(_vote_payload(mode, poll_id, ctx.author.id, idx))
+                old = opts[prior[0].get("i")]
+                msg = (f"🗳️ You already voted **{old}** on **{p.get('question')}**"
+                       f" — your vote has been **changed** to **{opts[idx]}**.")
             else:
                 votes.append(_vote_payload(mode, poll_id, ctx.author.id, idx))
                 msg = f"🗳️ You voted **{opts[idx]}** on **{p.get('question')}**."
