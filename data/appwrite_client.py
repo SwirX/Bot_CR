@@ -134,6 +134,28 @@ COLLECTIONS = {
         ],
         [],
     ),
+    "bot_polls": (
+        "Club polls",
+        [
+            {"key": "poll_id", "type": "string", "size": 16, "required": True},
+            {"key": "question", "type": "string", "size": 512, "required": True},
+            # Options are pipe-separated at creation; stored as one string each.
+            {"key": "options", "type": "string", "size": 256, "array": True},
+            # transparent (names visible) | anonymous (hashed voters only).
+            {"key": "mode", "type": "string", "size": 16},
+            # single (one choice, replaceable) | multiple (toggle per option).
+            {"key": "selection", "type": "string", "size": 16},
+            # Hide counts until the poll is closed (secret ballots).
+            {"key": "hide_results", "type": "boolean"},
+            {"key": "closed", "type": "boolean"},
+            {"key": "closed_at", "type": "string", "size": 64},
+            {"key": "created_by", "type": "string", "size": 32},
+            {"key": "created_at", "type": "datetime"},
+            # One JSON string per vote: {"v": id, "i": option idx, "t": iso}.
+            {"key": "votes", "type": "string", "size": 256, "array": True},
+        ],
+        [{"key": "by_created_at", "type": "key", "attributes": ["created_at"]}],
+    ),
 }
 
 

@@ -30,6 +30,7 @@ COLL = {
     "tasks": "bot_tasks",
     "competitions": "bot_competitions",
     "events": "bot_events",
+    "polls": "bot_polls",
 }
 
 
@@ -378,6 +379,33 @@ class Store:
         doc["declined"] = declined
         await self.save_event(slug, doc)
         return label
+
+    # ── polls ─────────────────────────────────────────────────
+    async def list_polls(self, limit: int = 100) -> list[dict]:
+        """All polls, newest first (club-scale fits the 100-doc page limit)."""
+        return await self._list(
+            COLL["polls"],
+            queries=[Query.order_desc("created_at")],
+            limit=limit,
+        )
+
+    async def get_poll(self, poll_id: str) -> dict | None:
+        return await self._get(COLL["polls"], poll_id)
+
+    async def save_poll(self, poll_id: str, payload: dict) -> None:
+        """Full-document upsert (votes included)."""
+        await self._replace(COLL["polls"], poll_id, payload)
+
+    async def next_poll_code(self) -> str:
+        """Next human-friendly poll id, e.g. P-7 (skips existing ids)."""
+        docs = await self.list_polls()
+        used = {str(d.get("poll_id", "")) for d in docs}
+        n = len(used) + 1
+        code = f"P-{n}"
+        while code in used:
+            n += 1
+            code = f"P-{n}"
+        return code
 
 
 store = Store()
