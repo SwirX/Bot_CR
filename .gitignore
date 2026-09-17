@@ -1,0 +1,9 @@
+# Environment & secrets
+.env
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
