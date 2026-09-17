@@ -154,10 +154,24 @@ class Store:
             await self.increment_member(user_id, field, amount)
 
     async def flush_member_activity(self, activity: dict[int, dict]) -> None:
-        """Flush aggregated per-member deltas (one request per active user)."""
+        """Apply aggregated per-member deltas (one request per active user).
+
+        Values are *deltas* — they accumulate via atomic server-side
+        increments so historical totals are never clobbered. Member docs that
+        are missing (legacy users who never onboarded) are bootstrapped with
+        the touched field so the increment can apply.
+        """
         for user_id, delta in activity.items():
+            fields = {k: v for k, v in delta.items() if isinstance(v, (int, float))}
+            if not fields:
+                continue
             try:
-                await self._patch(COLL["members"], str(user_id), delta)
+                for field, amount in fields.items():
+                    if field in ("user_id", "_bootstrap"):
+                        continue
+                    await self.increment_member(
+                        user_id, field, amount, bootstrap={"username": "", field: 0}
+                    )
             except StoreError as exc:
                 LOG.error("Flush failed for member %s: %s", user_id, exc)
 
