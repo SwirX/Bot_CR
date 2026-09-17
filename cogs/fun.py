@@ -3,6 +3,8 @@ import random
 import discord
 from discord.ext import commands
 
+import config
+
 EIGHTBALL_ANSWERS = [
     "It is certain.", "It is decidedly so.", "Without a doubt.", "Yes — definitely.",
     "You may rely on it.", "As I see it, yes.", "Most likely.", "Outlook good.",
@@ -53,6 +55,26 @@ HUGS = [
     "{actor} hugged {target} like they just won a hackathon. 🏆",
     "{actor} wrapped {target} in a group-hug energy. 💞",
     "{actor} gave {target} a robot-arm hug. 🦾",
+]
+
+ROASTS = [
+    "You're like a 404 error — not found in my list of concerns.",
+    "You bring everyone joy... when you leave the room. 😄",
+    "Your brain is the size of a microcontroller with no program loaded.",
+    "You're the reason they put instructions on shampoo bottles.",
+    "I'd roast you, but my circuits can't handle that much cringe.",
+    "You're like a robot without batteries — full of potential, zero output.",
+    "You're the human equivalent of a segfault. 💥",
+]
+
+QUOTES = [
+    "The best way to predict the future is to invent it. — Alan Kay",
+    "First, solve the problem. Then, write the code. — John Johnson",
+    "Innovation distinguishes between a leader and a follower. — Steve Jobs",
+    "Programs must be written for people to read. — Harold Abelson",
+    "Simplicity is the soul of efficiency. — Austin Freeman",
+    "The most disastrous thing that you can ever learn is your first programming language. — Alan Kay",
+    "Feedback is a gift. Even when it's wrapped in an exception. 🎁",
 ]
 
 
@@ -107,6 +129,89 @@ class Fun(commands.Cog):
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def compliment(self, ctx):
         await ctx.send(f"💛 {ctx.author.mention}, {random.choice(COMPLIMENTS)}")
+
+    # ── club website ───────────────────────────────────────────
+    @commands.hybrid_command(name="website", description="The Robotics Club's website.")
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def website(self, ctx):
+        embed = discord.Embed(
+            title="🌐 Robotics Club",
+            description="Projects, teams, events and how to join — all on our site.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="🔗 Website", value=config.WEBSITE_URL, inline=False)
+        embed.set_footer(text="Come check out what we're building!")
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(
+            label="Visit robotics.ma", url=config.WEBSITE_URL,
+            style=discord.ButtonStyle.link,
+        ))
+        await ctx.send(embed=embed, view=view)
+
+    # ── moar fun ───────────────────────────────────────────────
+    @commands.hybrid_command(name="rps", description="Play rock-paper-scissors against the bot.")
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def rps(self, ctx, choice: str):
+        choice = choice.strip().lower()
+        emoji = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
+        if choice not in emoji:
+            await ctx.send("⚠️ Pick `rock`, `paper` or `scissors`.")
+            return
+        bot_choice = random.choice(list(emoji))
+        beats = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
+        outcome = "It's a tie! 🤝"
+        if beats[choice] == bot_choice:
+            outcome = "You win! 🎉"
+        elif beats[bot_choice] == choice:
+            outcome = "I win! 🤖"
+        await ctx.send(f"{emoji[choice]} vs {emoji[bot_choice]} — {outcome}")
+
+    @commands.hybrid_command(name="ship", description="Ship two members with a compatibility score.")
+    @commands.cooldown(1, 5, commands.BucketType.user)
+    async def ship(self, ctx, first: discord.Member, second: discord.Member):
+        score = random.randint(1, 100)
+        heart = "❤️" * max(1, score // 20)
+        mood = "💔" if score < 40 else ("💕" if score < 75 else "💘")
+        await ctx.send(
+            f"{mood} **{first.display_name}** x **{second.display_name}** — "
+            f"{score}% compatible {heart}"
+        )
+
+    @commands.hybrid_command(name="choose", description="The bot picks one of your options.")
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def choose(self, ctx, options: str):
+        choices = [option for option in options.replace(",", " ").split() if option.strip()]
+        if not choices:
+            await ctx.send("⚠️ Give me some options: `!choose pizza sushi tacos`")
+            return
+        await ctx.send(f"🧠 I choose: **{random.choice(choices)}**")
+
+    @commands.hybrid_command(name="reverse", description="Reverse your text.")
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def reverse(self, ctx, *, text: str):
+        await ctx.send(f"↩️ {text[::-1]}")
+
+    @commands.hybrid_command(name="clap", description="👏 Emphasis 👏 on 👏 every 👏 word.")
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def clap(self, ctx, *, text: str):
+        words = text.split()
+        if not words:
+            await ctx.send("⚠️ Give me a phrase to clapify.")
+            return
+        await ctx.send("👏 " + " 👏 ".join(words) + " 👏")
+
+    @commands.hybrid_command(name="roast", description="Roast someone (playfully).")
+    @commands.cooldown(1, 5, commands.BucketType.user)
+    async def roast(self, ctx, member: discord.Member):
+        if member == self.bot.user:
+            await ctx.send("I'm immune to roasts. 🤖🔥")
+            return
+        await ctx.send(f"{member.mention}, {random.choice(ROASTS)}")
+
+    @commands.hybrid_command(name="quote", description="A random tech/robotics quote.")
+    @commands.cooldown(1, 5, commands.BucketType.user)
+    async def quote(self, ctx):
+        await ctx.send(f"💬 {random.choice(QUOTES)}")
 
 
 async def setup(bot):
