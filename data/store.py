@@ -139,23 +139,49 @@ class Store:
         """Atomic server-side increment of one numeric member field.
 
         If the member doc is missing and ``bootstrap`` is provided, the doc is
-        created first (with that data) so the increment can apply.
+        created first (with that data) so the increment can apply. Deltas must
+        be positive — Appwrite rejects zero/negative increments — and a doc
+        whose field is null (legacy/dashboard-created) is normalised to 0
+        before the increment so the delta still lands.
         """
+        if not isinstance(amount, (int, float)) or amount <= 0:
+            return
         db, db_id = self._raw()
-        try:
-            await asyncio.to_thread(
-                db.increment_document_attribute, db_id, COLL["members"], str(user_id), field, amount
-            )
-        except AppwriteException as exc:
-            if not is_missing(exc):
-                raise StoreError(f"increment {field} for {user_id}: {exc}") from exc
-            if bootstrap is None:
-                raise StoreError(f"increment {field} for {user_id}: member doc missing") from exc
-            base = dict(bootstrap)
-            base["user_id"] = str(user_id)
-            base.setdefault(field, 0)
-            await self._patch(COLL["members"], str(user_id), base)
-            await self.increment_member(user_id, field, amount)
+        doc_id = str(user_id)
+
+        async def _run() -> AppwriteException | None:
+            try:
+                await asyncio.to_thread(
+                    db.increment_document_attribute,
+                    db_id, COLL["members"], doc_id, field, amount,
+                )
+                return None
+            except AppwriteException as exc:
+                return exc
+
+        exc = await _run()
+        if exc is None:
+            return
+        if "not a number" in str(exc):
+            # Doc exists but the field is null/empty — normalise to 0 once,
+            # then apply the delta.
+            await self._patch(COLL["members"], doc_id, {field: 0})
+            exc = await _run()
+            if exc is None:
+                return
+            raise StoreError(f"increment {field} for {user_id}: {exc}") from exc
+        if not is_missing(exc):
+            raise StoreError(f"increment {field} for {user_id}: {exc}") from exc
+        if bootstrap is None:
+            raise StoreError(f"increment {field} for {user_id}: member doc missing") from exc
+        base = dict(bootstrap)
+        base["user_id"] = str(user_id)
+        base.setdefault(field, 0)
+        await self._patch(COLL["members"], doc_id, base)
+        exc = await _run()
+        if exc is None:
+            return
+        raise StoreError(f"increment {field} for {user_id}: {exc}") from exc
 
     async def flush_member_activity(self, activity: dict[int, dict]) -> None:
         """Apply aggregated per-member deltas (one request per active user).
@@ -187,19 +213,41 @@ class Store:
         return (await self._get(COLL["counters"], "global")) or {}
 
     async def bump_counters(self, *, messages: int = 0, voice_seconds: float = 0.0) -> None:
-        """Increment the global counters (atomic) and stamp the flush time."""
+        """Increment the global counters (atomic) and stamp the flush time.
+
+        Only positive deltas are sent: Appwrite rejects zero-valued
+        increments, so a flush with voice time but no messages (or the other
+        way round) must not try to increment the empty counter.
+        """
         db, db_id = self._raw()
         now = _now_iso()
         created = False
         try:
-            await asyncio.to_thread(
-                db.increment_document_attribute, db_id, COLL["counters"], "global",
-                "total_messages", messages
-            )
-            await asyncio.to_thread(
-                db.increment_document_attribute, db_id, COLL["counters"], "global",
-                "total_voice_seconds", round(voice_seconds, 1)
-            )
+            for field, amount in (
+                ("total_messages", messages),
+                ("total_voice_seconds", round(voice_seconds, 1)),
+            ):
+                if not isinstance(amount, (int, float)) or amount <= 0:
+                    continue
+                try:
+                    await asyncio.to_thread(
+                        db.increment_document_attribute,
+                        db_id, COLL["counters"], "global", field, amount,
+                    )
+                except AppwriteException as exc:
+                    if "not a number" in str(exc):
+                        # Counter doc exists but the value is null — normalise
+                        # to 0 and retry once.
+                        await asyncio.to_thread(
+                            db.update_document,
+                            db_id, COLL["counters"], "global", {field: 0},
+                        )
+                        await asyncio.to_thread(
+                            db.increment_document_attribute,
+                            db_id, COLL["counters"], "global", field, amount,
+                        )
+                    else:
+                        raise
         except AppwriteException as exc:
             if not is_missing(exc):
                 raise StoreError(f"bump counters: {exc}") from exc
