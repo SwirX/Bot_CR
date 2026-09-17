@@ -1,0 +1,1 @@
+"""Bot_CR data layer: Appwrite connectivity + async store."""
