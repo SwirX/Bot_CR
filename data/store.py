@@ -27,6 +27,9 @@ COLL = {
     "challenges": "bot_challenges",
     "modlog": "bot_modlog",
     "settings": "bot_settings",
+    "tasks": "bot_tasks",
+    "competitions": "bot_competitions",
+    "events": "bot_events",
 }
 
 
@@ -283,6 +286,98 @@ class Store:
 
     async def set_setting(self, key: str, value: str) -> None:
         await self._replace(COLL["settings"], key, {"value": value})
+
+    # ── tasks ──────────────────────────────────────────────────
+    async def list_tasks(self) -> list[dict]:
+        """All tasks (club-scale lists fit Appwrite's 100-doc page limit)."""
+        return await self._list(COLL["tasks"], limit=100)
+
+    async def get_task(self, task_id: str) -> dict | None:
+        return await self._get(COLL["tasks"], task_id)
+
+    async def save_task(self, payload: dict) -> None:
+        task_id = payload.get("task_id")
+        if not task_id:
+            raise StoreError("save_task requires a task_id")
+        await self._replace(COLL["tasks"], task_id, payload)
+
+    async def next_task_code(self) -> str:
+        """Next human-friendly task code, e.g. T-13 (skips existing codes)."""
+        docs = await self.list_tasks()
+        used = {str(d.get("task_id", "")) for d in docs}
+        n = len(used) + 1
+        code = f"T-{n}"
+        while code in used:
+            n += 1
+            code = f"T-{n}"
+        return code
+
+    # ── competitions ───────────────────────────────────────────
+    async def list_competitions(self) -> list[dict]:
+        return await self._list(COLL["competitions"], limit=100)
+
+    async def get_competition(self, slug: str) -> dict | None:
+        return await self._get(COLL["competitions"], slug)
+
+    async def save_competition(self, slug: str, payload: dict) -> None:
+        await self._replace(COLL["competitions"], slug, payload)
+
+    async def set_registration(self, slug: str, user_id: int, registered: bool
+                               ) -> tuple[bool, str]:
+        """Register/unregister for a competition. Returns (ok, message)."""
+        doc = await self.get_competition(slug)
+        if not doc:
+            raise StoreError("Competition not found")
+        regs = list(doc.get("registered") or [])
+        sid = str(user_id)
+        if registered:
+            if sid in regs:
+                return False, "already registered"
+            capacity = doc.get("capacity")
+            if capacity and len(regs) >= int(capacity):
+                return False, "full"
+            regs.append(sid)
+            action = "registered"
+        else:
+            if sid not in regs:
+                return False, "not registered"
+            regs.remove(sid)
+            action = "registration removed"
+        doc["registered"] = regs
+        await self.save_competition(slug, doc)
+        return True, action
+
+    # ── events ─────────────────────────────────────────────────
+    async def list_events(self) -> list[dict]:
+        return await self._list(COLL["events"], limit=100)
+
+    async def get_event(self, slug: str) -> dict | None:
+        return await self._get(COLL["events"], slug)
+
+    async def save_event(self, slug: str, payload: dict) -> None:
+        await self._replace(COLL["events"], slug, payload)
+
+    async def set_rsvp(self, slug: str, user_id: int, attending: bool | None
+                       ) -> str:
+        """Set attendance (True/False) or clear it (None). Returns a label."""
+        doc = await self.get_event(slug)
+        if not doc:
+            raise StoreError("Event not found")
+        sid = str(user_id)
+        attendees = [x for x in (doc.get("attendees") or []) if x != sid]
+        declined = [x for x in (doc.get("declined") or []) if x != sid]
+        if attending is True:
+            attendees.append(sid)
+            label = "✅ marked as attending"
+        elif attending is False:
+            declined.append(sid)
+            label = "❌ marked as not attending"
+        else:
+            label = "❔ RSVP cleared"
+        doc["attendees"] = attendees
+        doc["declined"] = declined
+        await self.save_event(slug, doc)
+        return label
 
 
 store = Store()

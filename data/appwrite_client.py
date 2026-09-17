@@ -35,6 +35,15 @@ COLLECTIONS = {
             {"key": "voice_seconds", "type": "float"},
             {"key": "warnings", "type": "integer"},
             {"key": "last_xp_at", "type": "string", "size": 32},
+            # Linked club account (Discord -> club account -> role -> cell).
+            {"key": "club_id", "type": "string", "size": 64},
+            {"key": "club_role", "type": "string", "size": 32},
+            {"key": "cell", "type": "string", "size": 64},
+            # Notification preferences (1 = enabled).
+            {"key": "notify_tasks", "type": "boolean"},
+            {"key": "notify_events", "type": "boolean"},
+            {"key": "notify_competitions", "type": "boolean"},
+            {"key": "notify_announcements", "type": "boolean"},
         ],
         [
             {"key": "uniq_user", "type": "unique", "attributes": ["user_id"]},
@@ -79,6 +88,50 @@ COLLECTIONS = {
     "bot_settings": (
         "Bot settings",
         [{"key": "value", "type": "string", "size": 4096, "required": True}],
+        [],
+    ),
+    "bot_tasks": (
+        "Club tasks",
+        [
+            {"key": "task_id", "type": "string", "size": 16, "required": True},
+            {"key": "title", "type": "string", "size": 256, "required": True},
+            {"key": "description", "type": "string", "size": 2048},
+            {"key": "assignee", "type": "string", "size": 32},
+            {"key": "cell", "type": "string", "size": 64},
+            {"key": "status", "type": "string", "size": 16},
+            {"key": "priority", "type": "string", "size": 8},
+            {"key": "due", "type": "string", "size": 16},
+            {"key": "created_by", "type": "string", "size": 32},
+            {"key": "created_at", "type": "datetime"},
+        ],
+        [{"key": "by_due", "type": "key", "attributes": ["due"]}],
+    ),
+    "bot_competitions": (
+        "Club competitions",
+        [
+            {"key": "name", "type": "string", "size": 128, "required": True},
+            {"key": "date", "type": "string", "size": 16},
+            {"key": "location", "type": "string", "size": 128},
+            {"key": "capacity", "type": "integer"},
+            {"key": "registered", "type": "string", "array": True},
+            {"key": "description", "type": "string", "size": 2048},
+            {"key": "created_at", "type": "datetime"},
+        ],
+        [],
+    ),
+    "bot_events": (
+        "Club events",
+        [
+            {"key": "title", "type": "string", "size": 128, "required": True},
+            {"key": "date", "type": "string", "size": 16},
+            {"key": "time", "type": "string", "size": 16},
+            {"key": "location", "type": "string", "size": 128},
+            {"key": "description", "type": "string", "size": 2048},
+            {"key": "attendees", "type": "string", "array": True},
+            {"key": "declined", "type": "string", "array": True},
+            {"key": "created_by", "type": "string", "size": 32},
+            {"key": "created_at", "type": "datetime"},
+        ],
         [],
     ),
 }
