@@ -57,6 +57,20 @@ ROLE_TEMP = _env("ROLE_TEMP", "⛔ | None")
 ROLE_VERIFIED = _env("ROLE_VERIFIED", "「📗」Verified")
 ROLE_MEMBER = _env("ROLE_MEMBER", "🌿 | LVL 01+")
 
+# Bot staff roles — holders get full access to every staff command,
+# bypassing guild-permission checks (same as the server owner roll).
+ROLE_ARCHON = _env("ROLE_ARCHON", "Archon")
+ROLE_BOT_DEVELOPER = _env("ROLE_BOT_DEVELOPER", "Bot Developer")
+ROLE_BOT_ADMIN = _env("ROLE_BOT_ADMIN", "Bot Admin")
+
+# Leadership roles — /setlead may replace the holders of these.
+ROLE_PRESIDENT = _env("ROLE_PRESIDENT", "President")
+ROLE_VICE_PRESIDENT = _env("ROLE_VICE_PRESIDENT", "Vice President")
+ROLE_LEAD = _env("ROLE_LEAD", "Lead")
+# Comma-separated allowlist of leader role names for /setlead.
+LEADER_ROLES = [s.strip() for s in _env(
+    "LEADER_ROLES", "Lead,Vice President,President").split(",") if s.strip()]
+
 # ── Behaviour ──────────────────────────────────────────────────────────
 DASHBOARD_REFRESH_SECONDS = _env("DASHBOARD_REFRESH_SECONDS", 60, cast=int)
 XP_COOLDOWN_SECONDS = _env("XP_COOLDOWN_SECONDS", 60, cast=int)

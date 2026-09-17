@@ -4,10 +4,12 @@ from datetime import timedelta
 import discord
 from discord.ext import commands
 
+import config
 from data.store import store
 from data.store import StoreError
 from cogs.onboarding import cursive_nickname
 from cogs._ui import ConfirmView, PaginatorView
+from cogs._perms import mod_perms
 
 LOG = logging.getLogger("bot.moderation")
 
@@ -50,7 +52,7 @@ class Moderation(commands.Cog):
 
     # ── purge (from the legacy suite) ──────────────────────────
     @commands.hybrid_command(name="del", description="Delete the last N messages (1–100).")
-    @commands.has_permissions(manage_messages=True)
+    @mod_perms(manage_messages=True)
     @commands.cooldown(1, 3, commands.BucketType.user)
     async def delete_messages(self, ctx, number: int):
         """Delete the last N messages in this channel plus the command itself."""
@@ -73,8 +75,8 @@ class Moderation(commands.Cog):
 
     # ── kick ───────────────────────────────────────────────────
     @commands.hybrid_command(name="kick", description="Kick a member from the server.")
-    @commands.has_permissions(kick_members=True)
-    @commands.bot_has_permissions(kick_members=True)
+    @mod_perms(kick_members=True)
+    
     async def kick(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
         if not await self._can_target(ctx, member):
             return
@@ -97,8 +99,8 @@ class Moderation(commands.Cog):
 
     # ── ban / unban ────────────────────────────────────────────
     @commands.hybrid_command(name="ban", description="Ban a member from the server.")
-    @commands.has_permissions(ban_members=True)
-    @commands.bot_has_permissions(ban_members=True)
+    @mod_perms(ban_members=True)
+    
     async def ban(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
         if not await self._can_target(ctx, member):
             return
@@ -120,8 +122,8 @@ class Moderation(commands.Cog):
         await ctx.send(f"🔨 Ban **{member.display_name}**? — {reason}", view=view)
 
     @commands.hybrid_command(name="unban", description="Unban a user by their ID.")
-    @commands.has_permissions(ban_members=True)
-    @commands.bot_has_permissions(ban_members=True)
+    @mod_perms(ban_members=True)
+    
     async def unban(self, ctx, user_id: int, *, reason: str = "No reason provided"):
         try:
             await ctx.guild.unban(discord.Object(id=user_id), reason=f"{ctx.author.name}: {reason}")
@@ -158,35 +160,35 @@ class Moderation(commands.Cog):
         await self._log(ctx, action, member, reason)
 
     @commands.hybrid_command(name="timeout", description="Timeout a member (minutes).")
-    @commands.has_permissions(moderate_members=True)
-    @commands.bot_has_permissions(moderate_members=True)
+    @mod_perms(moderate_members=True)
+    
     async def timeout(self, ctx, member: discord.Member, minutes: int, *, reason: str = "No reason provided"):
         await self._apply_timeout(ctx, member, minutes, reason, "timeout", "Timed out")
 
     @commands.hybrid_command(name="untimeout", description="Remove a member's timeout.")
-    @commands.has_permissions(moderate_members=True)
-    @commands.bot_has_permissions(moderate_members=True)
+    @mod_perms(moderate_members=True)
+    
     async def untimeout(self, ctx, member: discord.Member, *, reason: str = "Timeout lifted"):
         await self._remove_timeout(ctx, member, reason, "untimeout", "Timeout lifted")
 
     @commands.hybrid_command(name="mute",
                              description="Mute a member for N minutes (Discord timeout).")
-    @commands.has_permissions(moderate_members=True)
-    @commands.bot_has_permissions(moderate_members=True)
+    @mod_perms(moderate_members=True)
+    
     async def mute(self, ctx, member: discord.Member, minutes: int = 60, *,
                    reason: str = "No reason provided"):
         await self._apply_timeout(ctx, member, minutes, reason, "mute", "Muted")
 
     @commands.hybrid_command(name="unmute",
                              description="Remove a member's mute (timeout).")
-    @commands.has_permissions(moderate_members=True)
-    @commands.bot_has_permissions(moderate_members=True)
+    @mod_perms(moderate_members=True)
+    
     async def unmute(self, ctx, member: discord.Member, *, reason: str = "Mute lifted"):
         await self._remove_timeout(ctx, member, reason, "unmute", "Unmuted")
 
     # ── warn ───────────────────────────────────────────────────
     @commands.hybrid_command(name="warn", description="Warn a member (recorded in the modlog).")
-    @commands.has_permissions(moderate_members=True)
+    @mod_perms(moderate_members=True)
     async def warn(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
         if member.bot:
             await ctx.send("⚠️ I don't track warnings for bots.")
@@ -201,8 +203,8 @@ class Moderation(commands.Cog):
     # ── fixname ──────────────────────────────────────────────
     @commands.hybrid_command(name="fixname",
                              description="Re-apply a member's cursive nickname (from their real name).")
-    @commands.has_permissions(manage_nicknames=True)
-    @commands.bot_has_permissions(manage_nicknames=True)
+    @mod_perms(manage_nicknames=True)
+    
     async def fixname(self, ctx, member: discord.Member):
         """Reset a nickname to the cursive form of the verified real name.
 
@@ -233,9 +235,119 @@ class Moderation(commands.Cog):
         await ctx.send(f"✏️ Fixed **{member.display_name}** → `{nick}`")
         await self._log(ctx, "fixname", member, "nickname reset to the cursive real-name form")
 
+    # ── role management ───────────────────────────────────────
+    async def _check_role(self, ctx, role: discord.Role) -> bool:
+        """Shared guard for role edits: integration roles and hierarchy."""
+        if role.managed:
+            await ctx.send(f"⛔ `{role.name}` is an integration-managed role — I can't assign it.")
+            return False
+        if role >= ctx.guild.me.top_role:
+            await ctx.send("⛔ My top role isn't high enough to manage `" + role.name + "`.")
+            return False
+        return True
+
+    @commands.hybrid_command(name="addrole", description="Give a role to one or more members.")
+    @commands.guild_only()
+    @mod_perms(manage_roles=True)
+    async def addrole(self, ctx, role: discord.Role, members: commands.Greedy[discord.Member]):
+        """Tag the role, then tag who gets it — `!addrole @role @a @b`."""
+        if not await self._check_role(ctx, role):
+            return
+        targets = [m for m in members if not m.bot and m != self.bot.user]
+        if not targets:
+            await ctx.send("⚠️ Tag at least one member to receive the role.")
+            return
+        added = skipped = 0
+        for member in targets:
+            if role in member.roles:
+                skipped += 1
+                continue
+            try:
+                await member.add_roles(role, reason=f"addrole by {ctx.author.name}")
+                added += 1
+            except discord.HTTPException:
+                skipped += 1
+        extra = f" ({skipped} skipped)" if skipped else ""
+        await ctx.send(f"✅ Added {role.mention} to **{added}** member(s){extra}.")
+        if added:
+            await self._log(ctx, "addrole", targets[0], f"role={role.name} members={added}")
+
+    @commands.hybrid_command(name="removerole", description="Remove a role from one or more members.")
+    @commands.guild_only()
+    @mod_perms(manage_roles=True)
+    async def removerole(self, ctx, role: discord.Role, members: commands.Greedy[discord.Member]):
+        """Tag the role, then tag who loses it — `!removerole @role @a @b`."""
+        if not await self._check_role(ctx, role):
+            return
+        targets = [m for m in members if not m.bot and m != self.bot.user]
+        if not targets:
+            await ctx.send("⚠️ Tag at least one member to strip the role from.")
+            return
+        removed = skipped = 0
+        for member in targets:
+            if role not in member.roles:
+                skipped += 1
+                continue
+            try:
+                await member.remove_roles(role, reason=f"removerole by {ctx.author.name}")
+                removed += 1
+            except discord.HTTPException:
+                skipped += 1
+        extra = f" ({skipped} skipped)" if skipped else ""
+        await ctx.send(f"✅ Removed {role.mention} from **{removed}** member(s){extra}.")
+        if removed:
+            await self._log(ctx, "removerole", targets[0], f"role={role.name} members={removed}")
+
+    @commands.hybrid_command(
+        name="setlead",
+        description="Replace all holders of a leadership role with the tagged members.",
+    )
+    @commands.guild_only()
+    @mod_perms(manage_roles=True)
+    async def setlead(self, ctx, role: discord.Role, members: commands.Greedy[discord.Member]):
+        """Set the leadership team: strips the role from everyone, keeps only
+        the members you tag. Restricted to the configured leader roles
+        (config.LEADER_ROLES — Lead / Vice President / President)."""
+        allowed = {name.strip().lower() for name in config.LEADER_ROLES}
+        if role.name.strip().lower() not in allowed:
+            await ctx.send(
+                f"⛔ `{role.name}` isn't a leadership role. Use one of: **{', '.join(config.LEADER_ROLES)}**."
+            )
+            return
+        if not await self._check_role(ctx, role):
+            return
+        targets = [m for m in members if not m.bot and m != self.bot.user]
+        target_ids = {m.id for m in targets}
+        if not targets:
+            await ctx.send("⚠️ Tag at least one member as the new holder(s).")
+            return
+        revoked = []
+        for member in ctx.guild.members:
+            if member.bot or member.id in target_ids or role not in member.roles:
+                continue
+            revoked.append(member.display_name)
+            try:
+                await member.remove_roles(role, reason=f"setlead by {ctx.author.name}")
+            except discord.HTTPException:
+                pass
+        granted = []
+        for member in targets:
+            if role not in member.roles:
+                granted.append(member.display_name)
+                try:
+                    await member.add_roles(role, reason=f"setlead by {ctx.author.name}")
+                except discord.HTTPException:
+                    granted.pop()
+        msg = f"👑 {role.mention} → **{', '.join(granted) if granted else 'no change'}**"
+        if revoked:
+            msg += f"\n↩️ Removed from: {', '.join(revoked)}"
+        await ctx.send(msg)
+        await self._log(ctx, "setlead", ctx.author,
+                        f"role={role.name} granted={len(granted)} revoked={len(revoked)}")
+
     # ── modlog ─────────────────────────────────────────────────
     @commands.hybrid_command(name="modlog", description="Show recent moderation actions.")
-    @commands.has_permissions(moderate_members=True)
+    @mod_perms(moderate_members=True)
     async def modlog(self, ctx, limit: int = 50):
         limit = max(10, min(limit, 100))
         try:
