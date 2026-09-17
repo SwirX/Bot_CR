@@ -2,6 +2,10 @@
 .env
 .env.bak-*
 
+# YouTube login cookies (exported session — treat like a password)
+cookies.txt
+*_cookies.txt
+
 # Python artifacts
 __pycache__/
 *.pyc
