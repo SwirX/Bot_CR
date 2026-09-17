@@ -68,6 +68,14 @@ command works as both `!prefix` and `/slash`.
 - 📅 **Events & attendance** — `/event create` (chiefs+), `/events`, and
   `/event <title>` with ✅/❌/❔ RSVP buttons whose answers land in Appwrite —
   one source of truth for attendance.
+- 🗳️ **Polls & votes** — `/poll create` (transparent or anonymous,
+  single/multiple choice), `/poll vote`, `/poll results` (anytime) and
+  `/poll close`. Transparent polls show who voted for what ("who's coming to
+  the competition?"); anonymous polls hash the voter so counts are all anyone
+  can see and double-votes can still be blocked — ideal for secret Chief
+  ballots, with an optional locked-results mode. Every vote carries a
+  timestamp and polls record `created_at` / `closed_at`, all persisted in
+  Appwrite for the dashboard.
 - 🔔 **Notifications** — `/notifications` toggles task/event/competition/
   announcement preferences (stored per member).
 - 🔬 **Robotics fun** — `/robot` telemetry readout and a multiple-choice
@@ -141,6 +149,11 @@ All commands are hybrid (prefix **and** slash). `/help` / `!help` lists them.
 | `events` | everyone | Upcoming events |
 | `event <title>` | everyone | Details + ✅/❌/❔ RSVP buttons |
 | `event create <title> [date] [time] [location]` | chiefs+ | Schedule an event |
+| `poll` / `poll list` | everyone | Overview of every poll |
+| `poll create <question> <options> [mode] [selection] [hide_results]` | everyone | Create a poll (`\|`-separated options; transparent or anonymous, single or multiple) |
+| `poll vote <id> <option>` | everyone | Vote (number or exact text; same again = undo) |
+| `poll results <id>` | everyone | Live results — voters named for transparent, counts only for anonymous |
+| `poll close <id>` | staff / creator | Stop voting and stamp `closed_at` |
 | `robot` | everyone | Playful telemetry readout |
 | `quiz` | everyone | 5-question robotics quiz |
 | `slowmode <seconds>`, `lock`, `unlock` | staff | Channel controls |
@@ -162,6 +175,7 @@ in-memory counters that vanish on restart:
 | `bot_tasks` | tasks: id (`T-1`), title, description, assignee, cell, status, priority, due date, created by/at |
 | `bot_competitions` | competitions: name, date, location, capacity, registered (user-id array) |
 | `bot_events` | events: title, date/time/location, description, attendees + declined arrays |
+| `bot_polls` | polls: id (`P-1`), question, options (array), mode (transparent/anonymous), selection (single/multiple), hide_results, closed/closed_at, created_by/created_at, votes (JSON per vote: voter id/hash, option index, timestamp) |
 
 The bot connects with a server-side API key (no user auth), and the schema
 (collections, attributes, indexes) is provisioned **idempotently on boot** or
@@ -223,7 +237,7 @@ BOT.py                    launcher — logging, store init, cog discovery, tree 
 config.py                 every knob is an env var
 data/                     Appwrite connectivity + async store
   appwrite_client.py      schema (collections/attributes/indexes) + bootstrap
-  store.py                async typed wrappers (members, counters, challenges, modlog, settings, tasks, competitions, events)
+  store.py                async typed wrappers (members, counters, challenges, modlog, settings, tasks, competitions, events, polls)
 cogs/                     one file per feature; auto-discovered
   onboarding.py           join → name modal → cursive nickname → roles → birthday
   birthday_tracker.py     daily + immediate birthday announcements (store-backed)
@@ -240,6 +254,7 @@ cogs/                     one file per feature; auto-discovered
   tasks.py                task CRUD + lists (priority/due/cell)
   competitions.py         competitions + registration
   events.py               events + RSVP attendance
+  polls.py                polls + votes (transparent / anonymous, Appwrite-backed)
   _dates.py               shared date parsing/formatting helpers
 scripts/
   bootstrap_appwrite.py   idempotent schema provisioning
