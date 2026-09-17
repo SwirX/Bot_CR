@@ -22,7 +22,7 @@ class HelpView(discord.ui.View):
         ("Polls", "🗳️", ("Polls",)),
         ("Members & Stats", "👥", ("Members", "Stats", "BirthdayTracker", "Onboarding")),
         ("Moderation & Rules", "🛡️", ("Moderation", "Rules")),
-        ("Server Ops", "⚙️", ("DashBoard", "Apis", "Tasks", "Welcome", "Goodbye")),
+        ("Server Ops", "⚙️", ("DashBoard", "Apis", "Tasks", "Welcome", "Goodbye", "BotAdmin")),
     )
 
     def __init__(self, bot, *, timeout: float = 180.0):
