@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands, tasks
 
 import config
-from data import store
+from data.store import store
 from cogs.stats import ACTIVE_STATUSES, fmt_seconds
 
 LOG = logging.getLogger("bot.dashboard")

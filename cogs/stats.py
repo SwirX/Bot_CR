@@ -5,7 +5,7 @@ import discord
 from discord.ext import commands, tasks
 
 import config
-from data import store
+from data.store import StoreError, store
 
 LOG = logging.getLogger("bot.stats")
 
@@ -81,7 +81,7 @@ class Stats(commands.Cog):
                 await store.flush_member_activity(activity)
             if messages or voice_seconds:
                 await store.bump_counters(messages=messages, voice_seconds=voice_seconds)
-        except store.StoreError as exc:
+        except StoreError as exc:
             LOG.error("Stats flush failed: %s", exc)
 
     def _drain(self):
@@ -102,7 +102,7 @@ class Stats(commands.Cog):
         """Persisted total plus anything still pending in memory."""
         try:
             counters = await store.get_counters()
-        except store.StoreError:
+        except StoreError:
             counters = {}
         total = int(counters.get("total_messages", 0)) + self.total_messages
         await ctx.send(f"Total messages sent in the server: {total}")
@@ -111,7 +111,7 @@ class Stats(commands.Cog):
     async def total_voice_time(self, ctx):
         try:
             counters = await store.get_counters()
-        except store.StoreError:
+        except StoreError:
             counters = {}
         total = float(counters.get("total_voice_seconds", 0.0)) + self.total_voice_seconds
         await ctx.send(f"Total voice time in the server: {fmt_seconds(total)}")

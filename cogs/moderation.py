@@ -4,7 +4,7 @@ from datetime import timedelta
 import discord
 from discord.ext import commands
 
-from data import store
+from data.store import store
 from data.store import StoreError
 
 LOG = logging.getLogger("bot.moderation")

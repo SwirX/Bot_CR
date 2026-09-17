@@ -9,7 +9,7 @@ import discord
 from discord.ext import commands, tasks
 
 import config
-from data import store
+from data.store import store
 from data.store import StoreError
 
 LOG = logging.getLogger("bot.engagement")
