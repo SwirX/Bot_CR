@@ -67,7 +67,11 @@ class DashBoard(commands.Cog):
 
         counters = await store.get_counters()
         total_messages = int(counters.get("total_messages", 0))
-        total_voice_time = fmt_seconds(float(counters.get("total_voice_seconds", 0.0)))
+        stats_cog = self.bot.get_cog("Stats")
+        if stats_cog is not None:
+            total_voice_time = fmt_seconds(await stats_cog.view_total_voice_seconds())
+        else:
+            total_voice_time = fmt_seconds(float(counters.get("total_voice_seconds", 0.0)))
 
         embed = discord.Embed(title="📊  Server Dashboard", color=discord.Color.blue())
         embed.add_field(

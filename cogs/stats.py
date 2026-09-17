@@ -64,9 +64,40 @@ class Stats(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         await self.bot.wait_until_ready()
+        # Adopt voice sessions that were open before we connected (and close
+        # stale ones from a previous connection). Without this, members who
+        # are already in a voice channel at startup never get a join event
+        # and their voice time stays 00:00:00.
+        self._sync_voice_sessions()
         # Reconnect guard: the loop may already be running across reconnects.
         if not self.flush_loop.is_running():
             self.flush_loop.start()
+
+    def _sync_voice_sessions(self):
+        """Reconcile in-memory sessions against the authoritative voice states.
+
+        ``on_voice_state_update`` only fires on *changes*, so anyone sitting
+        in a voice channel when the bot connects never triggers a join event
+        and would show 00:00:00 forever. The ready snapshot
+        (``guild.voice_states``) is authoritative, so adopt those sessions and
+        close off any leftovers whose members left during a disconnect (their
+        time is credited up to the moment we found out, not the next join).
+        """
+        now = time.monotonic()
+        still_in_voice = set()
+        for guild in getattr(self.bot, "guilds", []):
+            for user_id, state in getattr(guild, "voice_states", {}).items():
+                if state.channel is None:
+                    continue
+                still_in_voice.add(user_id)
+                if user_id not in self.voice_join:
+                    self.voice_join[user_id] = now
+        # Close sessions whose members left while we were away/offline.
+        for uid in [uid for uid in self.voice_join if uid not in still_in_voice]:
+            start = self.voice_join.pop(uid)
+            elapsed = now - start
+            self.total_voice_seconds += elapsed
+            self.voice_seconds[uid] = self.voice_seconds.get(uid, 0.0) + elapsed
 
     # ── flushing ───────────────────────────────────────────────
     @tasks.loop(seconds=config.DASHBOARD_REFRESH_SECONDS)
@@ -107,13 +138,32 @@ class Stats(commands.Cog):
         total = int(counters.get("total_messages", 0)) + self.total_messages
         await ctx.send(f"Total messages sent in the server: {total}")
 
-    @commands.hybrid_command(name="total_voice_time", description="Total voice time spent in the server.")
-    async def total_voice_time(self, ctx):
+    async def view_total_voice_seconds(self) -> float:
+        """Persisted total + pending closed segments + live open sessions.
+
+        The dashboard renders the same number so the board and the command
+        never disagree. Open sessions are included so active voice channels
+        show progress immediately instead of waiting for the next flush.
+        """
         try:
             counters = await store.get_counters()
         except StoreError:
             counters = {}
-        total = float(counters.get("total_voice_seconds", 0.0)) + self.total_voice_seconds
+        return (
+            float(counters.get("total_voice_seconds", 0.0))
+            + self.total_voice_seconds
+            + self._open_voice_seconds()
+        )
+
+    def _open_voice_seconds(self) -> float:
+        """Live seconds from every session currently open in a voice channel."""
+        now = time.monotonic()
+        return sum(now - start for start in self.voice_join.values())
+
+    @commands.hybrid_command(name="total_voice_time", description="Total voice time spent in the server.")
+    async def total_voice_time(self, ctx):
+        """Persisted total plus anything still pending in memory or live."""
+        total = await self.view_total_voice_seconds()
         await ctx.send(f"Total voice time in the server: {fmt_seconds(total)}")
 
     @commands.hybrid_command(name="current_voice_time",
@@ -125,9 +175,9 @@ class Stats(commands.Cog):
         channel = ctx.author.voice.channel
         now = time.monotonic()
         total = 0.0
-        for uid, start in self.voice_join.items():
-            member = ctx.guild.get_member(uid)
-            if member and member.voice and member.voice.channel == channel:
+        for member in channel.members:
+            start = self.voice_join.get(member.id)
+            if start is not None:
                 total += now - start
         await ctx.send(
             f"Total time spent in {channel.name} so far: {fmt_seconds(total)}"
