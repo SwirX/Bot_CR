@@ -7,6 +7,7 @@ hierarchy. Every club command is gated with :func:`require_scope`, so access
 is declared per-command instead of scattered ``if role == ...`` checks.
 """
 
+import discord
 from discord.ext import commands
 
 import config
