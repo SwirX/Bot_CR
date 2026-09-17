@@ -27,10 +27,30 @@ command works as both `!prefix` and `/slash`.
   refreshed every `DASHBOARD_REFRESH_SECONDS` (default 60 s). No more
   full-channel history scans.
 - 🛡️ **Moderation** — `/kick`, `/ban`, `/unban`, `/timeout`, `/untimeout`,
-  `/warn`, `/modlog`, and `/del`. Every action is recorded in the Appwrite
-  modlog with the moderator, target, reason and timestamp.
+  `/mute`, `/unmute`, `/warn`, `/modlog`, and `/del`. Every action is recorded
+  in the Appwrite modlog with the moderator, target, reason and timestamp.
+- 🔑 **Bot-staff override** — the Archon, bot-developer and bot-admin roles
+  (config `ROLE_ARCHON` / `ROLE_BOT_DEVELOPER` / `ROLE_BOT_ADMIN`) can run
+  every staff command without needing the guild permissions, exactly like the
+  server owner did before.
+- 🎖️ **Role management** — `/addrole <role> <@members...>` and
+  `/removerole <role> <@members...>` assign/remove roles on the spot;
+  `/setlead <role> <@members...>` **replaces** the holders of a leadership
+  role (Lead / Vice President / President from `LEADER_ROLES`) with exactly
+  the members you tag — previous holders are stripped first.
+- 🌐 **Public-API commands** — `/weather`, `/define`, `/meme`, `/crypto`,
+  `/spacex`, `/github`, `/advice` and `/lyrics`, all keyless, selected from
+  openpublicapis.com.
+- 🎵 **Music** — `/play <song>` streams YouTube audio (yt-dlp + ffmpeg) into
+  your voice channel: `/pause`, `/resume`, `/skip` (majority vote — requester
+  and staff skip instantly), `/stop`, `/loop`, `/volume`, `/queue`,
+  `/nowplaying`, plus an interactive panel with pause / vote-skip / loop /
+  stop / lyrics buttons.
+- 🤖 **Private meeting rooms** — `/meeting create @a @b [name]` spins up a
+  private VC (auto-deleted when empty), `/meeting end` cleans it up.
 - 👋 **Welcome & goodbye**, 📜 **rules board**, and 🎲 **fun commands**
-  (8ball, coinflip, dice, slap, hug, joke, fact, compliment).
+  (8ball, coinflip, dice, slap, hug, joke, fact, compliment, rps, ship,
+  choose, reverse, clap, roast, quote, website).
 
 ---
 
@@ -57,9 +77,22 @@ All commands are hybrid (prefix **and** slash). `/help` / `!help` lists them.
 | `del <n>` | staff | Bulk-delete up to 100 messages |
 | `warn <member> [reason]` | staff | Record a warning + modlog entry |
 | `timeout <member> <min> [reason]`, `untimeout` | staff | Timeouts |
+| `mute <member> [min]`, `unmute` | staff | Mute via Discord timeout |
 | `kick <member> [reason]` | staff | Kick |
 | `ban <member> [reason]`, `unban <id>` | staff | Ban / unban |
+| `fixname <member>` | staff | Re-apply cursive nickname |
 | `modlog [limit]` | staff | Recent moderation actions |
+| `addrole <role> <@members...>` | staff | Give a role |
+| `removerole <role> <@members...>` | staff | Take a role away |
+| `setlead <role> <@members...>` | staff | Replace leadership holders (Lead/VP/President) |
+| `weather <city>`, `define <word>`, `meme` | everyone | Open-Meteo / dictionary / meme |
+| `crypto [coin]`, `spacex`, `github <user>`, `advice` | everyone | Live data APIs |
+| `lyrics <song>` | everyone | LRCLIB lyrics |
+| `play <song>` | everyone | Stream music (joins your voice channel) |
+| `pause`, `resume` | everyone | Pause / resume music |
+| `skip` | everyone | Vote to skip (requester/staff: instant) |
+| `stop`, `loop`, `volume <1-100>`, `queue`, `nowplaying` | everyone | Music control |
+| `meeting create <@members...> [name]`, `meeting end` | everyone | Private VC room |
 
 ---
 
