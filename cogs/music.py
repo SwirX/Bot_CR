@@ -492,13 +492,28 @@ class Music(commands.Cog):
         )
 
     @staticmethod
-    def _search_sync(query: str) -> Track:
-        """Resolve a query to a playable Track (blocking — run via to_thread).
+    def _failure_hint(exc: Exception) -> str | None:
+        """Map known YouTube failure modes to a human message (None → generic).
 
-        Direct URLs go straight to yt-dlp. Anything else is searched through
-        YTMusic, which is far more reliable than yt-dlp's ``ytsearch`` (which
-        is bot-detected); the matched video is then stream-extracted with
-        yt-dlp and its metadata is enriched from the YTMusic result.
+        Keeps the user-facing hints in one place so both the search and the
+        stream-resolution steps surface the same explanations.
+        """
+        text = str(exc)
+        if _BOT_BLOCKED.search(text) or text == COOKIES_HINT:
+            return COOKIES_HINT
+        if _NO_FORMATS.search(text) or text == ACCOUNT_HINT:
+            return ACCOUNT_HINT
+        return None
+
+    @staticmethod
+    def _find_song_sync(query: str) -> Track:
+        """Resolve a query to a Track (blocking — run via to_thread).
+
+        Direct URLs go straight to yt-dlp and come back fully playable.
+        Anything else is searched through YTMusic, which is far more reliable
+        than yt-dlp's ``ytsearch`` (that is bot-detected); the result is a
+        metadata-only skeleton with an empty ``url`` so the caller can announce
+        "found" before the slow, often-flagged stream extraction starts.
         """
         if URL_RE.match(query):
             return Music._extract_audio(query)
@@ -512,18 +527,39 @@ class Music(commands.Cog):
         video_id = result.get("videoId")
         if not video_id:
             raise RuntimeError("YTMusic result has no videoId")
-        track = Music._extract_audio(f"https://www.youtube.com/watch?v={video_id}")
-        track.title = result.get("title") or track.title
         artists = ", ".join(a.get("name") for a in (result.get("artists") or [])
                             if a.get("name"))
-        track.artist = artists or track.artist
-        track.video_id = video_id
         secs = result.get("duration_seconds")
-        if secs:
-            track.duration = int(secs)
         thumbs = result.get("thumbnails") or []
-        if thumbs and thumbs[-1].get("url"):
-            track.thumbnail = thumbs[-1]["url"]
+        return Track(
+            title=result.get("title") or query,
+            url="",
+            webpage_url=f"https://www.youtube.com/watch?v={video_id}",
+            video_id=video_id,
+            duration=int(secs) if secs else None,
+            thumbnail=thumbs[-1].get("url") if thumbs else "",
+            artist=artists,
+        )
+
+    @staticmethod
+    def _resolve_stream_sync(track: Track) -> Track:
+        """Fill in the playable stream URL + headers for a found track.
+
+        Called after ``_find_song_sync`` when the track is only metadata; the
+        YTMusic metadata is kept and the yt-dlp result supplies what's missing.
+        """
+        if track.url:
+            return track
+        resolved = Music._extract_audio(track.webpage_url)
+        track.url = resolved.url
+        track.headers = resolved.headers
+        track.video_id = resolved.video_id or track.video_id
+        if not track.thumbnail:
+            track.thumbnail = resolved.thumbnail
+        if not track.duration:
+            track.duration = resolved.duration
+        if not track.artist:
+            track.artist = resolved.artist
         return track
 
     @staticmethod
@@ -543,8 +579,11 @@ class Music(commands.Cog):
                 break
         return seeds
 
-    async def _search(self, query: str) -> Track:
-        return await asyncio.to_thread(self._search_sync, query)
+    async def _find_song(self, query: str) -> Track:
+        return await asyncio.to_thread(self._find_song_sync, query)
+
+    async def _resolve_stream(self, track: Track) -> Track:
+        return await asyncio.to_thread(self._resolve_stream_sync, track)
 
     async def _resolve_tracks(self, video_ids: list[str]) -> list[Track]:
         """Stream-extract several videos in parallel (radio queue generation)."""
@@ -605,20 +644,36 @@ class Music(commands.Cog):
         player = await self._ensure_voice(ctx)
         if player is None:
             return
-        async with ctx.typing():
+        found_msg = None
+        try:
+            track = await self._find_song(query)
+        except Exception as exc:
+            LOG.warning("Search failed for %r: %s", query, exc)
+            hint = Music._failure_hint(exc)
+            await ctx.send(f"⚠️ {hint}" if hint
+                           else "⚠️ Couldn't find something playable for that query.")
+            return
+        # Query results are metadata-only at this point — let the user see the
+        # match before the slow, flags-prone stream extraction kicks in.
+        if not track.url:
+            label = f"**{track.title}**"
+            if track.artist:
+                label += f" — {track.artist}"
+            found_msg = await ctx.send(f"🎵 Found {label} — getting the stream…")
             try:
-                track = await self._search(query)
+                track = await self._resolve_stream(track)
             except Exception as exc:
-                LOG.warning("Search failed for %r: %s", query, exc)
-                if _BOT_BLOCKED.search(str(exc)) or str(exc) == COOKIES_HINT:
-                    await ctx.send(f"⚠️ {COOKIES_HINT}")
-                elif _NO_FORMATS.search(str(exc)) or str(exc) == ACCOUNT_HINT:
-                    await ctx.send(f"⚠️ {ACCOUNT_HINT}")
-                else:
-                    await ctx.send("⚠️ Couldn't find something playable for that query.")
+                LOG.warning("Stream resolve failed for %r: %s", query, exc)
+                if found_msg:
+                    await found_msg.delete()
+                hint = Music._failure_hint(exc)
+                await ctx.send(f"⚠️ {hint}" if hint
+                               else "⚠️ Couldn't get a stream for that track.")
                 return
         track.requester_id = ctx.author.id
         started = await player.enqueue(track)
+        if found_msg:
+            await found_msg.delete()
         if started and player.now_playing_message is None:
             await self._send_panel(ctx, player)
         elif not started:
