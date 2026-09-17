@@ -1,6 +1,9 @@
+import asyncio
+from pathlib import Path
+
 import discord
 from discord.ext import commands
-import asyncio
+
 from config import BOT_TOKEN  # Import the token from .env
 from KeepAlive import keep_alive
 
@@ -20,32 +23,26 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 async def on_ready():
     print(f'Logged in as {bot.user}!')
 
-# Command: !hello
-@bot.command()
-async def hello(ctx):
-    await ctx.send(f'Hello, {ctx.author.mention}!')
 
-# Command: !ping
-@bot.command()
-async def ping(ctx):
-    await ctx.send('Pong!')
+async def load_cogs():
+    """Auto-discover and load every cog in the cogs/ package.
 
-# Load the welcome cog
-async def load_extensions():
-    await bot.load_extension('Cogs.Rules')
-    await bot.load_extension('Cogs.Welcome')
-    await bot.load_extension('Cogs.GoodBye')
-    await bot.load_extension('Cogs.VoiceTimeState')
-    await bot.load_extension('Cogs.TotalMessagesState')
-    await bot.load_extension('Cogs.MembersState')
-    await bot.load_extension('Cogs.DashBoard')
-    await bot.load_extension('Cogs.Verification')
-    await bot.load_extension('Cogs.BirthdayTracker')
-    await bot.load_extension('Op_Commands.DeleteMessages')
+    Drop a new file in cogs/ and it is picked up automatically; no wiring
+    needed in this launcher.
+    """
+    cogs_dir = Path("cogs")
+    for path in sorted(cogs_dir.glob("*.py")):
+        if path.name.startswith("_") or path.name == "__init__.py":
+            continue
+        extension = f"cogs.{path.stem}"
+        await bot.load_extension(extension)
+        print(f"Loaded cog: {extension}")
+
 
 async def main():
-    await load_extensions()
+    await load_cogs()
     await bot.start(BOT_TOKEN)
 
 # Run the bot
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

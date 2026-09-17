@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 
-class DeleteMessages(commands.Cog):
+class Moderation(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
@@ -32,4 +32,4 @@ class DeleteMessages(commands.Cog):
             print("No messages to delete.")
 
 async def setup(bot):
-    await bot.add_cog(DeleteMessages(bot))
+    await bot.add_cog(Moderation(bot))
