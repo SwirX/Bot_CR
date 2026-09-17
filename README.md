@@ -58,6 +58,11 @@ command works as both `!prefix` and `/slash`.
   can never self-promote), `/profile`, `/whois @member` (staff),
   `/roles` (what your access means), `/hierarchy`, and a permission-aware
   `/dashboard` with quick-action buttons.
+- 🧩 **Cells** — `/cell add <@members...> [cell]` places members into a cell:
+  Cell Chiefs can pull people into their **own** cell, while leadership and bot
+  staff may name any cell. A plain Core Member is promoted to Cell Member
+  (higher ranks are never demoted) and moving a member out of another cell is
+  reported back.
 - 📋 **Tasks** — `/task create/assign/claim/complete/edit/cancel` +
   `/tasks` / `/tasks overdue` with priority colours and due dates; creation
   and assignment are permission-gated, and everything lives in Appwrite so the
@@ -69,13 +74,14 @@ command works as both `!prefix` and `/slash`.
   `/event <title>` with ✅/❌/❔ RSVP buttons whose answers land in Appwrite —
   one source of truth for attendance.
 - 🗳️ **Polls & votes** — `/poll create` (transparent or anonymous,
-  single/multiple choice), `/poll vote`, `/poll results` (anytime) and
+  single/multiple choice) posts a panel with **one button per option**: tap to
+  vote and the counts go up **live on the message**, including for anonymous
+  polls — anonymity only ever hides *who* voted. `/poll results` (anytime) and
   `/poll close`. Transparent polls show who voted for what ("who's coming to
-  the competition?"); anonymous polls hash the voter so counts are all anyone
-  can see and double-votes can still be blocked — ideal for secret Chief
-  ballots, with an optional locked-results mode. Every vote carries a
-  timestamp and polls record `created_at` / `closed_at`, all persisted in
-  Appwrite for the dashboard.
+  the competition?"); anonymous polls hash the voter so only counts are ever
+  visible — ideal for secret Chief ballots, with an optional locked-results
+  mode. Every vote carries a timestamp and polls record `created_at` /
+  `closed_at`, all persisted in Appwrite for the dashboard.
 - 🔔 **Notifications** — `/notifications` toggles task/event/competition/
   announcement preferences (stored per member).
 - 🔬 **Robotics fun** — `/robot` telemetry readout and a multiple-choice
@@ -133,6 +139,7 @@ All commands are hybrid (prefix **and** slash). `/help` / `!help` lists them.
 | `dashboard` | everyone | Permission-aware club overview |
 | `whois <member>` | staff | Internal record (club ID, warnings, prefs) |
 | `setprofile <member> role/cell/club-id` | leadership | Set club role / cell / club ID |
+| `cell add <@members...> [cell]` | chiefs+ | Add members to a cell (chiefs → their own; staff pick any) |
 | `notifications` | everyone | Toggle notification categories |
 | `tasks` / `tasks mine` | everyone | Your open tasks, colour-coded |
 | `tasks overdue` | everyone | Overdue tasks (staff: whole club) |
@@ -150,8 +157,8 @@ All commands are hybrid (prefix **and** slash). `/help` / `!help` lists them.
 | `event <title>` | everyone | Details + ✅/❌/❔ RSVP buttons |
 | `event create <title> [date] [time] [location]` | chiefs+ | Schedule an event |
 | `poll` / `poll list` | everyone | Overview of every poll |
-| `poll create <question> <options> [mode] [selection] [hide_results]` | everyone | Create a poll (`\|`-separated options; transparent or anonymous, single or multiple) |
-| `poll vote <id> <option>` | everyone | Vote (number or exact text; same again = undo) |
+| `poll create <question> <options> [mode] [selection] [hide_results]` | everyone | Create a poll (`\|`-separated options; transparent or anonymous, single or multiple) with one vote button per option |
+| `poll vote <id> <option>` | everyone | Vote by command (buttons on the poll are the quick way; same again = undo) |
 | `poll results <id>` | everyone | Live results — voters named for transparent, counts only for anonymous |
 | `poll close <id>` | staff / creator | Stop voting and stamp `closed_at` |
 | `robot` | everyone | Playful telemetry readout |
@@ -163,8 +170,9 @@ All commands are hybrid (prefix **and** slash). `/help` / `!help` lists them.
 >   `/poll create "Who's coming to RoboCup?" "Yes|No|Maybe"`
 > - Secret Chief ballot (anonymous — counts only, and hidden until close):
 >   `/poll create "Next Chief of IT?" "SwirX|Yaser|Taybi" anonymous single hide_results`
-> - Voting is a single message per pick: `/poll vote P-1 2` (number or exact text);
->   casting the same pick again removes your vote. Results are always live:
+> - **Vote in one tap**: every poll has a button per option — click it and the
+>   counts update in place. `/poll vote P-1 2` does the same thing by command
+>   (pick the same thing again to undo). Results are always live:
 >   `/poll results P-1`.
 
 ---
@@ -260,6 +268,7 @@ cogs/                     one file per feature; auto-discovered
   general.py              hello / ping / custom help
   _perms.py / _scopes.py  staff bypass + club permission-scope resolver
   members.py              link/unlink, profiles, hierarchy, notifications, dashboard
+  cells.py                /cell add — place members into a cell
   tasks.py                task CRUD + lists (priority/due/cell)
   competitions.py         competitions + registration
   events.py               events + RSVP attendance
