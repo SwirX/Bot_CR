@@ -26,11 +26,12 @@ EXPECTED_COMMANDS = {
     "8ball", "addrole", "advice", "ban", "challenge", "choose", "claim", "clap",
     "coinflip", "compliment", "create", "crypto", "current_voice_time", "define",
     "del", "dice", "end", "fact", "fixname", "github", "hello", "help", "history",
-    "hug", "joke", "kick", "leaderboard", "lyrics", "meeting", "meme", "modlog",
-    "mute", "online_members", "ping", "quote", "rank", "removerole", "reverse",
-    "roast", "rps", "set", "setlead", "ship", "slap", "spacex", "timeout", "today",
-    "total_messages", "total_voice_time", "unban", "unmute", "untimeout", "warn",
-    "weather", "website",
+    "hug", "joke", "kick", "leaderboard", "loop", "lyrics", "meeting", "meme",
+    "modlog", "mute", "nowplaying", "online_members", "pause", "ping", "play",
+    "queue", "quote", "rank", "removerole", "resume", "reverse", "roast", "rps",
+    "set", "setlead", "ship", "skip", "slap", "spacex", "stop", "timeout", "today",
+    "total_messages", "total_voice_time", "unban", "unmute", "untimeout", "volume",
+    "warn", "weather", "website",
 }
 
 
