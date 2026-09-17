@@ -23,15 +23,19 @@ import discord  # noqa: E402
 from discord.ext import commands  # noqa: E402
 
 EXPECTED_COMMANDS = {
-    "8ball", "addrole", "advice", "ban", "challenge", "choose", "claim", "clap",
-    "coinflip", "compliment", "create", "crypto", "current_voice_time", "define",
-    "del", "dice", "end", "fact", "fixname", "github", "hello", "help", "history",
-    "hug", "joke", "kick", "leaderboard", "loop", "lyrics", "meeting", "meme",
-    "modlog", "mute", "nowplaying", "online_members", "pause", "ping", "play",
-    "queue", "quote", "rank", "removerole", "resume", "reverse", "roast", "rps",
-    "set", "setlead", "ship", "skip", "slap", "spacex", "stop", "timeout", "today",
-    "total_messages", "total_voice_time", "unban", "unmute", "untimeout", "volume",
-    "warn", "weather", "website",
+    "8ball", "addrole", "advice", "assign", "ban", "cancel", "challenge",
+    "choose", "claim", "clap", "coinflip", "competition", "competitions",
+    "complete", "compliment", "create", "crypto", "current_voice_time",
+    "dashboard", "define", "del", "dice", "edit", "end", "event", "events",
+    "fact", "fixname", "github", "hierarchy", "hello", "help", "history",
+    "hug", "joke", "kick", "leaderboard", "link", "lock", "loop", "lyrics",
+    "meeting", "meme", "modlog", "mute", "notifications", "nowplaying",
+    "online_members", "overdue", "pause", "ping", "play", "profile", "queue",
+    "quiz", "quote", "rank", "removerole", "resume", "reverse", "roast",
+    "robot", "roles", "rps", "set", "setlead", "setprofile", "ship", "skip",
+    "slap", "slowmode", "spacex", "stop", "task", "tasks", "timeout", "today",
+    "total_messages", "total_voice_time", "unban", "unlink", "unlock", "unmute",
+    "untimeout", "view", "volume", "warn", "weather", "website", "whois",
 }
 
 
