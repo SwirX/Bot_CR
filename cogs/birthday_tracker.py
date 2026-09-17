@@ -1,17 +1,26 @@
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
 import discord
 from discord.ext import commands, tasks
-import json
-from datetime import datetime
-import pytz
 from dateutil import parser
 
-# Set the timezone (e.g., Morocco)
-tz = pytz.timezone("Africa/Casablanca")
+import config
+
+LOG = logging.getLogger("bot.birthdays")
+
+# Server timezone (e.g., Morocco).
+tz = ZoneInfo("Africa/Casablanca")
+
+BIRTHDAYS_FILE = Path(config.BASE_DIR) / "birthdays.json"
 
 
 def load_birthdays():
     try:
-        with open("birthdays.json", "r") as f:
+        with open(BIRTHDAYS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
@@ -24,7 +33,7 @@ class BirthdayTracker(commands.Cog):
         self.check_birthdays.start()  # Start daily check
 
     def save_birthdays(self):
-        with open("birthdays.json", "w") as f:
+        with open(BIRTHDAYS_FILE, "w", encoding="utf-8") as f:
             json.dump(self.birthdays, f, indent=4)
 
     # 🎂 Birthday Modal
@@ -41,35 +50,41 @@ class BirthdayTracker(commands.Cog):
 
             try:
                 # Auto-detect and normalize date format
-                parsed_date = parser.parse(birthdate_input, dayfirst=False)  # Converts any format
-                formatted_birthday = parsed_date.strftime("%Y-%m-%d")  # Ensure YYYY-MM-DD format
+                parsed_date = parser.parse(birthdate_input, dayfirst=False)
+                formatted_birthday = parsed_date.strftime("%Y-%m-%d")
 
                 self.cog.birthdays[user_id] = {
                     "username": interaction.user.name,
-                    "birthday": formatted_birthday
+                    "birthday": formatted_birthday,
                 }
                 self.cog.save_birthdays()
 
-                await interaction.response.send_message(f"🎉 Your birthday has been saved: {formatted_birthday}",
-                                                       ephemeral=True)
+                await interaction.response.send_message(
+                    f"🎉 Your birthday has been saved: {formatted_birthday}", ephemeral=True
+                )
                 # Check immediately if today is his birthday
                 await self.cog.check_and_announce_birthday(user_id)
 
             except (ValueError, OverflowError):
-                await interaction.response.send_message("⚠️ Invalid date! Try again (e.g., 2004-12-25).", ephemeral=True)
+                await interaction.response.send_message(
+                    "⚠️ Invalid date! Try again (e.g., 2004-12-25).", ephemeral=True
+                )
 
     # 🎉 Button to Open Modal
     class BirthdayButton(discord.ui.View):
         def __init__(self, cog):
             super().__init__(timeout=None)
             self.cog = cog
-            self.birthday_button = discord.ui.Button(label="Set Your Birthday 🎂", style=discord.ButtonStyle.primary,
-                                                     custom_id="birthday_button")
-            self.birthday_button.callback = self.birthday_button_callback  # Link button to function
-            self.add_item(self.birthday_button)  # Add button to view
+            self.birthday_button = discord.ui.Button(
+                label="Set Your Birthday 🎂",
+                style=discord.ButtonStyle.primary,
+                custom_id="birthday_button",
+            )
+            self.birthday_button.callback = self.birthday_button_callback
+            self.add_item(self.birthday_button)
 
         async def birthday_button_callback(self, interaction: discord.Interaction):
-            await interaction.response.send_modal(self.cog.BirthdayModal(self.cog))  # Open modal
+            await interaction.response.send_modal(self.cog.BirthdayModal(self.cog))
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
@@ -78,61 +93,58 @@ class BirthdayTracker(commands.Cog):
             view = self.BirthdayButton(self)
             await member.send("🎉 Welcome! Click the button below to set your birthday:", view=view)
         except discord.Forbidden:
-            print(f"❌ Cannot send message to {member} (DMs are closed)")
-            channel = discord.utils.get(member.guild.text_channels, name="🤖bot-development")
+            LOG.warning("Cannot DM %s (DMs are closed)", member)
+            channel = discord.utils.get(member.guild.text_channels, name=config.CHANNEL_BOTLOG)
             if channel:
                 await channel.send(f"❌ Cannot send message to {member} (DMs are closed)")
 
     async def check_and_announce_birthday(self, user_id):
-        """ Checks if the registered birthday is today and announces it immediately """
+        """Check if the registered birthday is today and announce it immediately."""
         today = datetime.now(tz).strftime("%m-%d")
 
         if user_id in self.birthdays:
             user_birthday = self.birthdays[user_id]["birthday"]
             if datetime.strptime(user_birthday, "%Y-%m-%d").strftime("%m-%d") == today:
-                print(f"🎉 Announcing immediate birthday for {self.birthdays[user_id]['username']}!")
-
-                # Search ad channel
+                LOG.info("Announcing immediate birthday for %s", self.birthdays[user_id]["username"])
                 for guild in self.bot.guilds:
-                    channel = discord.utils.get(guild.text_channels, name="⦿announcements⦿")
+                    channel = discord.utils.get(guild.text_channels, name=config.CHANNEL_ANNOUNCEMENTS)
                     if channel:
-                        await channel.send(f"🎉 Today is the Birthday of {self.birthdays[user_id]['username']}! 🎂🎈")
+                        await channel.send(
+                            f"🎉 Today is the Birthday of {self.birthdays[user_id]['username']}! 🎂🎈"
+                        )
                         return
-                print("⚠️ No valid announcement channel found.")
 
     @tasks.loop(hours=24)
     async def check_birthdays(self):
-        await self.bot.wait_until_ready()  # Make sure the bot is ready before checking
+        await self.bot.wait_until_ready()
         today = datetime.now(tz).strftime("%m-%d")
 
-        print(f"📅 Checking birthdays for today: {today}")
-        print(f"📂 Loaded Birthdays: {self.birthdays}")
-
-        channel_id = None
+        channel = None
         for guild in self.bot.guilds:
-            channel = discord.utils.get(guild.text_channels, name="⦿announcements⦿")
+            channel = discord.utils.get(guild.text_channels, name=config.CHANNEL_ANNOUNCEMENTS)
             if channel:
-                channel_id = channel.id
-                print(f"✅ Found channel: {channel.name} in guild: {guild.name}")
                 break
 
-        if channel_id:
-            channel = self.bot.get_channel(channel_id)
-            if channel:
-                for user_id, info in self.birthdays.items():
-                    user_birthday = info["birthday"]
-                    if datetime.strptime(user_birthday, "%Y-%m-%d").strftime("%m-%d") == today:
-                        print(f"🎉 Sending birthday message for {info['username']}")
-                        await channel.send(f"🎉 Happy Birthday to {info['username']}! 🎂🎈")
-            else:
-                print("⚠️ Channel ID found, but bot cannot access the channel.")
-        else:
-            print("⚠️ No valid announcement channel found.")
+        if channel is None:
+            LOG.warning("No announcement channel %r found", config.CHANNEL_ANNOUNCEMENTS)
+            return
+
+        for user_id, info in self.birthdays.items():
+            user_birthday = info["birthday"]
+            try:
+                matches = datetime.strptime(user_birthday, "%Y-%m-%d").strftime("%m-%d") == today
+            except ValueError:
+                LOG.warning("Invalid stored birthday for %s: %r", user_id, user_birthday)
+                continue
+            if matches:
+                LOG.info("Sending birthday message for %s", info["username"])
+                await channel.send(f"🎉 Happy Birthday to {info['username']}! 🎂🎈")
 
     @commands.Cog.listener()
     async def on_ready(self):
         if not self.check_birthdays.is_running():
-            self.check_birthdays.start()  # Make sure the job gets off to a good start
+            self.check_birthdays.start()
+
 
 async def setup(bot):
     await bot.add_cog(BirthdayTracker(bot))
