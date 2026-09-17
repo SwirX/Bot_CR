@@ -48,6 +48,31 @@ command works as both `!prefix` and `/slash`.
   stop / lyrics buttons.
 - 🤖 **Private meeting rooms** — `/meeting create @a @b [name]` spins up a
   private VC (auto-deleted when empty), `/meeting end` cleans it up.
+- 🔐 **Club permission scopes** — an authorization layer instead of scattered
+  role checks: every club command is gated on a scope (`tasks.create`,
+  `members.manage`, `competitions.manage`, …) resolved from the member's
+  **linked club account** (Discord → club account → club role → cell) with
+  Discord-side staff roles and server admins bootstrapping full access.
+- 👤 **Member system** — `/link <club-id> [real name]` ties your Discord to
+  your club account (role/cell are set by leadership via `/setprofile`, so you
+  can never self-promote), `/profile`, `/whois @member` (staff),
+  `/roles` (what your access means), `/hierarchy`, and a permission-aware
+  `/dashboard` with quick-action buttons.
+- 📋 **Tasks** — `/task create/assign/claim/complete/edit/cancel` +
+  `/tasks` / `/tasks overdue` with priority colours and due dates; creation
+  and assignment are permission-gated, and everything lives in Appwrite so the
+  app sees the same tasks.
+- 🏆 **Competitions** — `/competitions` lists upcoming events,
+  `/competition <name>` shows details with capacity-enforced **Register /
+  Unregister** buttons that write back to Appwrite.
+- 📅 **Events & attendance** — `/event create` (chiefs+), `/events`, and
+  `/event <title>` with ✅/❌/❔ RSVP buttons whose answers land in Appwrite —
+  one source of truth for attendance.
+- 🔔 **Notifications** — `/notifications` toggles task/event/competition/
+  announcement preferences (stored per member).
+- 🔬 **Robotics fun** — `/robot` telemetry readout and a multiple-choice
+  `/quiz` (engineering + robotics questions).
+- 🛡️ **Channel controls** — `/slowmode`, `/lock`, `/unlock`.
 - 👋 **Welcome & goodbye**, 📜 **rules board**, and 🎲 **fun commands**
   (8ball, coinflip, dice, slap, hug, joke, fact, compliment, rps, ship,
   choose, reverse, clap, roast, quote, website).
@@ -93,6 +118,32 @@ All commands are hybrid (prefix **and** slash). `/help` / `!help` lists them.
 | `skip` | everyone | Vote to skip (requester/staff: instant) |
 | `stop`, `loop`, `volume <1-100>`, `queue`, `nowplaying` | everyone | Music control |
 | `meeting create <@members...> [name]`, `meeting end` | everyone | Private VC room |
+| `link <club-id> [real-name]`, `unlink` | everyone | Link/unlink your club account |
+| `profile [member]` | everyone | Club profile (respects visibility) |
+| `roles` | everyone | What your club role can do (scopes) |
+| `hierarchy` | everyone | Club org chart |
+| `dashboard` | everyone | Permission-aware club overview |
+| `whois <member>` | staff | Internal record (club ID, warnings, prefs) |
+| `setprofile <member> role/cell/club-id` | leadership | Set club role / cell / club ID |
+| `notifications` | everyone | Toggle notification categories |
+| `tasks` / `tasks mine` | everyone | Your open tasks, colour-coded |
+| `tasks overdue` | everyone | Overdue tasks (staff: whole club) |
+| `task view <id>` | everyone | Full task detail + complete/claim buttons |
+| `task create <title> [priority] [due] [cell]` | chiefs+ | Create a task |
+| `task assign <id> @member` | chiefs+ | Assign a task |
+| `task claim <id>` | cell members | Claim an unassigned task |
+| `task complete <id>` | assignee | Mark your task done |
+| `task edit <id> [title] [priority] [due] [status] [cell]` | chiefs+ | Edit a task |
+| `task cancel <id>` | chiefs+ | Cancel a task |
+| `competitions` | everyone | Upcoming competitions |
+| `competition <name>` | everyone | Details + Register/Unregister buttons |
+| `competition create <name> [date] [location] [capacity]` | leadership | Add a competition |
+| `events` | everyone | Upcoming events |
+| `event <title>` | everyone | Details + ✅/❌/❔ RSVP buttons |
+| `event create <title> [date] [time] [location]` | chiefs+ | Schedule an event |
+| `robot` | everyone | Playful telemetry readout |
+| `quiz` | everyone | 5-question robotics quiz |
+| `slowmode <seconds>`, `lock`, `unlock` | staff | Channel controls |
 
 ---
 
@@ -103,11 +154,14 @@ in-memory counters that vanish on restart:
 
 | Collection | Contents |
 |---|---|
-| `bot_members` | one doc per member (doc id = Discord user id): real name, cursive nickname, birthday, joined date, verified flag, XP, messages, voice seconds, warnings |
+| `bot_members` | one doc per member (doc id = Discord user id): real name, cursive nickname, birthday, joined date, verified flag, XP, messages, voice seconds, warnings, **linked club account** (`club_id`, `club_role`, `cell`), notification prefs |
 | `bot_counters` | global totals (messages, voice seconds) flushed incrementally |
 | `bot_challenges` | one doc per date: title, description, who claimed it |
 | `bot_modlog` | every moderation action with moderator/target/reason/timestamp |
 | `bot_settings` | generic key → value storage |
+| `bot_tasks` | tasks: id (`T-1`), title, description, assignee, cell, status, priority, due date, created by/at |
+| `bot_competitions` | competitions: name, date, location, capacity, registered (user-id array) |
+| `bot_events` | events: title, date/time/location, description, attendees + declined arrays |
 
 The bot connects with a server-side API key (no user auth), and the schema
 (collections, attributes, indexes) is provisioned **idempotently on boot** or
@@ -169,18 +223,24 @@ BOT.py                    launcher — logging, store init, cog discovery, tree 
 config.py                 every knob is an env var
 data/                     Appwrite connectivity + async store
   appwrite_client.py      schema (collections/attributes/indexes) + bootstrap
-  store.py                async typed wrappers (members, counters, challenges, modlog, settings)
+  store.py                async typed wrappers (members, counters, challenges, modlog, settings, tasks, competitions, events)
 cogs/                     one file per feature; auto-discovered
   onboarding.py           join → name modal → cursive nickname → roles → birthday
   birthday_tracker.py     daily + immediate birthday announcements (store-backed)
   stats.py                messages / voice / presence tracking + periodic flush
   dashboard.py            persisted-counter dashboard embed
   engagement.py           XP & levels, daily challenges
-  fun.py                  lighthearted commands
-  moderation.py           kick/ban/timeout/warn + modlog
+  fun.py                  lighthearted commands (+ robot status, robotics quiz)
+  moderation.py           kick/ban/timeout/warn + modlog + lock/slowmode/unlock
   welcome.py / goodbye.py join / leave messages
   rules.py                rules board
   general.py              hello / ping / custom help
+  _perms.py / _scopes.py  staff bypass + club permission-scope resolver
+  members.py              link/unlink, profiles, hierarchy, notifications, dashboard
+  tasks.py                task CRUD + lists (priority/due/cell)
+  competitions.py         competitions + registration
+  events.py               events + RSVP attendance
+  _dates.py               shared date parsing/formatting helpers
 scripts/
   bootstrap_appwrite.py   idempotent schema provisioning
   smoke_test.py           hermetic cog-load check (used by CI)
