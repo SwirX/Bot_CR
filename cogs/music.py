@@ -49,6 +49,14 @@ COOKIES_HINT = ("YouTube is bot-flagging this server's network, so it needs "
                 "login cookies before it will stream. Add a cookies.txt for "
                 "youtube.com and set `YT_COOKIES_FILE` — see README for how.")
 
+# Authenticated-but-frameless: the account serving cookies is too new/trust-less
+# for YouTube to hand out stream formats yet.
+_NO_FORMATS = re.compile(r"requested format is not available", re.I)
+ACCOUNT_HINT = ("YouTube let us in but offered no stream for that video. This "
+                "usually means the YouTube account behind the cookies isn't "
+                "trusted yet — watch a few videos while logged in as it, then "
+                "re-export cookies.txt and restart the bot.")
+
 # ytmusicapi is not thread-safe, and its calls run via asyncio.to_thread.
 _YT_MUSIC: "YTMusic | None" = None
 _YT_MUSIC_LOCK = threading.Lock()
@@ -465,6 +473,8 @@ class Music(commands.Cog):
         except Exception as exc:
             if _BOT_BLOCKED.search(str(exc)):
                 raise RuntimeError(COOKIES_HINT) from exc
+            if _NO_FORMATS.search(str(exc)):
+                raise RuntimeError(ACCOUNT_HINT) from exc
             raise
         if info.get("entries"):
             info = info["entries"][0]
@@ -602,6 +612,8 @@ class Music(commands.Cog):
                 LOG.warning("Search failed for %r: %s", query, exc)
                 if _BOT_BLOCKED.search(str(exc)) or str(exc) == COOKIES_HINT:
                     await ctx.send(f"⚠️ {COOKIES_HINT}")
+                elif _NO_FORMATS.search(str(exc)) or str(exc) == ACCOUNT_HINT:
+                    await ctx.send(f"⚠️ {ACCOUNT_HINT}")
                 else:
                     await ctx.send("⚠️ Couldn't find something playable for that query.")
                 return
