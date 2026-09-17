@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands
 
 import config
-from data import store
+from data.store import store
 from KeepAlive import keep_alive
 
 LOG = logging.getLogger("bot")

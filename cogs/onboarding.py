@@ -5,7 +5,7 @@ import discord
 from discord.ext import commands
 
 import config
-from data import store
+from data.store import store
 from data.store import StoreError
 from cogs.birthday_tracker import announce_birthday, parse_birthday
 
