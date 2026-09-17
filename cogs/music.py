@@ -429,6 +429,10 @@ class Music(commands.Cog):
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def play(self, ctx, *, query: str):
         """Search the top YouTube result, or stream a direct audio URL."""
+        # Slash interactions expire after ~3s; joining voice and searching
+        # YouTube can easily take longer, so acknowledge before any awaits.
+        # On prefix invocations ctx.defer() is a no-op.
+        await ctx.defer()
         player = await self._ensure_voice(ctx)
         if player is None:
             return
