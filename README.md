@@ -158,6 +158,15 @@ All commands are hybrid (prefix **and** slash). `/help` / `!help` lists them.
 | `quiz` | everyone | 5-question robotics quiz |
 | `slowmode <seconds>`, `lock`, `unlock` | staff | Channel controls |
 
+> 💡 **Poll examples**
+> - Attendance (transparent — everyone sees the names):
+>   `/poll create "Who's coming to RoboCup?" "Yes|No|Maybe"`
+> - Secret Chief ballot (anonymous — counts only, and hidden until close):
+>   `/poll create "Next Chief of IT?" "SwirX|Yaser|Taybi" anonymous single hide_results`
+> - Voting is a single message per pick: `/poll vote P-1 2` (number or exact text);
+>   casting the same pick again removes your vote. Results are always live:
+>   `/poll results P-1`.
+
 ---
 
 ## 🗄️ Data layer
