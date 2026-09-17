@@ -12,7 +12,9 @@ import config
 
 
 def is_bot_admin(member: discord.Member) -> bool:
-    """True for server admins and holders of the bot-staff roles."""
+    """True for server admins, whitelisted operator IDs and staff-role holders."""
+    if member.id in config.BOT_ADMIN_USER_IDS:
+        return True
     if member.guild_permissions.administrator:
         return True
     roles = {role.name for role in member.roles}
