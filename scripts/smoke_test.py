@@ -23,12 +23,13 @@ import discord  # noqa: E402
 from discord.ext import commands  # noqa: E402
 
 EXPECTED_COMMANDS = {
-    "8ball", "ban", "challenge", "claim", "coinflip", "compliment",
-    "create", "current_voice_time", "del", "dice", "end", "fact", "fixname",
-    "hello", "help", "history", "hug", "joke", "kick", "leaderboard",
-    "meeting", "modlog", "mute", "online_members", "ping", "rank", "set",
-    "slap", "timeout", "today", "total_messages", "total_voice_time", "unban",
-    "unmute", "untimeout", "warn",
+    "8ball", "ban", "challenge", "choose", "claim", "clap", "coinflip",
+    "compliment", "create", "current_voice_time", "del", "dice", "end", "fact",
+    "fixname", "hello", "help", "history", "hug", "joke", "kick", "leaderboard",
+    "meeting", "modlog", "mute", "online_members", "ping", "quote", "rank",
+    "reverse", "roast", "rps", "set", "ship", "slap", "timeout", "today",
+    "total_messages", "total_voice_time", "unban", "unmute", "untimeout",
+    "warn", "website",
 }
 
 
