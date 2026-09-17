@@ -23,7 +23,7 @@ import discord  # noqa: E402
 from discord.ext import commands  # noqa: E402
 
 EXPECTED_COMMANDS = {
-    "8ball", "addrole", "advice", "assign", "ban", "cancel", "cell",
+    "8ball", "addrole", "advice", "assign", "ban", "bot", "cancel", "cell",
     "challenge",
     "choose", "claim", "clap", "close", "coinflip", "competition",
     "competitions", "complete", "compliment", "create", "crypto",
