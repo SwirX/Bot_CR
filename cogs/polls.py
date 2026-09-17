@@ -136,22 +136,27 @@ def _badges(poll: dict) -> str:
 def _poll_embed(poll: dict) -> discord.Embed:
     opts = poll.get("options") or []
     counts = _counts(opts, _parse_votes(poll.get("votes")))
+    total = sum(counts)
     closed = bool(poll.get("closed"))
+    hidden = bool(poll.get("hide_results")) and not closed
+    description = f"`{poll.get('poll_id')}` · {_badges(poll)}"
+    if not hidden:
+        description += f" · **{total}** vote" + ("" if total == 1 else "s")
     embed = discord.Embed(
         title=f"🗳️ {poll.get('question') or 'Untitled poll'}",
-        description=f"`{poll.get('poll_id')}` · {_badges(poll)}",
+        description=description,
         color=discord.Color.dark_grey() if closed else discord.Color.dark_blue(),
     )
     for i, opt in enumerate(opts):
-        embed.add_field(
-            name=f"{i + 1}. {opt}",
-            value=f"👥 {counts[i]} vote" + ("" if counts[i] == 1 else "s"),
-            inline=False,
-        )
+        if hidden:
+            value = "🔒 results hidden until close"
+        else:
+            value = f"👥 {counts[i]} vote" + ("" if counts[i] == 1 else "s")
+        embed.add_field(name=f"{i + 1}. {opt}", value=value, inline=False)
     status = "🔒 closed" if closed else "🔓 open"
+    hint = "results hidden" if hidden else "tap a button to vote"
     embed.set_footer(
-        text=(f"{status} · Vote: /poll vote {poll.get('poll_id')} <option>"
-              f" · Results: /poll results {poll.get('poll_id')}")
+        text=(f"{status} · {hint} · Results: /poll results {poll.get('poll_id')}")
     )
     return embed
 
@@ -207,11 +212,107 @@ def _results_embed(poll: dict, ctx) -> discord.Embed:
     return embed
 
 
+class PollButton(discord.ui.Button):
+    """One option on a poll; identity is carried in a stable ``custom_id``.
+
+    ``poll:{poll_id}:{index}`` lets the button survive the bot restarting —
+    the cog re-registers these views on ready, so buttons on messages posted
+    days ago keep working.
+    """
+
+    def __init__(self, poll_id: str, index: int, label: str, row: int):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary,
+                         custom_id=f"poll:{poll_id}:{index}", row=row)
+        self.poll_id = poll_id
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction):
+        if isinstance(self.view, PollVoteView):
+            await self.view.handle_vote(interaction, self.index)
+
+
+class PollVoteView(discord.ui.View):
+    """Interactive vote buttons — one per option, persistent across restarts."""
+
+    def __init__(self, cog, poll: dict):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.poll_id = str(poll.get("poll_id") or "")
+        for i, opt in enumerate(poll.get("options") or []):
+            label = (opt or "").strip()
+            if len(label) > 80:
+                label = label[:77] + "…"
+            self.add_item(PollButton(self.poll_id, i, label, row=i // 5))
+
+    def _closed_view(self) -> "PollVoteView":
+        for child in self.children:
+            child.disabled = True
+        return self
+
+    async def handle_vote(self, interaction: discord.Interaction, idx: int):
+        """Apply a vote (same semantics as /poll vote) and refresh the embed."""
+        try:
+            poll = (await store.get_poll(self.poll_id)) or {}
+        except StoreError:
+            await interaction.response.send_message(
+                "⚠️ Couldn't load that poll right now.", ephemeral=True)
+            return
+        opts = poll.get("options") or []
+        if not opts or not (0 <= idx < len(opts)):
+            await interaction.response.send_message(
+                "⚠️ That option no longer exists.", ephemeral=True)
+            return
+        if poll.get("closed"):
+            await interaction.response.edit_message(
+                embed=_poll_embed(poll), view=self._closed_view())
+            await interaction.followup.send(
+                f"🔒 **{poll.get('question')}** is closed — voting is locked.",
+                ephemeral=True)
+            return
+
+        mode = poll.get("mode") or "transparent"
+        vid = _voter_id(mode, self.poll_id, interaction.user.id)
+        votes = _parse_votes(poll.get("votes"))
+        single = (poll.get("selection") or "single") != "multiple"
+
+        if single:
+            prior = [v for v in votes if v.get("v") == vid]
+            votes = [v for v in votes if v.get("v") != vid]
+            if prior and prior[0].get("i") == idx:
+                msg = f"🗳️ Your vote on **{poll.get('question')}** was removed."
+            else:
+                votes.append(_vote_payload(mode, self.poll_id,
+                                           interaction.user.id, idx))
+                msg = f"🗳️ You voted **{opts[idx]}**."
+        else:
+            before = len(votes)
+            votes = [v for v in votes
+                     if not (v.get("v") == vid and v.get("i") == idx)]
+            if len(votes) == before:
+                votes.append(_vote_payload(mode, self.poll_id,
+                                           interaction.user.id, idx))
+                msg = f"🗳️ You voted **{opts[idx]}** (+1 choice)."
+            else:
+                msg = f"🗳️ Your vote on **{opts[idx]}** was removed (toggle)."
+
+        poll["votes"] = _encode_votes(votes)
+        try:
+            await store.save_poll(self.poll_id, poll)
+        except StoreError as exc:
+            await interaction.response.send_message(
+                f"⚠️ Couldn't save your vote: {exc}", ephemeral=True)
+            return
+        LOG.info("Poll %s: %s voted option %d via button (%s)",
+                 self.poll_id, interaction.user, idx, mode)
+        await interaction.response.edit_message(embed=_poll_embed(poll), view=self)
+
+
 class Polls(commands.Cog):
     """🗳️ Public polls — transparent or anonymous, stored in Appwrite."""
 
     def __init__(self, bot):
         self.bot = bot
+        self._views_registered = False
 
     # ── helpers ─────────────────────────────────────────────────
     async def _find_poll(self, poll_id: str) -> dict | None:
@@ -258,7 +359,7 @@ class Polls(commands.Cog):
             color=discord.Color.blurple(),
         )
         embed.set_footer(
-            text="Vote: /poll vote <id> <option> · Results: /poll results <id>"
+            text="Tap a button on the poll to vote · Results: /poll results <id>"
         )
         await ctx.send(embed=embed)
 
@@ -326,7 +427,7 @@ class Polls(commands.Cog):
             await ctx.send(f"⚠️ Couldn't create the poll: {exc}")
             return
         LOG.info("Poll %s created by %s (%s)", poll_id, ctx.author, mode_val)
-        await ctx.send(embed=_poll_embed(payload))
+        await ctx.send(embed=_poll_embed(payload), view=PollVoteView(self, payload))
 
     @poll.command(name="vote",
                   description="Vote (same option again = undo your vote).")
@@ -415,6 +516,27 @@ class Polls(commands.Cog):
         LOG.info("Poll %s closed by %s", p.get("poll_id"), ctx.author)
         await ctx.send(f"🔒 **{p.get('question')}** is closed. Final results: "
                        f"`/poll results {p.get('poll_id')}`")
+
+    # ── persistence ────────────────────────────────────────────
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Re-attach vote buttons after a restart.
+
+        Button interactions are only delivered for views the bot knows about;
+        polling every open poll and registering its view keeps buttons on old
+        messages alive across restarts and cog reloads.
+        """
+        if self._views_registered:
+            return
+        self._views_registered = True
+        try:
+            polls = await store.list_polls()
+        except StoreError:
+            return
+        for poll in polls:
+            if poll.get("closed"):
+                continue
+            self.bot.add_view(PollVoteView(self, poll))
 
 
 async def setup(bot):
