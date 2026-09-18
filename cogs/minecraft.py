@@ -24,6 +24,7 @@ import logging
 import re
 import struct
 import uuid as uuidlib
+from datetime import datetime, timezone
 from typing import Literal
 
 import aiohttp
@@ -55,6 +56,11 @@ def _offline_uuid(name: str) -> str:
     digest[6] = (digest[6] & 0x0F) | 0x30  # version 3
     digest[8] = (digest[8] & 0x3F) | 0x80  # RFC 4122 variant
     return str(uuidlib.UUID(bytes=bytes(digest)))
+
+
+def _now_iso() -> str:
+    """ISO-8601 UTC timestamp for identity-link audit records."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 # ── Pterodactyl Client API ─────────────────────────────────────────────
@@ -230,6 +236,15 @@ class Minecraft(commands.Cog):
             for role in member.roles
         )
 
+    @staticmethod
+    def _can_manage_link(user: discord.Member, member: discord.Member) -> bool:
+        """Only the profile owner (or an MC operator) may link/unlink it.
+
+        The Minecraft hub always passes the same member, so this is trivially
+        true there; it only bites on someone else's /profile.
+        """
+        return user.id == member.id or Minecraft._is_mc_operator(user)
+
     async def _require_configured(self, ctx, lang: str) -> bool:
         if self._configured():
             return True
@@ -246,18 +261,18 @@ class Minecraft(commands.Cog):
 
     # ── status ────────────────────────────────────────────────
     @commands.hybrid_command(name="mc",
-                             description="Robotics CMC status: IP, version, players.")
+                             description="Robotics CMC menu: status, link, unlink, server control.")
     @commands.guild_only()
     async def mc(self, ctx: commands.Context):
-        await self._status(ctx)
+        await self._menu(ctx)
 
     @commands.hybrid_command(name="minecraft",
-                             description="Robotics CMC status: IP, version, players.")
+                             description="Robotics CMC menu: status, link, unlink, server control.")
     @commands.guild_only()
     async def minecraft(self, ctx: commands.Context):
-        await self._status(ctx)
+        await self._menu(ctx)
 
-    async def _status(self, ctx: commands.Context):
+    async def _menu(self, ctx: commands.Context):
         try:
             await ctx.defer()
         except discord.HTTPException:
@@ -265,6 +280,46 @@ class Minecraft(commands.Cog):
         lang = await self._lang(ctx)
         if not await self._require_configured(ctx, lang):
             return
+        embed, view = await render_mc_hub(self, lang, ctx.author)
+        await ctx.send(embed=embed, view=view)
+
+    async def _record_for(self, user_id: int) -> dict:
+        try:
+            return (await store.get_member(user_id)) or {}
+        except Exception:  # noqa: BLE001 - store down means "no record", never crash
+            return {}
+
+    @staticmethod
+    def _mc_link_of(record: dict) -> dict | None:
+        """The member's structured links.minecraft entry, or None."""
+        link = ((record or {}).get("links") or {}).get("minecraft") or {}
+        return link if link.get("username") else None
+
+    async def _save_mc_link(self, user_id: int, canonical: str, account_type: str,
+                            entries: list, linked_at: str) -> None:
+        """Persist the Discord ↔ Minecraft link as the structured identity slot.
+
+        ``links`` is read-modify-write so future platforms (e.g. ``robotics``)
+        survive alongside ``minecraft``; ``mc_username`` stays for back-compat.
+        """
+        record = await self._record_for(user_id)
+        links = dict(record.get("links") or {})
+        links["minecraft"] = {
+            "username": canonical,
+            "type": account_type,
+            "uuids": [e["uuid"] for e in entries],
+            "linked_at": linked_at,
+        }
+        await store.merge_member(user_id, {"links": links, "mc_username": canonical})
+
+    async def _clear_mc_link(self, user_id: int) -> None:
+        record = await self._record_for(user_id)
+        links = dict(record.get("links") or {})
+        links.pop("minecraft", None)
+        await store.merge_member(user_id, {"links": links, "mc_username": ""})
+
+    async def _fetch_status(self, lang: str) -> tuple[dict, str | None]:
+        """Live panel data {state, name, version, players} + error text (or None)."""
         version = None
         players = None
         state = "offline"
@@ -285,9 +340,16 @@ class Minecraft(commands.Cog):
                         LOG.warning("Minecraft status ping failed: %s", exc)
         except Exception as exc:
             LOG.warning("Minecraft status: Pterodactyl API failed: %s", exc)
-            await ctx.send(t("mc.panel_unreachable", lang))
-            return
+            return {"state": "offline"}, t("mc.panel_unreachable", lang)
+        return {"state": state, "name": name, "version": version,
+                "players": players}, None
 
+    async def _status_embed(self, lang: str, status: dict,
+                            *, include_guide: bool = True) -> discord.Embed:
+        state = status.get("state", "offline")
+        name = status.get("name") or config.MC_SERVER_NAME
+        version = status.get("version")
+        players = status.get("players")
         state_emoji = {
             "running": t("mc.status.running", lang),
             "starting": t("mc.status.starting", lang),
@@ -303,12 +365,32 @@ class Minecraft(commands.Cog):
                             value=f"{players.get('online', 0)}/{players.get('max', 0)}")
         else:
             embed.add_field(name=t("mc.field.players", lang), value="—")
-        embed.add_field(
-            name=t("mc.linking.title", lang),
-            value=t("mc.linking.body", lang),
-        )
+        if include_guide:
+            embed.add_field(name=t("mc.linking.title", lang),
+                            value=t("mc.linking.body", lang))
         embed.set_footer(text=t("mc.footer", lang))
-        await ctx.send(embed=embed)
+        return embed
+
+    async def _hub_embed(self, lang: str, member: discord.Member) -> discord.Embed:
+        status, error = await self._fetch_status(lang)
+        embed = await self._status_embed(lang, status)
+        if error:
+            embed.add_field(name="⚠️", value=error, inline=False)
+        link = self._mc_link_of(await self._record_for(member.id))
+        if link:
+            embed.add_field(
+                name=t("mc.hub.your_link", lang),
+                value=t("mc.hub.linked_value", lang, name=link["username"],
+                        type=t(f"mc.link.type_{link.get('type', 'free')}", lang)),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name=t("mc.hub.your_link", lang),
+                value=t("mc.hub.not_linked", lang) + "\n" + t("mc.hub.link_hint", lang),
+                inline=False,
+            )
+        return embed
 
     # ── whitelist ─────────────────────────────────────────────
     @commands.hybrid_command(name="linkmc",
@@ -330,10 +412,19 @@ class Minecraft(commands.Cog):
         lang = await self._lang(ctx)
         if not await self._require_configured(ctx, lang):
             return
+        ok, text = await self._run_link(ctx.author, username, account, lang)
+        await ctx.send(text)
+
+    async def _run_link(self, member: discord.Member, username: str,
+                        account: str, lang: str) -> tuple[bool, str]:
+        """Prepare + apply a whitelist link (shared by /linkmc and the menu).
+
+        Returns (ok, message). On success also persists the structured
+        ``links.minecraft`` identity record for audit and the profile hub.
+        """
         username = username.strip()
         if not _USERNAME_RE.match(username):
-            await ctx.send(t("linkmc.not_username", lang))
-            return
+            return False, t("linkmc.not_username", lang)
         if account == "paid":
             # Paid account — whitelist the REAL uuid (official launcher) AND
             # the offline uuid of the same exact name (offline launchers), so
@@ -376,8 +467,7 @@ class Minecraft(commands.Cog):
                 known = {str(e.get("uuid")) for e in existing}
                 fresh = [e for e in entries_to_add if e["uuid"] not in known]
                 if not fresh:
-                    await ctx.send(t("linkmc.already", lang, name=canonical))
-                    return
+                    return False, t("linkmc.already", lang, name=canonical)
                 existing.extend(fresh)
                 # Write the file directly and reload if running — uniform for
                 # both states, and the only way to get the real-UUID entry in
@@ -391,13 +481,42 @@ class Minecraft(commands.Cog):
                     msg = t("linkmc.success_stopped", lang, name=canonical)
         except Exception as exc:
             LOG.warning("linkmc failed for %r: %s", canonical, exc)
-            await ctx.send(t("linkmc.failed", lang))
-            return
+            return False, t("linkmc.failed", lang)
         try:
-            await store.merge_member(ctx.author.id, {"mc_username": canonical})
+            await self._save_mc_link(member.id, canonical, account,
+                                     entries_to_add, _now_iso())
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
-            LOG.warning("linkmc: could not save link for %s: %s", ctx.author.id, exc)
-        await ctx.send(msg + note + t("linkmc.linked_audit", lang))
+            LOG.warning("linkmc: could not save link for %s: %s", member.id, exc)
+        return True, msg + note + t("linkmc.linked_audit", lang)
+
+    async def _run_unlink(self, member: discord.Member, lang: str) -> tuple[bool, str]:
+        """Remove the member's whitelist entries + identity record (menu flow)."""
+        link = self._mc_link_of(await self._record_for(member.id))
+        if not link:
+            return False, t("mc.unlink.not_linked", lang)
+        name = link["username"]
+        uuids = {str(u) for u in (link.get("uuids") or [])}
+        try:
+            async with self._new_session() as session:
+                state = await server_state(session)
+                existing = await read_whitelist(session)
+                kept = [
+                    e for e in existing
+                    if str(e.get("uuid")) not in uuids
+                    and str(e.get("name")) != name
+                ]
+                if len(kept) != len(existing):
+                    await write_whitelist(session, kept)
+                    if state == "running":
+                        await send_command(session, "whitelist reload")
+        except Exception as exc:
+            LOG.warning("unlink failed for %s: %s", member.id, exc)
+            return False, t("mc.unlink.failed", lang)
+        try:
+            await self._clear_mc_link(member.id)
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            LOG.warning("unlink: could not clear record for %s: %s", member.id, exc)
+        return True, t("mc.unlink.done", lang, name=name)
 
     @linkmc.error
     async def linkmc_error(self, ctx: commands.Context, error: commands.CommandError):
@@ -435,6 +554,29 @@ class Minecraft(commands.Cog):
         """Gracefully restart the Robotics CMC server."""
         await self._power(ctx, "restart")
 
+    async def _power_core(self, member: discord.Member, lang: str,
+                          signal: str) -> tuple[bool, str]:
+        """Shared power-signal core used by the slash commands and the menu.
+
+        Returns (ok, message). Callers must already have checked
+        ``_is_mc_operator`` and configuration; this handles state guards and
+        the actual Pterodactyl power call.
+        """
+        try:
+            async with self._new_session() as session:
+                state = await server_state(session)
+                if signal == "start" and state in ("running", "starting"):
+                    return False, t("mc.ctrl.already_running", lang)
+                if signal == "stop" and state in ("offline", "stopping"):
+                    return False, t("mc.ctrl.already_offline", lang)
+                if signal == "restart" and state == "offline":
+                    return False, t("mc.ctrl.need_running", lang)
+                await power_action(session, signal)
+        except Exception as exc:
+            LOG.warning("mc power %s failed: %s", signal, exc)
+            return False, t("mc.ctrl.failed", lang)
+        return True, t(f"mc.ctrl.{signal}_sent", lang)
+
     async def _power(self, ctx: commands.Context, signal: str):
         lang = await self._lang(ctx)
         if not self._is_mc_operator(ctx.author):
@@ -446,24 +588,306 @@ class Minecraft(commands.Cog):
             await ctx.defer()
         except discord.HTTPException:
             pass
-        try:
-            async with self._new_session() as session:
-                state = await server_state(session)
-                if signal == "start" and state in ("running", "starting"):
-                    await ctx.send(t("mc.ctrl.already_running", lang))
-                    return
-                if signal == "stop" and state in ("offline", "stopping"):
-                    await ctx.send(t("mc.ctrl.already_offline", lang))
-                    return
-                if signal == "restart" and state == "offline":
-                    await ctx.send(t("mc.ctrl.need_running", lang))
-                    return
-                await power_action(session, signal)
-        except Exception as exc:
-            LOG.warning("mc power %s failed: %s", signal, exc)
-            await ctx.send(t("mc.ctrl.failed", lang))
+        _ok, text = await self._power_core(ctx.author, lang, signal)
+        await ctx.send(text)
+
+
+# ── Interactive menu views (settings-style button drill-downs) ─────────
+def _flow_embed(ok: bool, text: str) -> discord.Embed:
+    """One-shot result card shown at the end of a link/unlink/control flow."""
+    return discord.Embed(title="✅" if ok else "⚠️", description=text,
+                         color=0x55AA55 if ok else 0xCC5555)
+
+
+def _loading_embed() -> discord.Embed:
+    return discord.Embed(description="⏳", color=discord.Color.greyple())
+
+
+async def render_mc_hub(cog: "Minecraft", lang: str,
+                        member: discord.Member
+                        ) -> tuple[discord.Embed, "MinecraftHubView"]:
+    """Fresh hub page: live status + the member's link summary + actions."""
+    embed = await cog._hub_embed(lang, member)
+    return embed, MinecraftHubView(cog, lang, member)
+
+
+async def mc_link_card_embed(cog: "Minecraft", member: discord.Member,
+                             lang: str, *, full: bool = True) -> discord.Embed:
+    """'Your Minecraft link' status card, shared by /profile and the hub.
+
+    ``full=False`` (viewing someone else's profile) hides the whitelisted
+    UUIDs — username/type/date stay visible.
+    """
+    link = cog._mc_link_of(await cog._record_for(member.id))
+    embed = discord.Embed(title=t("mc.hub.your_link_title", lang), color=0x55AA55)
+    if link:
+        embed.add_field(name=t("mc.link.status_username", lang),
+                        value=f"`{link['username']}`", inline=True)
+        embed.add_field(name=t("mc.link.status_type", lang),
+                        value=t(f"mc.link.type_{link.get('type', 'free')}", lang),
+                        inline=True)
+        if full:
+            uuids = "\n".join(f"`{u}`" for u in (link.get("uuids") or [])) or "—"
+            embed.add_field(name=t("mc.link.status_uuids", lang), value=uuids,
+                            inline=False)
+        if link.get("linked_at"):
+            embed.set_footer(text=t("mc.link.status_linked_at", lang,
+                                    when=link["linked_at"]))
+    else:
+        embed.description = (t("mc.hub.not_linked", lang) + "\n\n"
+                             + t("mc.hub.link_hint", lang))
+    return embed
+
+
+async def _back_to_home(view: discord.ui.View, interaction: discord.Interaction):
+    """Route back up through the parent flow (or just dismiss the message).
+
+    The parent (hub/profile tab) re-fetches live state, so we acknowledge with
+    a spinner first and rewrite the message afterwards — never hold the button
+    interaction open past Discord's 3 s response window.
+    """
+    if not getattr(view, "home_factory", None):
+        await interaction.response.edit_message(embed=_loading_embed(), view=None)
+        return
+    await interaction.response.edit_message(embed=_loading_embed(), view=None)
+    try:
+        embed, target = await view.home_factory()
+    except Exception:  # noqa: BLE001 - a broken parent must never hang a button
+        await interaction.message.edit(
+            embed=_flow_embed(False, t("mc.panel_unreachable",
+                                      getattr(view, "lang", "en"))),
+            view=None)
+        return
+    await interaction.message.edit(embed=embed, view=target)
+
+
+class MinecraftHubView(discord.ui.View):
+    """/mc + /minecraft menu: live status content with action drill-downs."""
+
+    def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
+                 *, timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.lang, self.member = cog, lang, member
+        self.refresh.label = t("mc.hub.refresh", lang)
+        self.link.label = t("mc.hub.link", lang)
+        self.unlink.label = t("mc.hub.unlink", lang)
+        self.control.label = t("mc.hub.control", lang)
+        self.close.label = t("mc.hub.close", lang)
+        if not cog._is_mc_operator(member):
+            self.remove_item(self.control)
+
+    async def _home(self) -> tuple[discord.Embed, "MinecraftHubView"]:
+        return await render_mc_hub(self.cog, self.lang, self.member)
+
+    @discord.ui.button(emoji="🔄", style=discord.ButtonStyle.secondary, row=0)
+    async def refresh(self, interaction: discord.Interaction,
+                      _button: discord.ui.Button):
+        await interaction.response.edit_message(embed=_loading_embed(), view=None)
+        embed, view = await self._home()
+        await interaction.message.edit(embed=embed, view=view)
+
+    @discord.ui.button(emoji="🔗", style=discord.ButtonStyle.primary, row=0)
+    async def link(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        view = LinkChoiceView(self.cog, self.lang, self.member,
+                              home_factory=self._home)
+        await interaction.response.edit_message(embed=await view.embed(), view=view)
+
+    @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger, row=0)
+    async def unlink(self, interaction: discord.Interaction,
+                     _button: discord.ui.Button):
+        view = UnlinkConfirmView(self.cog, self.lang, self.member,
+                                 home_factory=self._home)
+        await interaction.response.edit_message(embed=await view.embed(), view=view)
+
+    @discord.ui.button(emoji="🎛", style=discord.ButtonStyle.primary, row=1)
+    async def control(self, interaction: discord.Interaction,
+                      _button: discord.ui.Button):
+        view = ControlView(self.cog, self.lang, self.member,
+                           home_factory=self._home)
+        await interaction.response.edit_message(embed=await view.embed(), view=view)
+
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction,
+                    _button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=t("mc.hub.closed", self.lang), embed=None, view=None)
+
+
+class LinkChoiceView(discord.ui.View):
+    """Step 1 of the link flow: paid or free account (then a username modal)."""
+
+    def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
+                 *, home_factory=None, timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.lang, self.member = cog, lang, member
+        self.home_factory = home_factory
+        self.paid.label = t("mc.link.type_paid", lang)
+        self.free.label = t("mc.link.type_free", lang)
+        self.back.label = t("mc.hub.back", lang)
+
+    async def embed(self) -> discord.Embed:
+        return discord.Embed(
+            title=t("mc.link.ask_title", self.lang),
+            description=t("mc.link.ask_body", self.lang),
+            color=discord.Color.blurple(),
+        )
+
+    @discord.ui.button(emoji="💳", style=discord.ButtonStyle.primary, row=0)
+    async def paid(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        await self._pick(interaction, "paid")
+
+    @discord.ui.button(emoji="🆓", style=discord.ButtonStyle.secondary, row=0)
+    async def free(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        await self._pick(interaction, "free")
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        await _back_to_home(self, interaction)
+
+    async def _pick(self, interaction: discord.Interaction, account_type: str):
+        modal = LinkUsernameModal(self.cog, self.lang, self.member, account_type,
+                                  home_factory=self.home_factory)
+        await interaction.response.send_modal(modal)
+
+
+class LinkUsernameModal(discord.ui.Modal):
+    """Step 2 of the link flow: the exact Minecraft username to whitelist."""
+
+    def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
+                 account_type: str, *, home_factory=None):
+        super().__init__(title=t("mc.link.modal_title", lang))
+        self.cog, self.lang, self.member = cog, lang, member
+        self.account_type = account_type
+        self.home_factory = home_factory
+        self.username = discord.ui.TextInput(
+            label=t("mc.link.modal_username", lang),
+            placeholder="Steve_08", required=True, max_length=64,
+        )
+        self.add_item(self.username)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not Minecraft._can_manage_link(interaction.user, self.member):
+            view = ResultBackView(self.lang, self.home_factory)
+            await interaction.edit_original_response(
+                embed=_flow_embed(False, t("mc.link.deny_other", self.lang)),
+                view=view)
             return
-        await ctx.send(t(f"mc.ctrl.{signal}_sent", lang))
+        username = self.username.value.strip()
+        ok, text = await self.cog._run_link(self.member, username,
+                                            self.account_type, self.lang)
+        view = ResultBackView(self.lang, self.home_factory)
+        await interaction.edit_original_response(
+            embed=_flow_embed(ok, text), view=view)
+
+
+class UnlinkConfirmView(discord.ui.View):
+    """Confirm removing the whitelist entries + the Discord ↔ MC record."""
+
+    def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
+                 *, home_factory=None, timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.lang, self.member = cog, lang, member
+        self.home_factory = home_factory
+        self.yes.label = t("mc.unlink.confirm_yes", lang)
+        self.back.label = t("mc.hub.back", lang)
+
+    async def embed(self) -> discord.Embed:
+        link = self.cog._mc_link_of(await self.cog._record_for(self.member.id))
+        if not link:
+            return _flow_embed(False, t("mc.unlink.not_linked", self.lang))
+        return discord.Embed(
+            title=t("mc.unlink.confirm_title", self.lang),
+            description=t("mc.unlink.confirm_body", self.lang,
+                          name=link["username"]),
+            color=discord.Color.red(),
+        )
+
+    @discord.ui.button(emoji="✅", style=discord.ButtonStyle.danger, row=0)
+    async def yes(self, interaction: discord.Interaction,
+                  _button: discord.ui.Button):
+        await interaction.response.edit_message(embed=_loading_embed(), view=None)
+        if not Minecraft._can_manage_link(interaction.user, self.member):
+            view = ResultBackView(self.lang, self.home_factory)
+            await interaction.message.edit(
+                embed=_flow_embed(False, t("mc.link.deny_other", self.lang)),
+                view=view)
+            return
+        ok, text = await self.cog._run_unlink(self.member, self.lang)
+        view = ResultBackView(self.lang, self.home_factory)
+        await interaction.message.edit(embed=_flow_embed(ok, text), view=view)
+
+    @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary, row=0)
+    async def back(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        await _back_to_home(self, interaction)
+
+
+class ControlView(discord.ui.View):
+    """Power control drill-down (operator/Archon only): start / stop / restart."""
+
+    def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
+                 *, home_factory=None, timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.lang, self.member = cog, lang, member
+        self.home_factory = home_factory
+        self.start.label = t("mc.ctrl.start", lang)
+        self.stop.label = t("mc.ctrl.stop", lang)
+        self.restart.label = t("mc.ctrl.restart", lang)
+        self.back.label = t("mc.hub.back", lang)
+
+    async def embed(self) -> discord.Embed:
+        return discord.Embed(
+            title=t("mc.hub.control", self.lang),
+            description=t("mc.ctrl.choose", self.lang),
+            color=discord.Color.blurple(),
+        )
+
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.success, row=0)
+    async def start(self, interaction: discord.Interaction,
+                    _button: discord.ui.Button):
+        await self._run(interaction, "start")
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
+    async def stop(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        await self._run(interaction, "stop")
+
+    @discord.ui.button(emoji="🔄", style=discord.ButtonStyle.primary, row=0)
+    async def restart(self, interaction: discord.Interaction,
+                      _button: discord.ui.Button):
+        await self._run(interaction, "restart")
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        await _back_to_home(self, interaction)
+
+    async def _run(self, interaction: discord.Interaction, signal: str):
+        await interaction.response.edit_message(
+            embed=_loading_embed(), view=None)
+        ok, text = await self.cog._power_core(self.member, self.lang, signal)
+        view = ResultBackView(self.lang, self.home_factory)
+        await interaction.message.edit(embed=_flow_embed(ok, text), view=view)
+
+
+class ResultBackView(discord.ui.View):
+    """End-of-flow card with a single 'back to menu' button."""
+
+    def __init__(self, lang: str, home_factory=None, *, timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.home_factory = home_factory
+        self.lang = lang
+        self.back.label = t("mc.hub.back", lang)
+
+    @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        await _back_to_home(self, interaction)
 
 
 async def setup(bot: commands.Bot):
