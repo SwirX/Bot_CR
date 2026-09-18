@@ -4,16 +4,24 @@ Talks to the club's Pterodactyl panel through its Client API (start/stop
 state, console command, file read/write of ``whitelist.json``) and does a
 standard Minecraft server-list ping on the game port for the version and
 player counts — the same protocol the multiplayer menu uses. **No Minecraft
-plugins needed**: whitelisting is vanilla (``whitelist add`` via the console
-when running, direct ``whitelist.json`` edit when stopped), and the ping
-works on any vanilla/paper server with nothing enabled server-side.
+plugins needed**: whitelisting is vanilla (whitelist.json is written directly
+and live-reloaded via ``whitelist reload`` when the server is running), and
+the ping works on any vanilla/paper server with nothing enabled server-side.
+
+The server runs cracked/offline mode (``online-mode=false``), so matching is
+by the UUID the client presents — a real Mojang account joins with its real
+UUID on a premium launcher but with ``MD5("OfflinePlayer:<name>")`` on a
+cracked launcher, so real accounts get **both** UUIDs whitelisted while
+cracked accounts only need their offline UUID (exact-case name).
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import struct
+import uuid as uuidlib
 
 import aiohttp
 import discord
@@ -29,6 +37,20 @@ _USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,16}$")
 
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
 _PING_TIMEOUT = 10.0
+
+
+# ── Offline-mode UUID derivation ───────────────────────────────────────
+def _offline_uuid(name: str) -> str:
+    """The UUID a cracked/offline-mode server derives from a username.
+
+    Same algorithm as vanilla: UUID v3 (MD5) of ``OfflinePlayer:<name>``.
+    This is what must sit in whitelist.json for a cracked account to match,
+    and it is what a cracked launcher sends on login.
+    """
+    digest = bytearray(hashlib.md5(f"OfflinePlayer:{name}".encode("utf-8")).digest())
+    digest[6] = (digest[6] & 0x0F) | 0x30  # version 3
+    digest[8] = (digest[8] & 0x3F) | 0x80  # RFC 4122 variant
+    return str(uuidlib.UUID(bytes=bytes(digest)))
 
 
 # ── Pterodactyl Client API ─────────────────────────────────────────────
@@ -263,10 +285,35 @@ class Minecraft(commands.Cog):
                            "(1–16 letters, digits or underscores).")
             return
         profile = await mojang_profile(username)
-        canonical = (profile or {}).get("name", username)
-        entry = {"name": canonical}
-        if profile:
-            entry["uuid"] = profile.get("id", "").replace("-", "")
+        entries_to_add = []
+        if profile and profile.get("name") == username:
+            # Typed with the exact capitalisation of a real Mojang account, so
+            # the member almost certainly owns it — cover BOTH launcher modes:
+            # the real uuid (premium join) and the offline uuid (cracked join).
+            # (If the typed case differs from the real account, e.g. "hatim"
+            # vs "Hatim", that account is NOT the member's — don't whitelist
+            # a stranger's uuid; fall through to the cracked path below.)
+            canonical = username
+            try:
+                real_uuid = str(uuidlib.UUID(profile["id"]))
+            except (KeyError, TypeError, ValueError):
+                real_uuid = _offline_uuid(canonical)  # fall back, never write junk
+            entries_to_add = [
+                {"uuid": real_uuid, "name": canonical},
+                {"uuid": _offline_uuid(canonical), "name": canonical},
+            ]
+            note = (" (real Mojang account — covered on **both** the official "
+                    "and cracked launcher)")
+        else:
+            # Cracked account: whitelist the offline uuid of the EXACT name as
+            # typed. Mojang's capitalisation of the same letters is a different
+            # account ("hatim" !== "Hatim"), so it must never be reused here.
+            canonical = username
+            entries_to_add = [
+                {"uuid": _offline_uuid(canonical), "name": canonical},
+            ]
+            note = (" (cracked account — name is case-sensitive, keep it "
+                    "exactly as your launcher uses it)")
 
         try:
             await ctx.defer()
@@ -275,20 +322,25 @@ class Minecraft(commands.Cog):
         try:
             async with self._new_session() as session:
                 state = await server_state(session)
-                entries = await read_whitelist(session)
-                lower = canonical.lower()
-                if any(str(e.get("name", "")).lower() == lower for e in entries):
-                    await ctx.send(f"ℹ️ **{canonical}** is already on the whitelist.")
+                existing = await read_whitelist(session)
+                known = {str(e.get("uuid")) for e in existing}
+                fresh = [e for e in entries_to_add if e["uuid"] not in known]
+                if not fresh:
+                    await ctx.send(f"ℹ️ **{canonical}** is already fully on the "
+                                   "whitelist.")
                     return
+                existing.extend(fresh)
+                # Write the file directly and reload if running — uniform for
+                # both states, and the only way to get the real-UUID entry in
+                # (console \"whitelist add\" only derives the offline UUID on
+                # an offline-mode server).
+                await write_whitelist(session, existing)
                 if state == "running":
-                    # Console command — vanilla updates memory + whitelist.json.
-                    await send_command(session, f"whitelist add {canonical}")
-                    msg = (f"✅ **{canonical}** was whitelisted — the server "
-                           "applies it immediately. 🎮")
+                    await send_command(session, "whitelist reload")
+                    msg = (f"✅ **{canonical}** was whitelisted "
+                           f"({len(fresh)} UUID entr{'y' if len(fresh) == 1 else 'ies'}) "
+                           "— applied live. 🎮")
                 else:
-                    # Stopped/starting: edit the file so it applies at launch.
-                    entries.append(entry)
-                    await write_whitelist(session, entries)
                     msg = (f"✅ **{canonical}** was added to whitelist.json — "
                            "it applies when the server starts. 🎮")
         except Exception as exc:
@@ -300,7 +352,7 @@ class Minecraft(commands.Cog):
             await store.merge_member(ctx.author.id, {"mc_username": canonical})
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             LOG.warning("linkmc: could not save link for %s: %s", ctx.author.id, exc)
-        await ctx.send(msg + "\nIt's linked to your Discord, so staff can "
+        await ctx.send(msg + note + "\nIt's linked to your Discord, so staff can "
                        "audit who asked for what.")
 
 
