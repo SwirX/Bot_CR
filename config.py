@@ -87,3 +87,11 @@ XP_MAX = _env("XP_MAX", 12, cast=int)
 
 # ── Club website ───────────────────────────────────────────────────────
 WEBSITE_URL = _env("WEBSITE_URL", "https://robotics.ma")
+
+# ── Minecraft server (Pterodactyl Client API + status ping) ────────────
+MC_PTERO_URL = _env("MC_PTERO_URL", "https://panel.minecraft.bouyakhsass.com").rstrip("/")
+MC_PTERO_CLIENT_KEY = _env("MC_PTERO_CLIENT_KEY", "")
+MC_SERVER_ID = _env("MC_SERVER_ID", "")
+MC_ADDRESS = _env("MC_ADDRESS", "")
+MC_PORT = _env("MC_PORT", 25566, cast=int)
+MC_SERVER_NAME = _env("MC_SERVER_NAME", "Robotics CMC")

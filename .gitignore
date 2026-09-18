@@ -1,6 +1,7 @@
 # Environment & secrets
 .env
 .env.bak-*
+.restart-ack.json
 
 # YouTube login cookies (exported session — treat like a password)
 cookies.txt
