@@ -44,6 +44,11 @@ COLLECTIONS = {
             {"key": "notify_events", "type": "boolean"},
             {"key": "notify_competitions", "type": "boolean"},
             {"key": "notify_announcements", "type": "boolean"},
+            # Minecraft: canonical name for back-compat + per-platform identity
+            # map (JSON string; Appwrite has no object type). Written by
+            # _save_mc_link, read through Minecraft._links_of.
+            {"key": "mc_username", "type": "string", "size": 64},
+            {"key": "links", "type": "string", "size": 4096},
         ],
         [
             {"key": "uniq_user", "type": "unique", "attributes": ["user_id"]},
