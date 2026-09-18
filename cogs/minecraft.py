@@ -9,10 +9,12 @@ and live-reloaded via ``whitelist reload`` when the server is running), and
 the ping works on any vanilla/paper server with nothing enabled server-side.
 
 The server runs cracked/offline mode (``online-mode=false``), so matching is
-by the UUID the client presents — a real Mojang account joins with its real
-UUID on a premium launcher but with ``MD5("OfflinePlayer:<name>")`` on a
-cracked launcher, so real accounts get **both** UUIDs whitelisted while
-cracked accounts only need their offline UUID (exact-case name).
+by the UUID the client presents. ``/linkmc`` therefore asks the member to
+declare their account type: **paid** accounts get their real UUID *and* the
+offline UUID (so the official and free launchers both work), while **free**
+accounts get only the offline UUID of the exact-case name they type
+(``MD5("OfflinePlayer:<name>")`` — Mojang's capitalisation would be a
+different account, e.g. ``hatim`` vs ``Hatim``).
 """
 
 import asyncio
@@ -22,6 +24,7 @@ import logging
 import re
 import struct
 import uuid as uuidlib
+from typing import Literal
 
 import aiohttp
 import discord
@@ -267,16 +270,22 @@ class Minecraft(commands.Cog):
                             value=f"{players.get('online', 0)}/{players.get('max', 0)}")
         else:
             embed.add_field(name="Players", value="—")
-        embed.set_footer(text="Want in? Use /linkmc <minecraft username>")
+        embed.set_footer(text="Want in? Use /linkmc <username> (free or paid)")
         await ctx.send(embed=embed)
 
     # ── whitelist ─────────────────────────────────────────────
     @commands.hybrid_command(name="linkmc",
-                             description="Whitelist your Minecraft username on the club server.")
+                             description="Whitelist a Minecraft username (free or paid account).")
     @commands.guild_only()
     @commands.cooldown(3, 60, commands.BucketType.user)
-    async def linkmc(self, ctx: commands.Context, username: str):
-        """Add <username> to Robotics CMC's whitelist (self-service)."""
+    async def linkmc(self, ctx: commands.Context, username: str,
+                     account: Literal["free", "paid"]):
+        """Add <username> to Robotics CMC's whitelist (self-service).
+
+        account: \"paid\" if it's a bought Minecraft account (adds the real
+        UUID so the official launcher works too), \"free\" for offline/cracked
+        accounts (adds the offline UUID of the exact name as typed).
+        """
         if not await self._require_configured(ctx):
             return
         username = username.strip()
@@ -284,36 +293,45 @@ class Minecraft(commands.Cog):
             await ctx.send("⚠️ That doesn't look like a Minecraft username "
                            "(1–16 letters, digits or underscores).")
             return
-        profile = await mojang_profile(username)
-        entries_to_add = []
-        if profile and profile.get("name") == username:
-            # Typed with the exact capitalisation of a real Mojang account, so
-            # the member almost certainly owns it — cover BOTH launcher modes:
-            # the real uuid (premium join) and the offline uuid (cracked join).
-            # (If the typed case differs from the real account, e.g. "hatim"
-            # vs "Hatim", that account is NOT the member's — don't whitelist
-            # a stranger's uuid; fall through to the cracked path below.)
-            canonical = username
-            try:
-                real_uuid = str(uuidlib.UUID(profile["id"]))
-            except (KeyError, TypeError, ValueError):
-                real_uuid = _offline_uuid(canonical)  # fall back, never write junk
-            entries_to_add = [
-                {"uuid": real_uuid, "name": canonical},
-                {"uuid": _offline_uuid(canonical), "name": canonical},
-            ]
-            note = (" (real Mojang account — covered on **both** the official "
-                    "and cracked launcher)")
+        if account == "paid":
+            # Paid account — whitelist the REAL uuid (official launcher) AND
+            # the offline uuid of the same exact name (offline launchers), so
+            # the member is covered whichever launcher they use.
+            profile = await mojang_profile(username)
+            if profile:
+                canonical = profile.get("name", username)
+                try:
+                    real_uuid = str(uuidlib.UUID(profile["id"]))
+                except (KeyError, TypeError, ValueError):
+                    real_uuid = _offline_uuid(canonical)  # never write junk
+                entries_to_add = [
+                    {"uuid": real_uuid, "name": canonical},
+                    {"uuid": _offline_uuid(canonical), "name": canonical},
+                ]
+                note = (" (paid account — covered on the official launcher "
+                        "**and** free launchers)")
+            else:
+                # Claimed paid but Mojang doesn't know the name — don't write
+                # a fake real UUID; add the offline entry and tell the member.
+                canonical = username
+                entries_to_add = [
+                    {"uuid": _offline_uuid(canonical), "name": canonical},
+                ]
+                note = (" (you picked **paid**, but Mojang doesn't know this "
+                        "name — only the free/offline entry was added, so it "
+                        "only works via a free launcher. Double-check the "
+                        "spelling or pick free.)")
         else:
-            # Cracked account: whitelist the offline uuid of the EXACT name as
-            # typed. Mojang's capitalisation of the same letters is a different
-            # account ("hatim" !== "Hatim"), so it must never be reused here.
+            # Free (cracked) account: whitelist the offline uuid of the EXACT
+            # name as typed. Mojang's capitalisation of the same letters is a
+            # different account ("hatim" !== "Hatim"), so it must never be
+            # reused here.
             canonical = username
             entries_to_add = [
                 {"uuid": _offline_uuid(canonical), "name": canonical},
             ]
-            note = (" (cracked account — name is case-sensitive, keep it "
-                    "exactly as your launcher uses it)")
+            note = (" (free account — name is case-sensitive, keep it exactly "
+                    "as your launcher uses it)")
 
         try:
             await ctx.defer()

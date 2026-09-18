@@ -271,14 +271,14 @@ Client API** — no Minecraft plugins required:
 - `/mc` or `/minecraft` — shows the join address `minecraft.alibks.dev:25566`,
   the server version (from a standard server-list ping), whether it's running,
   and how many players are online.
-- `/linkmc <username>` — whitelists a Minecraft username, self-service:
-  - **Typed exactly like a real Mojang account** (e.g. `SwirXwasTaken`) →
-    whitelists its **real UUID** *and* the offline UUID, so the member is
-    covered whether they join with the official launcher or a cracked one
-    (the server runs `online-mode=false`).
-  - **Anything else** (cracked names, or a name whose real-account spelling
-    differs — e.g. `hatim` vs real `Hatim`) → whitelists the **offline UUID
-    of the exact name as typed** (case-sensitive).
+- `/linkmc <username> <free|paid>` — whitelists a Minecraft username,
+  self-service; the member **declares their account type**:
+  - **paid** (bought Minecraft, e.g. `SwirXwasTaken`) → whitelists the **real
+    UUID** *and* the offline UUID, so they're covered whether they join with
+    the official launcher or a free one (the server runs `online-mode=false`).
+  - **free** (cracked/offline account) → whitelists the **offline UUID of the
+    exact name as typed** (case-sensitive — Mojang's capitalisation of the
+    same letters is a different account, e.g. `hatim` vs `Hatim`).
   In both cases `whitelist.json` is written through the panel file API and
   live-reloaded (`whitelist reload`) when the server is running, or left to
   apply at next start when it's stopped.
