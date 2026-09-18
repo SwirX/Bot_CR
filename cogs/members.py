@@ -18,6 +18,8 @@ from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
                           scopes_for_author, require_scope)
 from cogs._dates import days_until, fmt_date
 from cogs._ui import PaginatorView
+from cogs.minecraft import LinkChoiceView, UnlinkConfirmView, mc_link_card_embed
+from i18n.core import resolve_member_lang, t
 
 LOG = logging.getLogger("bot.members")
 
@@ -148,6 +150,110 @@ class DashboardView(discord.ui.View):
             text = "Nothing here yet."
         embed = discord.Embed(title=title, description=text, color=discord.Color.blue())
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ProfileHubView(discord.ui.View):
+    """/profile identity hub: Overview / Minecraft / Robotics tabs (Dank-Memer style)."""
+
+    def __init__(self, cog: "Members", lang: str, member: discord.Member,
+                 *, timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.lang, self.member = cog, lang, member
+        self.overview.label = t("profile.tab.overview", lang)
+        self.minecraft.label = t("profile.tab.minecraft", lang)
+        self.robotics.label = t("profile.tab.robotics", lang)
+        self.close.label = t("settings.close", lang)
+
+    @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, row=0)
+    async def overview(self, interaction: discord.Interaction,
+                       _button: discord.ui.Button):
+        embed = await self.cog._profile_embed(self.member)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(emoji="⛏️", style=discord.ButtonStyle.primary, row=0)
+    async def minecraft(self, interaction: discord.Interaction,
+                        _button: discord.ui.Button):
+        mc_cog = self.cog.bot.get_cog("Minecraft")
+        if mc_cog is None:
+            embed = discord.Embed(description=t("mc.unconfigured", self.lang),
+                                  color=discord.Color.red())
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+        can_manage = interaction.user.id == self.member.id or mc_cog._is_mc_operator(interaction.user)
+        embed = await mc_link_card_embed(mc_cog, self.member, self.lang,
+                                         full=can_manage)
+        view = ProfileMinecraftTabView(self.cog, self.lang, self.member, mc_cog,
+                                       viewer=interaction.user)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    @discord.ui.button(emoji="🔬", style=discord.ButtonStyle.secondary, row=0)
+    async def robotics(self, interaction: discord.Interaction,
+                       _button: discord.ui.Button):
+        embed = discord.Embed(
+            title=t("profile.tab.robotics", self.lang),
+            description=t("profile.robotics.soon", self.lang),
+            color=discord.Color.dark_teal(),
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction,
+                    _button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=t("profile.closed", self.lang), embed=None, view=None)
+
+
+class ProfileMinecraftTabView(discord.ui.View):
+    """Minecraft tab inside /profile: link status + quick link/unlink actions."""
+
+    def __init__(self, cog: "Members", lang: str, member: discord.Member,
+                 mc_cog: "Minecraft", *, viewer: discord.Member,
+                 timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.lang, self.member, self.mc_cog = cog, lang, member, mc_cog
+        self.viewer = viewer
+        self.link.label = t("mc.hub.link", lang)
+        self.unlink.label = t("mc.hub.unlink", lang)
+        self.back.label = t("mc.hub.back", lang)
+        self.close.label = t("settings.close", lang)
+        if not (viewer.id == member.id or mc_cog._is_mc_operator(viewer)):
+            self.remove_item(self.link)
+            self.remove_item(self.unlink)
+
+    async def _home(self) -> tuple[discord.Embed, "ProfileMinecraftTabView"]:
+        can_manage = (self.viewer.id == self.member.id
+                      or self.mc_cog._is_mc_operator(self.viewer))
+        embed = await mc_link_card_embed(self.mc_cog, self.member, self.lang,
+                                         full=can_manage)
+        return embed, ProfileMinecraftTabView(
+            self.cog, self.lang, self.member, self.mc_cog, viewer=self.viewer)
+
+    @discord.ui.button(emoji="🔗", style=discord.ButtonStyle.primary, row=0)
+    async def link(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        view = LinkChoiceView(self.mc_cog, self.lang, self.member,
+                              home_factory=self._home)
+        await interaction.response.edit_message(embed=await view.embed(), view=view)
+
+    @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger, row=0)
+    async def unlink(self, interaction: discord.Interaction,
+                     _button: discord.ui.Button):
+        view = UnlinkConfirmView(self.mc_cog, self.lang, self.member,
+                                 home_factory=self._home)
+        await interaction.response.edit_message(embed=await view.embed(), view=view)
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        hub = ProfileHubView(self.cog, self.lang, self.member)
+        embed = await self.cog._profile_embed(self.member)
+        await interaction.response.edit_message(embed=embed, view=hub)
+
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction,
+                    _button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=t("profile.closed", self.lang), embed=None, view=None)
 
 
 class Members(commands.Cog):
@@ -305,8 +411,9 @@ class Members(commands.Cog):
     async def profile(self, ctx, member: discord.Member = None):
         """Your profile (or a public one) straight from the Appwrite source of truth."""
         member = member or ctx.author
+        lang = await resolve_member_lang(ctx.author.id, None)
         embed = await self._profile_embed(member)
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, view=ProfileHubView(self, lang, member))
 
     @commands.hybrid_command(name="whois", description="Internal profile for staff.")
     @commands.guild_only()
