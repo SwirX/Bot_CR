@@ -20,6 +20,7 @@ class HelpView(discord.ui.View):
         ("Events & Meetings", "📅", ("Events", "Meetings")),
         ("Competitions", "🏆", ("Competitions",)),
         ("Polls", "🗳️", ("Polls",)),
+        ("Minecraft", "⛏️", ("Minecraft",)),
         ("Members & Stats", "👥", ("Members", "Stats", "BirthdayTracker", "Onboarding")),
         ("Moderation & Rules", "🛡️", ("Moderation", "Rules")),
         ("Server Ops", "⚙️", ("DashBoard", "Apis", "Tasks", "Welcome", "Goodbye", "BotAdmin")),
