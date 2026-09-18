@@ -263,6 +263,37 @@ needs a trusted session. Fix it once with cookies:
 
 ---
 
+## ⛏️ Minecraft server bridge (`/mc`, `/minecraft`, `/linkmc`)
+
+The club's Minecraft server (Robotics CMC) is managed through **Pterodactyl's
+Client API** — no Minecraft plugins required:
+
+- `/mc` or `/minecraft` — shows the join address `minecraft.alibks.dev:25566`,
+  the server version (from a standard server-list ping), whether it's running,
+  and how many players are online.
+- `/linkmc <username>` — whitelists a Minecraft username, self-service:
+  - server **running** → sends `whitelist add` through the panel console
+    (vanilla applies it immediately),
+  - server **stopped** → writes `whitelist.json` directly through the panel
+    file API (applies when the server starts).
+  The Discord ↔ Minecraft link is stored per member so staff can audit it.
+
+Configure it in `.env`:
+
+```
+MC_PTERO_URL=https://panel.minecraft.bouyakhsass.com
+MC_PTERO_CLIENT_KEY=<client API key from Account → API Credentials>
+MC_SERVER_ID=<server identifier, e.g. 96f52139>
+MC_ADDRESS=minecraft.alibks.dev
+MC_PORT=25566
+MC_SERVER_NAME=Robotics CMC
+```
+
+> 🔒 The client API key can manage the panel's servers, so keep it out of
+> version control — it lives in `.env` only.
+
+---
+
 ## 🚀 Deploy (Render)
 
 `render.yaml` describes a free-worker service. `BOT_TOKEN` and
