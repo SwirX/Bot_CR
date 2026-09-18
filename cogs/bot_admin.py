@@ -14,6 +14,7 @@ restart without any privilege escalation.
 """
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -30,6 +31,25 @@ LOG = logging.getLogger("bot.admin")
 
 ROOT = Path(__file__).resolve().parent.parent
 _START = time.monotonic()
+
+# Left behind before a relaunch; consumed on the next on_ready so the channel
+# that triggered restart/update gets a "back online" message. Lives in the repo
+# root (gitignored) because systemd's PrivateTmp keeps /tmp private per-boot.
+ACK_FILE = ROOT / ".restart-ack.json"
+
+
+def _write_ack(ctx: commands.Context, *, after_update: bool) -> None:
+    """Persist where the current session's relaunch should report back."""
+    data = {
+        "guild_id": ctx.guild.id if ctx.guild else None,
+        "channel_id": ctx.channel.id if ctx.channel else None,
+        "by": str(ctx.author),
+        "after_update": after_update,
+    }
+    try:
+        ACK_FILE.write_text(json.dumps(data), encoding="utf-8")
+    except OSError as exc:
+        LOG.warning("Could not write restart ack: %s", exc)
 
 
 def _fmt_uptime(seconds: int) -> str:
@@ -92,6 +112,33 @@ class BotAdmin(commands.Cog):
         await ctx.send("🛠️ `bot status` — health | `bot restart` — reload process | "
                        "`bot update` — pull latest nightly + restart")
 
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Send the post-restart/post-update "back online" ack, once."""
+        if not ACK_FILE.exists():
+            return
+        try:
+            data = json.loads(ACK_FILE.read_text(encoding="utf-8"))
+            ACK_FILE.unlink()
+        except (OSError, ValueError) as exc:
+            LOG.warning("Ignoring unreadable restart ack: %s", exc)
+            ACK_FILE.unlink(missing_ok=True)
+            return
+        channel = self.bot.get_channel(data.get("channel_id") or 0)
+        if channel is None:
+            return
+        head = await asyncio.to_thread(_git_head)
+        by = data.get("by")
+        verb = "Update applied — back online." if data.get("after_update") else "Back online."
+        text = f"✅ {verb}"
+        if by:
+            text += f" ({by})"
+        text += f" — build `{head}` ✅"
+        try:
+            await channel.send(text)
+        except discord.HTTPException as exc:
+            LOG.warning("Could not send restart ack: %s", exc)
+
     @bot.command(name="status", description="Show bot uptime, build, and command counts.")
     @commands.guild_only()
     async def status(self, ctx: commands.Context):
@@ -122,6 +169,7 @@ class BotAdmin(commands.Cog):
             return
         await ctx.send("🔄 Restarting… I'll be back in a few seconds.")
         LOG.info("Restart requested by %s (%s)", ctx.author, ctx.guild)
+        _write_ack(ctx, after_update=False)
         _relaunch()
 
     @bot.command(name="update", description="Pull the latest nightly from GitHub and restart.")
@@ -141,6 +189,7 @@ class BotAdmin(commands.Cog):
         summary = (proc.stdout.strip().splitlines() or ["already up to date."])[-1]
         await ctx.send(f"✅ `{summary}` — restarting…")
         LOG.info("Update applied by %s: %s", ctx.author, proc.stdout.strip())
+        _write_ack(ctx, after_update=True)
         _relaunch()
 
 
