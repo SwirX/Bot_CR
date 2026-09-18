@@ -1,6 +1,8 @@
 import discord
 from discord.ext import commands
 
+from i18n.core import resolve_member_lang, t
+
 
 class HelpView(discord.ui.View):
     """Interactive help: section buttons + overview + close button.
@@ -26,9 +28,10 @@ class HelpView(discord.ui.View):
         ("Server Ops", "⚙️", ("DashBoard", "Apis", "Tasks", "Welcome", "Goodbye", "BotAdmin")),
     )
 
-    def __init__(self, bot, *, timeout: float = 180.0):
+    def __init__(self, bot, *, lang: str = "en", timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.bot = bot
+        self.lang = lang
         self.categories: dict[str, tuple] = {}
         for cog in bot.cogs.values():
             cmds = [c for c in cog.walk_commands() if not c.hidden and c.parent is None]
@@ -43,15 +46,21 @@ class HelpView(discord.ui.View):
                 self.sections[label] = present
 
         # One button per section (max five per row), then home/close below.
+        # Labels follow the viewer's language; section keys stay English.
         for idx, (label, emoji, _cog_names) in enumerate(self.SECTIONS):
             if label not in self.sections:
                 continue
             button = discord.ui.Button(
-                label=label, emoji=emoji,
+                label=self._section_label(label), emoji=emoji,
                 style=discord.ButtonStyle.secondary, row=idx // 5,
             )
             button.callback = self._section_callback(label)
             self.add_item(button)
+        self.home.label = t("help.all", lang)
+        self.close.label = t("help.close", lang)
+
+    def _section_label(self, label: str) -> str:
+        return t(f"help.section.{label}", self.lang)
 
     def _section_callback(self, label: str):
         async def callback(interaction: discord.Interaction):
@@ -74,21 +83,20 @@ class HelpView(discord.ui.View):
     def build_overview_embed(self) -> discord.Embed:
         prefix = self.bot.command_prefix
         embed = discord.Embed(
-            title="📚 Bot_CR Commands",
-            description=(
-                f"Prefix `{prefix}command` or slash `/command` — they do the "
-                "same thing. Tap a button below to see a section's full usage."
-            ),
+            title=t("help.title", self.lang),
+            description=t("help.description", self.lang, prefix=prefix),
             color=discord.Color.blue(),
         )
         for label in self.sections:
             names = self._section_names(label)
             embed.add_field(
-                name=f"{label}",
+                name=self._section_label(label),
                 value=", ".join(f"`{n}`" for n in names) or "—",
                 inline=False,
             )
-        embed.set_footer(text=f"{len(self.bot.commands)} commands available")
+        embed.set_footer(
+            text=t("help.footer", self.lang, n=len(self.bot.commands))
+        )
         return embed
 
     def build_section_embed(self, label: str) -> discord.Embed:
@@ -100,7 +108,8 @@ class HelpView(discord.ui.View):
             if first_line:
                 blurbs.append(first_line[0])
         embed = discord.Embed(
-            title=f"📚 {label} commands",
+            title=t("help.section_title", self.lang,
+                    section=self._section_label(label)),
             description="\n".join(blurbs) or None,
             color=discord.Color.blurple(),
         )
@@ -134,7 +143,7 @@ class HelpView(discord.ui.View):
             child.disabled = True
         try:
             await interaction.response.edit_message(
-                content="Command list closed. 👋 (use `/help` to reopen)",
+                content=t("help.closed", self.lang),
                 embed=None,
                 view=self,
             )
@@ -169,7 +178,11 @@ class General(commands.Cog):
     @commands.hybrid_command(name="help", description="Browse commands with an interactive menu.")
     @commands.cooldown(1, 3, commands.BucketType.user)
     async def help_command(self, ctx):
-        view = HelpView(self.bot)
+        lang = await resolve_member_lang(
+            ctx.author.id,
+            locale=str(ctx.interaction.locale) if ctx.interaction else None,
+        )
+        view = HelpView(self.bot, lang=lang)
         embed = view.build_overview_embed()
         await ctx.send(embed=embed, view=view)
 
