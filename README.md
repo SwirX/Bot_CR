@@ -272,10 +272,16 @@ Client API** — no Minecraft plugins required:
   the server version (from a standard server-list ping), whether it's running,
   and how many players are online.
 - `/linkmc <username>` — whitelists a Minecraft username, self-service:
-  - server **running** → sends `whitelist add` through the panel console
-    (vanilla applies it immediately),
-  - server **stopped** → writes `whitelist.json` directly through the panel
-    file API (applies when the server starts).
+  - **Typed exactly like a real Mojang account** (e.g. `SwirXwasTaken`) →
+    whitelists its **real UUID** *and* the offline UUID, so the member is
+    covered whether they join with the official launcher or a cracked one
+    (the server runs `online-mode=false`).
+  - **Anything else** (cracked names, or a name whose real-account spelling
+    differs — e.g. `hatim` vs real `Hatim`) → whitelists the **offline UUID
+    of the exact name as typed** (case-sensitive).
+  In both cases `whitelist.json` is written through the panel file API and
+  live-reloaded (`whitelist reload`) when the server is running, or left to
+  apply at next start when it's stopped.
   The Discord ↔ Minecraft link is stored per member so staff can audit it.
 
 Configure it in `.env`:
