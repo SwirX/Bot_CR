@@ -139,7 +139,7 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `stop`, `loop`, `volume <1-100>`, `nowplaying` | everyone | Music control |
 | `meeting create <@members...> [name]`, `meeting end` | everyone | Private VC room |
 | `link <club-id> [real-name]`, `unlink` | everyone | Link/unlink your club account |
-| `profile [member]` | everyone | Club profile (respects visibility) |
+| `profile [member]` | everyone | Identity hub: Overview · Minecraft link · Robotics (soon) tabs |
 | `roles` | everyone | What your club role can do (scopes) |
 | `hierarchy` | everyone | Club org chart |
 | `dashboard` | everyone | Permission-aware club overview |
@@ -190,7 +190,7 @@ in-memory counters that vanish on restart:
 
 | Collection | Contents |
 |---|---|
-| `bot_members` | one doc per member (doc id = Discord user id): real name, cursive nickname, birthday, joined date, verified flag, XP, messages, voice seconds, warnings, **linked club account** (`club_id`, `club_role`, `cell`), notification prefs |
+| `bot_members` | one doc per member (doc id = Discord user id): real name, cursive nickname, birthday, joined date, verified flag, XP, messages, voice seconds, warnings, **linked club account** (`club_id`, `club_role`, `cell`), **identity links** (`links.minecraft` username/type/UUIDs/date, `links.robotics` reserved), `lang` (menu language), notification prefs |
 | `bot_counters` | global totals (messages, voice seconds) flushed incrementally |
 | `bot_challenges` | one doc per date: title, description, who claimed it |
 | `bot_modlog` | every moderation action with moderator/target/reason/timestamp |
@@ -268,11 +268,20 @@ needs a trusted session. Fix it once with cookies:
 The club's Minecraft server (Robotics CMC) is managed through **Pterodactyl's
 Client API** — no Minecraft plugins required:
 
-- `/mc` or `/minecraft` — shows the join address `minecraft.alibks.dev:25566`,
-  the server version (from a standard server-list ping), whether it's running,
-  and how many players are online.
-- `/linkmc <username> <free|paid>` — whitelists a Minecraft username,
-  self-service; the member **declares their account type**:
+- `/mc` or `/minecraft` — opens the **interactive Minecraft hub**: the join
+  address `minecraft.alibks.dev:25566`, the server version (from a standard
+  server-list ping), run state, player count and your own Discord ↔ Minecraft
+  link status, with **Dank-Memer-style button drill-downs**:
+  - 🔄 **Refresh** — re-check the live status;
+  - 🔗 **Link your account** → 💳 **Paid** / 🆓 **Free** → a modal asks for your
+    exact Minecraft username → whitelisted and saved;
+  - ❌ **Unlink** → confirmation → removes the whitelist entries and the
+    Discord ↔ Minecraft link;
+  - 🎛 **Server control** (visible **only** to the bot operator / Archon):
+    ▶️ Start · ⏹ **Stop** · 🔄 **Restart** — same power signals as
+    `/mcstart` `/mcstop` `/mcrestart`.
+- `/linkmc <username> <free|paid>` — the same linking as a **one-liner slash
+  command**; the member **declares their account type**:
   - **paid** (bought Minecraft, e.g. `SwirXwasTaken`) → whitelists the **real
     UUID** *and* the offline UUID, so they're covered whether they join with
     the official launcher or a free one (the server runs `online-mode=false`).
@@ -282,7 +291,29 @@ Client API** — no Minecraft plugins required:
   In both cases `whitelist.json` is written through the panel file API and
   live-reloaded (`whitelist reload`) when the server is running, or left to
   apply at next start when it's stopped.
-  The Discord ↔ Minecraft link is stored per member so staff can audit it.
+  The Discord ↔ Minecraft link is stored per member (`links.minecraft`, see the
+  identity model below) so staff can audit it and the profile hub can show it.
+
+### 🔗 Identity links (`/profile`)
+
+Every member doc carries a structured `links` object — a place per platform
+that gets linked to the Discord account:
+
+```jsonc
+"links": {
+  "minecraft": { "username": "SwirXwasTaken", "type": "paid",
+                 "uuids": ["real-uuid", "offline-uuid"], "linked_at": "…" },
+  "robotics":  null   // reserved — coming soon
+}
+```
+
+`/profile` is now an **identity hub** with tab buttons (Overview · ⛏️ Minecraft
+· 🔬 Robotics): the Minecraft tab shows the link card (username / type /
+whitelisted UUIDs / date) with quick **Link / Unlink** actions. Link/unlink
+from the *hub* or the *profile* are the same flows, and only the member
+themselves (or the operator/Archon) can link or unlink a profile — a plain
+viewer sees the card without the action buttons and without the UUIDs. Adding
+the robotics link later is just filling in `links.robotics`.
 
 Configure it in `.env`:
 
