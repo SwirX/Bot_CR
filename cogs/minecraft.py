@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import struct
+import time
 import uuid as uuidlib
 from datetime import datetime, timezone
 from typing import Literal
@@ -33,6 +34,7 @@ from discord.ext import commands
 
 import config
 from data.store import store
+from cogs._scopes import scopes_for_author
 from i18n.core import resolve_member_lang, t
 
 LOG = logging.getLogger("bot.minecraft")
@@ -210,10 +212,31 @@ async def status_ping(host: str, port: int,
 
 # ── Cog ────────────────────────────────────────────────────────────────
 class Minecraft(commands.Cog):
-    """Robotics CMC server status and self-service whitelist."""
+    """Robotics CMC server status, self-service whitelist and player tagging."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Console websocket (join/leave detection) state.
+        self._ws_stop = asyncio.Event()
+        self._ws_task: asyncio.Task | None = None
+        self._online: dict[str, float] = {}     # mc username -> joined timestamp
+        self._pending_rally: set[str] = set()   # burst coalescing window
+        self._rally_task: asyncio.Task | None = None
+        self._rally_cooldown_until = 0.0
+        self._backfilled_roles = False
+
+    async def cog_load(self) -> None:
+        """Start the Pterodactyl console watcher (plugin-free join/leave feed)."""
+        if self._configured():
+            self._ws_task = asyncio.create_task(self._console_watch())
+
+    def cog_unload(self) -> None:
+        """Stop the watcher and any pending rally."""
+        self._ws_stop.set()
+        if self._rally_task is not None:
+            self._rally_task.cancel()
+        if self._ws_task is not None:
+            self._ws_task.cancel()
 
     def _configured(self) -> bool:
         return bool(config.MC_PTERO_CLIENT_KEY and config.MC_SERVER_ID
@@ -258,6 +281,186 @@ class Minecraft(commands.Cog):
     @staticmethod
     def _new_session() -> aiohttp.ClientSession:
         return aiohttp.ClientSession(headers=_headers(), timeout=_TIMEOUT)
+
+    # ── player tagging (role + auto join-rally) ───────────────
+    async def _mc_player_role(self, guild: discord.Guild) -> discord.Role | None:
+        """Find (or create) the 'Minecraft Player' role used for tagging."""
+        role = discord.utils.get(guild.roles, name=config.MC_PLAYER_ROLE)
+        if role is None:
+            try:
+                role = await guild.create_role(
+                    name=config.MC_PLAYER_ROLE,
+                    reason="Minecraft player tagging role",
+                )
+            except discord.HTTPException as exc:
+                LOG.warning("Could not create MC player role in %s: %s",
+                            guild.id, exc)
+                return None
+        return role
+
+    async def _ensure_mc_role(self, member: discord.Member) -> None:
+        """Best-effort role assignment on link — never fails the flow."""
+        if getattr(member, "guild", None) is None:
+            return
+        try:
+            role = await self._mc_player_role(member.guild)
+            if role is not None and role not in member.roles:
+                await member.add_roles(role, reason="Linked Minecraft account")
+        except Exception as exc:  # noqa: BLE001 - tagging is best-effort
+            LOG.warning("Could not assign MC player role to %s: %s",
+                        member.id, exc)
+
+    async def _drop_mc_role(self, member: discord.Member) -> None:
+        """Best-effort role removal on unlink."""
+        if getattr(member, "guild", None) is None:
+            return
+        try:
+            role = discord.utils.get(member.guild.roles,
+                                     name=config.MC_PLAYER_ROLE)
+            if role is not None and role in member.roles:
+                await member.remove_roles(role, reason="Unlinked Minecraft account")
+        except Exception as exc:  # noqa: BLE001 - tagging is best-effort
+            LOG.warning("Could not drop MC player role from %s: %s",
+                        member.id, exc)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """One-shot role backfill: every linked player must wear the tag."""
+        if self._backfilled_roles:
+            return
+        self._backfilled_roles = True
+        self.bot.loop.create_task(self._backfill_mc_roles())
+
+    async def _backfill_mc_roles(self) -> None:
+        for guild in self.bot.guilds:
+            try:
+                role = await self._mc_player_role(guild)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("MC role backfill skipped %s: %s", guild.id, exc)
+                continue
+            if role is None:
+                continue
+            fixed = 0
+            for member in guild.members:
+                if member.bot:
+                    continue
+                record = await self._record_for(member.id)
+                if self._mc_link_of(record) and role not in member.roles:
+                    try:
+                        await member.add_roles(role,
+                                               reason="MC role backfill (linked)")
+                        fixed += 1
+                    except Exception as exc:  # noqa: BLE001
+                        LOG.warning("MC backfill role on %s failed: %s",
+                                    member.id, exc)
+            LOG.info("MC player role backfill on %s: %s roles added", guild.id, fixed)
+
+    async def _console_endpoint(self, session: aiohttp.ClientSession
+                                ) -> tuple[str, str]:
+        """Fresh websocket (token, socket-url) for the console stream."""
+        async with session.get(_server_url("websocket")) as resp:
+            resp.raise_for_status()
+            data = (await resp.json())["data"]
+        return data["token"], data["socket"]
+
+    async def _console_watch(self) -> None:
+        """Stream the Pterodactyl console for join/leave lines (plugin-free)."""
+        backoff = 5.0
+        while not self._ws_stop.is_set():
+            try:
+                async with self._new_session() as session:
+                    token, url = await self._console_endpoint(session)
+                    async with session.ws_connect(
+                            url, headers={"Origin": config.MC_PTERO_URL},
+                            heartbeat=30.0) as ws:
+                        await ws.send_json({"event": "auth", "args": [token]})
+                        backoff = 5.0
+                        async for msg in ws:
+                            if self._ws_stop.is_set():
+                                return
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                                aiohttp.WSMsgType.ERROR):
+                                    break
+                                continue
+                            try:
+                                data = json.loads(msg.data)
+                            except json.JSONDecodeError:
+                                continue
+                            evt = data.get("event")
+                            args = data.get("args") or []
+                            if evt == "console output":
+                                line = " ".join(str(a) for a in args)
+                                self._consume_console_line(line)
+                            elif evt == "status":
+                                state = str(args[0]) if args else ""
+                                if state != "running":
+                                    self._online.clear()
+                            elif evt == "token expiring" and args:
+                                # Panel hands a fresh token; re-auth with it.
+                                await ws.send_json(
+                                    {"event": "auth", "args": [str(args[0])]})
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - reconnect on any drop
+                LOG.warning("MC console watch dropped: %s", exc)
+            if self._ws_stop.is_set():
+                return
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60.0)
+
+    _JOIN_RE = re.compile(r"\]:\s*([A-Za-z0-9_]{1,16}) joined the game")
+    _LEAVE_RE = re.compile(
+        r"\]:\s*([A-Za-z0-9_]{1,16}) (?:left the game|lost connection:.*|disconnected)")
+
+    def _consume_console_line(self, line: str) -> None:
+        """Track online players from console output; schedule the rally ping."""
+        m = self._JOIN_RE.search(line)
+        if m:
+            name = m.group(1)
+            if name in self._online:
+                return
+            self._online[name] = time.time()
+            self._pending_rally.add(name)
+            self._schedule_rally()
+            return
+        m = self._LEAVE_RE.search(line)
+        if m:
+            self._online.pop(m.group(1), None)
+
+    def _schedule_rally(self) -> None:
+        if self._rally_task is not None and not self._rally_task.done():
+            return
+        self._rally_task = asyncio.create_task(self._flush_rally())
+
+    async def _flush_rally(self) -> None:
+        """Coalesce bursts, then one mention-limited role ping per cooldown."""
+        await asyncio.sleep(10.0)  # let a squad's joins land in one message
+        names = list(self._pending_rally)
+        self._pending_rally.clear()
+        if not names:
+            return
+        if time.time() < self._rally_cooldown_until:
+            return
+        self._rally_cooldown_until = (time.time()
+                                      + config.MC_RALLY_COOLDOWN)
+        try:
+            for guild in self.bot.guilds:
+                channel = discord.utils.get(guild.text_channels,
+                                            name=config.CHANNEL_ANNOUNCEMENTS)
+                if channel is None:
+                    continue
+                role = await self._mc_player_role(guild)
+                mention = role.mention if role else "🎮"
+                shown = names[:5]
+                extra = f" and {len(names) - 5} more" if len(names) > 5 else ""
+                text = (f"{mention} **{', '.join(shown)}{extra}** just hopped on "
+                        f"**{config.MC_SERVER_NAME}** — jump in! "
+                        f"`{config.MC_ADDRESS}:{config.MC_PORT}`")
+                await channel.send(text)
+                break
+        except Exception as exc:  # noqa: BLE001 - a rally must never crash a task
+            LOG.warning("MC join rally failed: %s", exc)
 
     # ── status ────────────────────────────────────────────────
     @commands.hybrid_command(name="mc",
@@ -361,8 +564,13 @@ class Minecraft(commands.Cog):
         embed.add_field(name=t("mc.field.version", lang), value=version or "—")
         embed.add_field(name=t("mc.field.status", lang), value=state_emoji)
         if players is not None:
-            embed.add_field(name=t("mc.field.players", lang),
-                            value=f"{players.get('online', 0)}/{players.get('max', 0)}")
+            online = players.get("online", 0)
+            value = f"{online}/{players.get('max', 0)}"
+            if online and self._online:
+                names = sorted(self._online)[:6]
+                extra = " +…" if len(self._online) > len(names) else ""
+                value += f" · {', '.join(names) + extra}"
+            embed.add_field(name=t("mc.field.players", lang), value=value)
         else:
             embed.add_field(name=t("mc.field.players", lang), value="—")
         if include_guide:
@@ -487,6 +695,7 @@ class Minecraft(commands.Cog):
                                      entries_to_add, _now_iso())
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             LOG.warning("linkmc: could not save link for %s: %s", member.id, exc)
+        await self._ensure_mc_role(member)
         return True, msg + note + t("linkmc.linked_audit", lang)
 
     async def _run_unlink(self, member: discord.Member, lang: str) -> tuple[bool, str]:
@@ -516,6 +725,7 @@ class Minecraft(commands.Cog):
             await self._clear_mc_link(member.id)
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             LOG.warning("unlink: could not clear record for %s: %s", member.id, exc)
+        await self._drop_mc_role(member)
         return True, t("mc.unlink.done", lang, name=name)
 
     @linkmc.error
@@ -590,6 +800,50 @@ class Minecraft(commands.Cog):
             pass
         _ok, text = await self._power_core(ctx.author, lang, signal)
         await ctx.send(text)
+
+    # ── /mcsession: ping the whole linked player base ─────────
+    @commands.hybrid_command(
+        name="mcsession",
+        description="Ping every linked Minecraft player (MC operator or staff).")
+    @commands.guild_only()
+    async def mcsession(self, ctx: commands.Context, message: str = None):
+        """Broadcast a join-call to all linked Minecraft players.
+
+        Usable by MC operators (via the panel console key) and by anyone
+        with ``announcements.create`` (VP+ / bot staff). The mention works
+        because every linked player wears the auto-assigned Minecraft
+        Player role. The announcement card itself is always English —
+        server broadcasts are intentionally not localized.
+        """
+        lang = await self._lang(ctx)
+        is_operator = self._is_mc_operator(ctx.author)
+        if not is_operator:
+            scopes = await scopes_for_author(ctx)
+            if "announcements.create" not in scopes:
+                await ctx.send(t("mcsession.deny", lang))
+                return
+        if not await self._require_configured(ctx, lang):
+            return
+        try:
+            await ctx.defer()
+        except discord.HTTPException:
+            pass
+        channel = (discord.utils.get(ctx.guild.text_channels,
+                                     name=config.CHANNEL_ANNOUNCEMENTS)
+                   or ctx.channel)
+        role = await self._mc_player_role(ctx.guild)
+        mention = role.mention if role else "🎮"
+        text = (message or t("mcsession.default", lang)).strip()
+        card = (f"{mention} 🎮 **{text}**\n\n"
+                f"📡 **{config.MC_SERVER_NAME}** — "
+                f"`{config.MC_ADDRESS}:{config.MC_PORT}`")
+        try:
+            await channel.send(card)
+        except discord.HTTPException as exc:
+            LOG.warning("mcsession broadcast failed: %s", exc)
+            await ctx.send(t("mcsession.failed", lang))
+            return
+        await ctx.send(t("mcsession.sent", lang, channel=channel.mention))
 
 
 # ── Interactive menu views (settings-style button drill-downs) ─────────
