@@ -346,6 +346,43 @@ any role whose name contains "archon", so emoji-prefixed names survive).
 They send Pterodactyl power signals through the **Client API** (`/power`), so
 the panel key needs power scope on top of file/console.
 
+### 🏷 Player tagging & join rally
+
+Every member who links a Minecraft account is auto-assigned the
+**`MC_PLAYER_ROLE`** role (created by the bot on first use, backfilled for
+existing links on boot) and loses it again on unlink — so **one `@role`
+mention pings the whole linked player base**:
+
+- **`/mcsession [message]`** — MC operators (`MC_CONTROL_USER_IDS`) or anyone
+  with the `announcements.create` scope (VP+ / bot staff) posts an
+  **English rally card** in the announcements channel with a live join address.
+  The ack message itself is localized per member.
+- **Auto join-rally** — the bot streams the server console over a
+  **Pterodactyl websocket** (no plugins) and watches for `joined the game`.
+  Joins are burst-coalesced, then capped at 5 names (+N) and posted as one
+  role ping to the announcements channel, **at most once per
+  `MC_RALLY_COOLDOWN`** (default 2700 s). The live names also enrich the
+  “Players” line on the `/mc` hub while the watcher is connected.
+
+Additional env vars:
+
+```
+MC_PLAYER_ROLE=⛏️ Minecraft Player      # role auto-assigned on link
+MC_RALLY_COOLDOWN=2700                  # min seconds between auto pings
+```
+
+### 🔄 `/bot status` update checker
+
+`/bot status` now compares the running build to **`origin/nightly`** (the same
+ref `/bot update` pulls) — fetch is cached 120 s — and shows:
+
+- ✅ **Up to date** when `HEAD` equals (or is ahead of) the remote;
+- ⬆️ **N commits behind** with a 3-commit preview and an **`⬆️ Update to
+  nightly (N commits)` button** (bot-admin interaction only);
+- a **confirm-first** step that warns it runs `git pull --ff-only origin nightly`
+  and restarts the bot — identical to `/bot update`, restart-ack included;
+- ⚠️ a **diverged** note when fast-forwarding isn't possible (manual redeploy).
+
 ---
 
 ## 🌐 Languages (`/settings`, `/language`)

@@ -105,3 +105,11 @@ MC_SERVER_ID = _env("MC_SERVER_ID", "")
 MC_ADDRESS = _env("MC_ADDRESS", "")
 MC_PORT = _env("MC_PORT", 25566, cast=int)
 MC_SERVER_NAME = _env("MC_SERVER_NAME", "Robotics CMC")
+
+# Auto-assigned to every member who links a Minecraft account, so a single
+# role mention pings the whole linked player base (used by /mcsession and the
+# auto "someone joined" rally).
+MC_PLAYER_ROLE = _env("MC_PLAYER_ROLE", "⛏️ Minecraft Player")
+
+# How often the auto join-rally may ping the Minecraft player role (seconds).
+MC_RALLY_COOLDOWN = _env("MC_RALLY_COOLDOWN", 2700, cast=int)
