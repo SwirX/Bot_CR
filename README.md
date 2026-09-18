@@ -300,6 +300,28 @@ MC_SERVER_NAME=Robotics CMC
 
 ---
 
+## 🌐 Languages (`/settings`, `/language`)
+
+The bot speaks **English, French and Arabic**. Which language you see depends
+on *who triggered the command*:
+
+- `/settings` opens an interactive menu (Dank Memer style): the message's
+  content is the current state, and **buttons drill down until the choice** —
+  `⚙️ Settings → 🌐 Language → 🇬🇧 English / 🇫🇷 Français / 🇸🇦 العربية`.
+- `/language <english|french|arabic>` is the quick, non-interactive version.
+  Both work in a server **or in a DM** (private message to the bot).
+- Resolution per member: their stored `lang` → their **Discord locale** (if it
+  matches a supported language) → English.
+- **Server-broadcast messages** (welcome channel, dashboard tracker,
+  announcements) stay in **English** — the server's default language — and are
+  unaffected by member choices.
+
+Strings live in `i18n/{en,fr,ar}.json` (one table per language, flat keys with
+`{placeholder}` formatting). `i18n/core.py` holds the `t(key, lang)` lookup and
+the resolver; new cogs import `resolve_member_lang(ctx)` + `t()`.
+
+---
+
 ## 🚀 Deploy (Render)
 
 `render.yaml` describes a free-worker service. `BOT_TOKEN` and

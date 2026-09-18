@@ -32,6 +32,7 @@ from discord.ext import commands
 
 import config
 from data.store import store
+from i18n.core import resolve_member_lang, t
 
 LOG = logging.getLogger("bot.minecraft")
 
@@ -206,11 +207,15 @@ class Minecraft(commands.Cog):
         return bool(config.MC_PTERO_CLIENT_KEY and config.MC_SERVER_ID
                     and config.MC_ADDRESS)
 
-    async def _require_configured(self, ctx) -> bool:
+    async def _require_configured(self, ctx, lang: str) -> bool:
         if self._configured():
             return True
-        await ctx.send("⚠️ Minecraft commands aren't configured on this bot yet.")
+        await ctx.send(t("mc.unconfigured", lang))
         return False
+
+    async def _lang(self, ctx) -> str:
+        locale = str(ctx.interaction.locale) if ctx.interaction else None
+        return await resolve_member_lang(ctx.author.id, locale)
 
     @staticmethod
     def _new_session() -> aiohttp.ClientSession:
@@ -230,12 +235,13 @@ class Minecraft(commands.Cog):
         await self._status(ctx)
 
     async def _status(self, ctx: commands.Context):
-        if not await self._require_configured(ctx):
-            return
         try:
             await ctx.defer()
         except discord.HTTPException:
             pass
+        lang = await self._lang(ctx)
+        if not await self._require_configured(ctx, lang):
+            return
         version = None
         players = None
         state = "offline"
@@ -256,33 +262,29 @@ class Minecraft(commands.Cog):
                         LOG.warning("Minecraft status ping failed: %s", exc)
         except Exception as exc:
             LOG.warning("Minecraft status: Pterodactyl API failed: %s", exc)
-            await ctx.send("⚠️ Couldn't reach the Pterodactyl panel for server state.")
+            await ctx.send(t("mc.panel_unreachable", lang))
             return
 
-        state_emoji = {"running": "🟢 Running", "starting": "🟡 Starting",
-                       "stopping": "🟠 Stopping"}.get(state, "🔴 Offline")
-        embed = discord.Embed(title=f"⛏️ {name}", color=0x55AA55)
-        embed.add_field(name="IP", value=f"`{config.MC_ADDRESS}:{config.MC_PORT}`")
-        embed.add_field(name="Version", value=version or "—")
-        embed.add_field(name="Status", value=state_emoji)
+        state_emoji = {
+            "running": t("mc.status.running", lang),
+            "starting": t("mc.status.starting", lang),
+            "stopping": t("mc.status.stopping", lang),
+        }.get(state, t("mc.status.offline", lang))
+        embed = discord.Embed(title=t("mc.title", lang, name=name), color=0x55AA55)
+        embed.add_field(name=t("mc.field.ip", lang),
+                        value=f"`{config.MC_ADDRESS}:{config.MC_PORT}`")
+        embed.add_field(name=t("mc.field.version", lang), value=version or "—")
+        embed.add_field(name=t("mc.field.status", lang), value=state_emoji)
         if players is not None:
-            embed.add_field(name="Players",
+            embed.add_field(name=t("mc.field.players", lang),
                             value=f"{players.get('online', 0)}/{players.get('max', 0)}")
         else:
-            embed.add_field(name="Players", value="—")
+            embed.add_field(name=t("mc.field.players", lang), value="—")
         embed.add_field(
-            name="🔗 Discord ↔ Minecraft",
-            value=(
-                "Join the whitelist: `/linkmc <username>` + **account**:\n"
-                "• **free** — cracked launchers (TLauncher, SKlauncher, "
-                "PojavLauncher…)\n"
-                "• **paid** — you bought Minecraft and log in with the official "
-                "account (you already know you're paid 😉)\n"
-                "⚠️ Free players must pick **free** — choosing *paid* by "
-                "mistake locks you out of the server."
-            ),
+            name=t("mc.linking.title", lang),
+            value=t("mc.linking.body", lang),
         )
-        embed.set_footer(text="Username is case-sensitive — type it exactly as your launcher shows it")
+        embed.set_footer(text=t("mc.footer", lang))
         await ctx.send(embed=embed)
 
     # ── whitelist ─────────────────────────────────────────────
@@ -298,12 +300,16 @@ class Minecraft(commands.Cog):
         UUID so the official launcher works too), \"free\" for offline/cracked
         accounts (adds the offline UUID of the exact name as typed).
         """
-        if not await self._require_configured(ctx):
+        try:
+            await ctx.defer()
+        except discord.HTTPException:
+            pass
+        lang = await self._lang(ctx)
+        if not await self._require_configured(ctx, lang):
             return
         username = username.strip()
         if not _USERNAME_RE.match(username):
-            await ctx.send("⚠️ That doesn't look like a Minecraft username "
-                           "(1–16 letters, digits or underscores).")
+            await ctx.send(t("linkmc.not_username", lang))
             return
         if account == "paid":
             # Paid account — whitelist the REAL uuid (official launcher) AND
@@ -320,8 +326,7 @@ class Minecraft(commands.Cog):
                     {"uuid": real_uuid, "name": canonical},
                     {"uuid": _offline_uuid(canonical), "name": canonical},
                 ]
-                note = (" (paid account — covered on the official launcher "
-                        "**and** free launchers)")
+                note = t("linkmc.note_paid", lang)
             else:
                 # Claimed paid but Mojang doesn't know the name — don't write
                 # a fake real UUID; add the offline entry and tell the member.
@@ -329,10 +334,7 @@ class Minecraft(commands.Cog):
                 entries_to_add = [
                     {"uuid": _offline_uuid(canonical), "name": canonical},
                 ]
-                note = (" (you picked **paid**, but Mojang doesn't know this "
-                        "name — only the free/offline entry was added, so it "
-                        "only works via a free launcher. Double-check the "
-                        "spelling or pick free.)")
+                note = t("linkmc.note_paid_unknown", lang)
         else:
             # Free (cracked) account: whitelist the offline uuid of the EXACT
             # name as typed. Mojang's capitalisation of the same letters is a
@@ -342,13 +344,8 @@ class Minecraft(commands.Cog):
             entries_to_add = [
                 {"uuid": _offline_uuid(canonical), "name": canonical},
             ]
-            note = (" (free account — name is case-sensitive, keep it exactly "
-                    "as your launcher uses it)")
+            note = t("linkmc.note_free", lang)
 
-        try:
-            await ctx.defer()
-        except discord.HTTPException:
-            pass
         try:
             async with self._new_session() as session:
                 state = await server_state(session)
@@ -356,8 +353,7 @@ class Minecraft(commands.Cog):
                 known = {str(e.get("uuid")) for e in existing}
                 fresh = [e for e in entries_to_add if e["uuid"] not in known]
                 if not fresh:
-                    await ctx.send(f"ℹ️ **{canonical}** is already fully on the "
-                                   "whitelist.")
+                    await ctx.send(t("linkmc.already", lang, name=canonical))
                     return
                 existing.extend(fresh)
                 # Write the file directly and reload if running — uniform for
@@ -367,40 +363,26 @@ class Minecraft(commands.Cog):
                 await write_whitelist(session, existing)
                 if state == "running":
                     await send_command(session, "whitelist reload")
-                    msg = (f"✅ **{canonical}** was whitelisted "
-                           f"({len(fresh)} UUID entr{'y' if len(fresh) == 1 else 'ies'}) "
-                           "— applied live. 🎮")
+                    msg = t("linkmc.success_running", lang, name=canonical)
                 else:
-                    msg = (f"✅ **{canonical}** was added to whitelist.json — "
-                           "it applies when the server starts. 🎮")
+                    msg = t("linkmc.success_stopped", lang, name=canonical)
         except Exception as exc:
             LOG.warning("linkmc failed for %r: %s", canonical, exc)
-            await ctx.send("⚠️ Something went wrong talking to the panel — "
-                           "try again or ask staff to add you.")
+            await ctx.send(t("linkmc.failed", lang))
             return
         try:
             await store.merge_member(ctx.author.id, {"mc_username": canonical})
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             LOG.warning("linkmc: could not save link for %s: %s", ctx.author.id, exc)
-        await ctx.send(msg + note + "\nIt's linked to your Discord, so staff can "
-                       "audit who asked for what.")
+        await ctx.send(msg + note + t("linkmc.linked_audit", lang))
 
     @linkmc.error
     async def linkmc_error(self, ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, (commands.MissingRequiredArgument,
                               commands.BadArgument)):
+            lang = await self._lang(ctx)
             await ctx.send(
-                "📖 **Using /linkmc** — link Discord to Minecraft so you can join:\n"
-                "`/linkmc <your minecraft username>` then set **account**:\n"
-                "• **free** — cracked/offline launchers (TLauncher, SKlauncher, "
-                "PojavLauncher…)\n"
-                "• **paid** — you bought Minecraft and use the official account "
-                "(you already know you're paid)\n"
-                "⚠️ **Get it right**: free players must pick **free**. If you "
-                "pick *paid* while playing on a free launcher, you won't be "
-                "able to join.\n"
-                "Type your username **exactly** as your launcher shows it — "
-                "it's case-sensitive."
+                t("linkmc.usage_title", lang) + "\n" + t("linkmc.usage_body", lang)
             )
             return
         raise error  # cooldown and friends keep the default handling
