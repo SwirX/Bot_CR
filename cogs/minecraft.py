@@ -270,7 +270,19 @@ class Minecraft(commands.Cog):
                             value=f"{players.get('online', 0)}/{players.get('max', 0)}")
         else:
             embed.add_field(name="Players", value="—")
-        embed.set_footer(text="Want in? Use /linkmc <username> (free or paid)")
+        embed.add_field(
+            name="🔗 Discord ↔ Minecraft",
+            value=(
+                "Join the whitelist: `/linkmc <username>` + **account**:\n"
+                "• **free** — cracked launchers (TLauncher, SKlauncher, "
+                "PojavLauncher…)\n"
+                "• **paid** — you bought Minecraft and log in with the official "
+                "account (you already know you're paid 😉)\n"
+                "⚠️ Free players must pick **free** — choosing *paid* by "
+                "mistake locks you out of the server."
+            ),
+        )
+        embed.set_footer(text="Username is case-sensitive — type it exactly as your launcher shows it")
         await ctx.send(embed=embed)
 
     # ── whitelist ─────────────────────────────────────────────
@@ -372,6 +384,26 @@ class Minecraft(commands.Cog):
             LOG.warning("linkmc: could not save link for %s: %s", ctx.author.id, exc)
         await ctx.send(msg + note + "\nIt's linked to your Discord, so staff can "
                        "audit who asked for what.")
+
+    @linkmc.error
+    async def linkmc_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, (commands.MissingRequiredArgument,
+                              commands.BadArgument)):
+            await ctx.send(
+                "📖 **Using /linkmc** — link Discord to Minecraft so you can join:\n"
+                "`/linkmc <your minecraft username>` then set **account**:\n"
+                "• **free** — cracked/offline launchers (TLauncher, SKlauncher, "
+                "PojavLauncher…)\n"
+                "• **paid** — you bought Minecraft and use the official account "
+                "(you already know you're paid)\n"
+                "⚠️ **Get it right**: free players must pick **free**. If you "
+                "pick *paid* while playing on a free launcher, you won't be "
+                "able to join.\n"
+                "Type your username **exactly** as your launcher shows it — "
+                "it's case-sensitive."
+            )
+            return
+        raise error  # cooldown and friends keep the default handling
 
 
 async def setup(bot: commands.Bot):
