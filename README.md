@@ -293,10 +293,27 @@ MC_SERVER_ID=<server identifier, e.g. 96f52139>
 MC_ADDRESS=minecraft.alibks.dev
 MC_PORT=25566
 MC_SERVER_NAME=Robotics CMC
+# Optional: who may run /mcstart /mcstop /mcrestart (defaults to BOT_ADMIN_USER_IDS).
+# MC_CONTROL_USER_IDS=407922956757499905
 ```
 
 > 🔒 The client API key can manage the panel's servers, so keep it out of
 > version control — it lives in `.env` only.
+
+### 🎛 Server power control (`/mcstart`, `/mcstop`, `/mcrestart`)
+
+Only the **bot operator** and the **Archon** role can start/stop/restart the
+server — deliberately *not* pres/VP, other staff roles, or server admins:
+
+- `/mcstart` — boot the server.
+- `/mcstop` — graceful shutdown.
+- `/mcrestart` — graceful restart (offline server → hints `/mcstart` instead).
+
+The operator's IDs come from `MC_CONTROL_USER_IDS` (defaults to
+`BOT_ADMIN_USER_IDS`). The Archon role is matched by `ROLE_ARCHON` (fallback:
+any role whose name contains "archon", so emoji-prefixed names survive).
+They send Pterodactyl power signals through the **Client API** (`/power`), so
+the panel key needs power scope on top of file/console.
 
 ---
 

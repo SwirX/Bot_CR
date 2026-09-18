@@ -71,6 +71,16 @@ BOT_ADMIN_USER_IDS = {
     if i.strip().isdigit()
 }
 
+# Who may control the Minecraft server (/mcstart, /mcstop, /mcrestart) — only
+# these IDs plus the Archon role; deliberately NOT general bot staff, pres/VP
+# or server admins. Defaults to the bot operator IDs so it works out of the
+# box; set MC_CONTROL_USER_IDS to tighten or widen the list.
+MC_CONTROL_USER_IDS = {
+    int(i) for i in _env("MC_CONTROL_USER_IDS", _env("BOT_ADMIN_USER_IDS", ""))
+    .split(",")
+    if i.strip().isdigit()
+}
+
 # Leadership roles — /setlead may replace the holders of these.
 ROLE_PRESIDENT = _env("ROLE_PRESIDENT", "President")
 ROLE_VICE_PRESIDENT = _env("ROLE_VICE_PRESIDENT", "Vice President")

@@ -117,6 +117,12 @@ async def send_command(session: aiohttp.ClientSession, command: str) -> None:
         resp.raise_for_status()
 
 
+async def power_action(session: aiohttp.ClientSession, signal: str) -> None:
+    """Send a Pterodactyl power signal: start, stop or restart (graceful)."""
+    async with session.post(_server_url("power"), json={"signal": signal}) as resp:
+        resp.raise_for_status()
+
+
 async def mojang_profile(username: str) -> dict | None:
     """Resolve a Minecraft username to {id (dashed uuid), name}; None if unknown."""
     url = f"https://api.mojang.com/users/profiles/minecraft/{username}"
@@ -206,6 +212,23 @@ class Minecraft(commands.Cog):
     def _configured(self) -> bool:
         return bool(config.MC_PTERO_CLIENT_KEY and config.MC_SERVER_ID
                     and config.MC_ADDRESS)
+
+    @staticmethod
+    def _is_mc_operator(member: discord.Member) -> bool:
+        """MC power control is restricted to the operator and the Archon role.
+
+        Deliberately much narrower than :func:`cogs._perms.is_bot_admin`:
+        pres/VP, other staff roles and members with server-administrator
+        permissions are all excluded — only the operator's user ID and the
+        Archon role may start/stop/restart the server.
+        """
+        if member.id in config.MC_CONTROL_USER_IDS:
+            return True
+        wanted = config.ROLE_ARCHON.strip().lower()
+        return any(
+            role.name.strip().lower() == wanted or "archon" in role.name.strip().lower()
+            for role in member.roles
+        )
 
     async def _require_configured(self, ctx, lang: str) -> bool:
         if self._configured():
@@ -386,6 +409,61 @@ class Minecraft(commands.Cog):
             )
             return
         raise error  # cooldown and friends keep the default handling
+
+    # ── server power control (operator/Archon only) ──────────
+    @commands.hybrid_command(name="mcstart",
+                             description="Start the Minecraft server. (Operator or Archon only)")
+    @commands.guild_only()
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    async def mcstart(self, ctx: commands.Context):
+        """Boot the Robotics CMC server."""
+        await self._power(ctx, "start")
+
+    @commands.hybrid_command(name="mcstop",
+                             description="Stop the Minecraft server. (Operator or Archon only)")
+    @commands.guild_only()
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    async def mcstop(self, ctx: commands.Context):
+        """Gracefully shut down the Robotics CMC server."""
+        await self._power(ctx, "stop")
+
+    @commands.hybrid_command(name="mcrestart",
+                             description="Restart the Minecraft server. (Operator or Archon only)")
+    @commands.guild_only()
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    async def mcrestart(self, ctx: commands.Context):
+        """Gracefully restart the Robotics CMC server."""
+        await self._power(ctx, "restart")
+
+    async def _power(self, ctx: commands.Context, signal: str):
+        lang = await self._lang(ctx)
+        if not self._is_mc_operator(ctx.author):
+            await ctx.send(t("mc.ctrl.deny", lang))
+            return
+        if not await self._require_configured(ctx, lang):
+            return
+        try:
+            await ctx.defer()
+        except discord.HTTPException:
+            pass
+        try:
+            async with self._new_session() as session:
+                state = await server_state(session)
+                if signal == "start" and state in ("running", "starting"):
+                    await ctx.send(t("mc.ctrl.already_running", lang))
+                    return
+                if signal == "stop" and state in ("offline", "stopping"):
+                    await ctx.send(t("mc.ctrl.already_offline", lang))
+                    return
+                if signal == "restart" and state == "offline":
+                    await ctx.send(t("mc.ctrl.need_running", lang))
+                    return
+                await power_action(session, signal)
+        except Exception as exc:
+            LOG.warning("mc power %s failed: %s", signal, exc)
+            await ctx.send(t("mc.ctrl.failed", lang))
+            return
+        await ctx.send(t(f"mc.ctrl.{signal}_sent", lang))
 
 
 async def setup(bot: commands.Bot):
