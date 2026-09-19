@@ -371,6 +371,50 @@ MC_PLAYER_ROLE=⛏️ Minecraft Player      # role auto-assigned on link
 MC_RALLY_COOLDOWN=2700                  # min seconds between auto pings
 ```
 
+### 🔐 mc-link (Discord ↔ Minecraft single sign-on, `/mclink`, `/mcpass`)
+
+The cracked (offline-mode) server can't trust what clients claim, so a Paper
+plugin gates logins through **AuthMe** and this bot — the **only** component
+that mints links and credentials — anchors every name to a Discord identity.
+Minecraft is an **untrusted client boundary**: a username, UUID or "op" flag a
+client presents is data, never proof. The Appwrite backend (`mc_link_codes`,
+`mc_auth`, `mc_challenges`) is the shared source of truth between the bot and
+the plugin; the plugin only *consumes* backend state and bot-issued secrets.
+
+- **`/mclink <username>`** (hybrid, guild-only, 2/60 s cooldown) — validates
+  with the existing `_USERNAME_RE`, refuses names already linked to a *different*
+  Discord account, then mints a single-use 6-char code in `mc_link_codes`
+  (TTL `MC_LINK_CODE_TTL`) and **DMs it** — codes and temp passwords are never
+  posted in a channel. In-game `/mcverify <code>` claims it.
+- **Watchers (~`MC_LINK_POLL_SECONDS`)** — `status=used` codes get a thanks DM,
+  the `MC_PLAYER_ROLE` role, a `bot_members.links.minecraft` sync (`type=linked`,
+  shown on `/mc` and `/profile`), and an audit entry. `mc_challenges`:
+  `new_ip` pending → a **12-char temp password**, AES-256-GCM sealed to
+  `payload_enc` (AAD = username), `approved`, DM'd with a **Deny** path;
+  `change_password` `done`/`failed` → DM confirmation/soft-failure.
+  Markers in `bot_settings` resume after restarts (at-least-once delivery).
+- **`/mcpass`** (slash) and the **🔑 Change password** button on `/mc` and the
+  Minecraft tab of `/profile` share one modal (8–64 chars + confirm) → an
+  encrypted `change_password` challenge the plugin applies server-side.
+- **📱 Devices** button (linked accounts only) — lists `current_ip` + `last_ips`
+  from `mc_auth`, IPs **masked by default** (`203.0.113.***`, raw only on a
+  detail tap), each removable behind a confirm (owner/operator only). Removal
+  edits `mc_auth.last_ips` directly so that IP triggers a fresh new-IP
+  challenge instead of auto-login — the café / school-Wi-Fi case.
+
+```
+MC_LINK_SECRET=...                     # AES-256-GCM key, 32 bytes hex, shared with the plugin
+MC_LINK_CODE_TTL=300                   # link-code lifetime (s)
+MC_TEMP_TTL=300                        # temp-password lifetime (s)
+MC_LINK_POLL_SECONDS=5                 # watcher poll interval (s)
+```
+
+The crypto twin (`cogs/_mc_crypto.py`) must stay byte-compatible with the
+plugin's `CipherBox` (`iv + tag + ciphertext`, hex, AAD = username); crypto and
+credential-mint helpers are covered by `scripts/test_mclink.py` (run alongside
+the smoke test; the watcher loops are guarded so an empty `MC_LINK_SECRET`
+disables the whole cog instead of crashing).
+
 ### 🔄 `/bot status` update checker
 
 `/bot status` now compares the running build to **`origin/nightly`** (the same
@@ -458,11 +502,13 @@ it automatically.
 ## ✅ Quality gates
 
 `.github/workflows/ci.yml` runs on every push/PR against Python 3.12 and 3.13:
-byte-compiles every module and runs `scripts/smoke_test.py` (loads all cogs,
-asserts every command is hybrid and the custom `help` is installed).
+byte-compiles every module, runs `scripts/smoke_test.py` (loads all cogs,
+asserts every command is hybrid and the custom `help` is installed) and the
+hermetic `scripts/test_mclink.py` (CipherBox interop vectors + credential mint).
 
 ```bash
 python scripts/smoke_test.py   # run the same check locally
+python scripts/test_mclink.py  # mc-link crypto/credential unit checks
 ```
 
 ---
