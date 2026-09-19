@@ -117,6 +117,15 @@ class DashboardView(discord.ui.View):
         self.cog = cog
         self.user_id = user_id
 
+    async def _owned(self, interaction) -> bool:
+        """The dashboard panels hold private per-member data — owner only."""
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "🔒 This dashboard belongs to someone else — run `/dashboard` "
+                "yourself for your own panels.", ephemeral=True)
+            return False
+        return True
+
     @discord.ui.button(label="📋 Tasks", style=discord.ButtonStyle.primary,
                        custom_id="dash:tasks")
     async def tasks(self, interaction, button):
@@ -146,6 +155,8 @@ class DashboardView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def _section(self, interaction, text, title):
+        if not await self._owned(interaction):
+            return
         if not text:
             text = "Nothing here yet."
         embed = discord.Embed(title=title, description=text, color=discord.Color.blue())
@@ -156,23 +167,38 @@ class ProfileHubView(discord.ui.View):
     """/profile identity hub: Overview / Minecraft / Robotics tabs (Dank-Memer style)."""
 
     def __init__(self, cog: "Members", lang: str, member: discord.Member,
-                 *, timeout: float = 180.0):
+                 *, user: discord.Member = None, timeout: float = 180.0):
+        """``user`` is the invoker — only they may navigate or close the view."""
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member = cog, lang, member
+        self.user_id = user.id if user is not None else member.id
         self.overview.label = t("profile.tab.overview", lang)
         self.minecraft.label = t("profile.tab.minecraft", lang)
         self.robotics.label = t("profile.tab.robotics", lang)
         self.close.label = t("settings.close", lang)
 
+    async def _owned(self, interaction: discord.Interaction) -> bool:
+        """Refuse presses from anyone who didn't run the /profile command."""
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "🔒 This profile view belongs to the command author — "
+                "run `/profile` yourself to use its tabs.", ephemeral=True)
+            return False
+        return True
+
     @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, row=0)
     async def overview(self, interaction: discord.Interaction,
                        _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         embed = await self.cog._profile_embed(self.member)
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(emoji="⛏️", style=discord.ButtonStyle.primary, row=0)
     async def minecraft(self, interaction: discord.Interaction,
                         _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         mc_cog = self.cog.bot.get_cog("Minecraft")
         if mc_cog is None:
             embed = discord.Embed(description=t("mc.unconfigured", self.lang),
@@ -194,6 +220,8 @@ class ProfileHubView(discord.ui.View):
     @discord.ui.button(emoji="🔬", style=discord.ButtonStyle.secondary, row=0)
     async def robotics(self, interaction: discord.Interaction,
                        _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         embed = discord.Embed(
             title=t("profile.tab.robotics", self.lang),
             description=t("profile.robotics.soon", self.lang),
@@ -204,6 +232,8 @@ class ProfileHubView(discord.ui.View):
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction,
                     _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         await interaction.response.edit_message(
             content=t("profile.closed", self.lang), embed=None, view=None)
 
@@ -218,6 +248,7 @@ class ProfileMinecraftTabView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member, self.mc_cog = cog, lang, member, mc_cog
         self.viewer = viewer
+        self.user_id = viewer.id if viewer is not None else member.id
         self.linked_username = linked_username
         self.link.label = t("mc.hub.link", lang)
         self.unlink.label = t("mc.hub.unlink", lang)
@@ -234,6 +265,15 @@ class ProfileMinecraftTabView(discord.ui.View):
                 viewer.id == member.id or mc_cog._is_mc_operator(viewer)):
             self.remove_item(self.mcpass)
             self.remove_item(self.devices)
+
+    async def _owned(self, interaction: discord.Interaction) -> bool:
+        """Refuse presses from anyone who didn't open this profile tab."""
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "🔒 This profile view belongs to the command author — "
+                "run `/profile` yourself to use its tabs.", ephemeral=True)
+            return False
+        return True
 
     async def _home(self) -> tuple[discord.Embed, "ProfileMinecraftTabView"]:
         can_manage = (self.viewer.id == self.member.id
@@ -252,6 +292,8 @@ class ProfileMinecraftTabView(discord.ui.View):
     @discord.ui.button(emoji="🔗", style=discord.ButtonStyle.primary, row=0)
     async def link(self, interaction: discord.Interaction,
                    _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         view = LinkChoiceView(self.mc_cog, self.lang, self.member,
                               home_factory=self._home)
         await interaction.response.edit_message(embed=await view.embed(), view=view)
@@ -259,6 +301,8 @@ class ProfileMinecraftTabView(discord.ui.View):
     @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger, row=0)
     async def unlink(self, interaction: discord.Interaction,
                      _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         view = UnlinkConfirmView(self.mc_cog, self.lang, self.member,
                                  home_factory=self._home)
         await interaction.response.edit_message(embed=await view.embed(), view=view)
@@ -266,19 +310,25 @@ class ProfileMinecraftTabView(discord.ui.View):
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def back(self, interaction: discord.Interaction,
                    _button: discord.ui.Button):
-        hub = ProfileHubView(self.cog, self.lang, self.member)
+        if not await self._owned(interaction):
+            return
+        hub = ProfileHubView(self.cog, self.lang, self.member, user=self.viewer)
         embed = await self.cog._profile_embed(self.member)
         await interaction.response.edit_message(embed=embed, view=hub)
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction,
                     _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         await interaction.response.edit_message(
             content=t("profile.closed", self.lang), embed=None, view=None)
 
     @discord.ui.button(emoji="🔑", style=discord.ButtonStyle.primary, row=2)
     async def mcpass(self, interaction: discord.Interaction,
                      _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         mclink = self.cog.bot.get_cog("McLink")
         if mclink is None or not getattr(self, "linked_username", None):
             await interaction.response.defer()
@@ -289,6 +339,8 @@ class ProfileMinecraftTabView(discord.ui.View):
     @discord.ui.button(emoji="📱", style=discord.ButtonStyle.secondary, row=2)
     async def devices(self, interaction: discord.Interaction,
                       _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         mclink = self.cog.bot.get_cog("McLink")
         if mclink is None or not getattr(self, "linked_username", None):
             await interaction.response.defer()
@@ -455,7 +507,7 @@ class Members(commands.Cog):
         member = member or ctx.author
         lang = await resolve_member_lang(ctx.author.id, None)
         embed = await self._profile_embed(member)
-        await ctx.send(embed=embed, view=ProfileHubView(self, lang, member))
+        await ctx.send(embed=embed, view=ProfileHubView(self, lang, member, user=ctx.author))
 
     @commands.hybrid_command(name="whois", description="Internal profile for staff.")
     @commands.guild_only()
