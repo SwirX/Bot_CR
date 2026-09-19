@@ -113,3 +113,15 @@ MC_PLAYER_ROLE = _env("MC_PLAYER_ROLE", "⛏️ Minecraft Player")
 
 # How often the auto join-rally may ping the Minecraft player role (seconds).
 MC_RALLY_COOLDOWN = _env("MC_RALLY_COOLDOWN", 2700, cast=int)
+
+# ── mc-link (Discord ↔ Minecraft single sign-on) ───────────────────────
+# AES-256-GCM key (32 bytes as hex) shared between this bot and the Paper
+# plugin — used to encrypt one-time codes and temporary passwords written to
+# mc_challenges.payload_enc. AAD bound to the plaintext username.
+MC_LINK_SECRET = _env("MC_LINK_SECRET", "")
+# Link codes expire after this many seconds (default 5 min).
+MC_LINK_CODE_TTL = _env("MC_LINK_CODE_TTL", 300, cast=int)
+# Temporary login passwords for new-IP challenges (default 5 min).
+MC_TEMP_TTL = _env("MC_TEMP_TTL", 300, cast=int)
+# Watcher poll interval for mc_link_codes / mc_challenges (seconds).
+MC_LINK_POLL_SECONDS = _env("MC_LINK_POLL_SECONDS", 5, cast=int)

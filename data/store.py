@@ -31,6 +31,10 @@ COLL = {
     "competitions": "bot_competitions",
     "events": "bot_events",
     "polls": "bot_polls",
+    # mc-link (Discord ↔ Minecraft single sign-on).
+    "mc_codes": "mc_link_codes",
+    "mc_auth": "mc_auth",
+    "mc_challenges": "mc_challenges",
 }
 
 
@@ -74,13 +78,28 @@ class Store:
     # ── low-level helpers ──────────────────────────────────────
     @staticmethod
     def _doc_data(doc) -> dict | None:
-        """Extract the plain data dict from an SDK Document model."""
+        """Extract the plain data dict from an SDK Document model.
+
+        Appwrite keeps ``$id``/``$createdAt``/``$updatedAt`` as document meta
+        (outside the ``data`` payload); those are surfaced here so callers can
+        address docs by id and resume watchers from the last update marker.
+        """
         if doc is None:
             return None
         raw = doc.to_dict()
         if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
-            return raw["data"]
-        return raw
+            data = dict(raw["data"])
+        else:
+            data = dict(raw)
+        doc_id = raw.get("$id") or data.get("$id")
+        if doc_id:
+            data["$id"] = doc_id
+        updated = raw.get("$updatedAt")
+        if hasattr(updated, "isoformat"):
+            updated = updated.isoformat()
+        if updated:
+            data["$updatedAt"] = updated
+        return data
 
     async def _get(self, collection: str, doc_id: str) -> dict | None:
         db, db_id = self._raw()
@@ -106,12 +125,17 @@ class Store:
         existing.update(_filled(data))
         await self._replace(collection, doc_id, existing)
 
-    async def _create(self, collection: str, doc_id: str, data: dict) -> None:
+    async def _create(self, collection: str, doc_id: str, data: dict) -> str | None:
+        """Create a document; returns its ``$id`` (random ids: pass ``ID.unique()``)."""
         db, db_id = self._raw()
         try:
-            await asyncio.to_thread(db.create_document, db_id, collection, doc_id, data)
+            doc = await asyncio.to_thread(db.create_document, db_id, collection, doc_id, data)
         except AppwriteException as exc:
             raise StoreError(f"create {collection}/{doc_id}: {exc}") from exc
+        if doc is None:
+            return None
+        raw = doc.to_dict() if isinstance(doc.to_dict(), dict) else {}
+        return raw.get("$id") or (raw.get("data") or {}).get("$id")
 
     async def _list(self, collection: str, queries: list[str] | None = None,
                     limit: int = 100) -> list[dict]:
@@ -454,6 +478,35 @@ class Store:
             n += 1
             code = f"P-{n}"
         return code
+
+    # ── mc-link (Discord ↔ Minecraft single sign-on) ─────────
+    async def mc_create(self, collection: str, data: dict) -> str:
+        """Create a doc with a random id; returns its ``$id`` for later edits."""
+        doc_id = await self._create(COLL[collection], ID.unique(), data)
+        if not doc_id:
+            raise StoreError(f"mc_create {collection}: no document id returned")
+        return doc_id
+
+    async def mc_get(self, collection: str, doc_id: str) -> dict | None:
+        return await self._get(COLL[collection], doc_id)
+
+    async def mc_replace(self, collection: str, doc_id: str, data: dict) -> None:
+        await self._replace(COLL[collection], doc_id, data)
+
+    async def mc_list(self, collection: str, queries: list[str] | None = None,
+                      limit: int = 100) -> list[dict]:
+        """List docs in an mc-link collection (random ids, query-driven)."""
+        return await self._list(COLL[collection], queries, limit=limit)
+
+    async def mc_get_auth(self, username: str) -> dict | None:
+        """The mc_auth profile for an exact/case-sensitive username."""
+        return await self._get(COLL["mc_auth"], username)
+
+    async def mc_save_auth(self, username: str, data: dict) -> None:
+        """Upsert an mc_auth profile (document id == the username)."""
+        payload = dict(data)
+        payload["username"] = username
+        await self._replace(COLL["mc_auth"], username, payload)
 
 
 store = Store()

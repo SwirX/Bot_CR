@@ -7,6 +7,9 @@ Flask==3.1.0
 python-dotenv==1.0.1
 python_dateutil==2.9.0.post0
 appwrite==24.0.0
+# AES-256-GCM for the mc-link credential handoff (CipherBox, shared with the
+# Paper plugin: AAD = username).
+cryptography==50.0.1
 # Bump often: YouTube breaks older extractors, so keep this reasonably current.
 yt-dlp==2026.8.19
 # YTMusic powers query search and the /queue auto radio (yt-dlp's ytsearch is

@@ -883,9 +883,18 @@ def _loading_embed() -> discord.Embed:
 async def render_mc_hub(cog: "Minecraft", lang: str,
                         member: discord.Member
                         ) -> tuple[discord.Embed, "MinecraftHubView"]:
-    """Fresh hub page: live status + the member's link summary + actions."""
+    """Fresh hub page: live status + the member's link summary + actions.
+
+    The ``🔑 Change password`` / ``📱 Devices`` buttons only appear for
+    members whose link came from mc-link (``links.minecraft.type == "linked"``
+    — i.e. a real ``mc_auth`` profile exists to act on).
+    """
     embed = await cog._hub_embed(lang, member)
-    return embed, MinecraftHubView(cog, lang, member)
+    linked = None
+    link = cog._mc_link_of(await cog._record_for(member.id))
+    if link is not None and link.get("type") == "linked":
+        linked = link.get("username")
+    return embed, MinecraftHubView(cog, lang, member, linked_username=linked)
 
 
 async def mc_link_card_embed(cog: "Minecraft", member: discord.Member,
@@ -942,16 +951,24 @@ class MinecraftHubView(discord.ui.View):
     """/mc + /minecraft menu: live status content with action drill-downs."""
 
     def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
-                 *, timeout: float = 180.0):
+                 *, linked_username: str | None = None,
+                 timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member = cog, lang, member
+        self.linked_username = linked_username
         self.refresh.label = t("mc.hub.refresh", lang)
         self.link.label = t("mc.hub.link", lang)
         self.unlink.label = t("mc.hub.unlink", lang)
         self.control.label = t("mc.hub.control", lang)
         self.close.label = t("mc.hub.close", lang)
+        self.mcpass.label = t("mc.hub.mcpass", lang)
+        self.devices.label = t("mc.hub.devices", lang)
         if not cog._is_mc_operator(member):
             self.remove_item(self.control)
+        # mc-link extras only make sense for a real mc_auth profile.
+        if linked_username is None:
+            self.remove_item(self.mcpass)
+            self.remove_item(self.devices)
 
     async def _home(self) -> tuple[discord.Embed, "MinecraftHubView"]:
         return await render_mc_hub(self.cog, self.lang, self.member)
@@ -989,6 +1006,27 @@ class MinecraftHubView(discord.ui.View):
                     _button: discord.ui.Button):
         await interaction.response.edit_message(
             content=t("mc.hub.closed", self.lang), embed=None, view=None)
+
+    @discord.ui.button(emoji="🔑", style=discord.ButtonStyle.primary, row=1)
+    async def mcpass(self, interaction: discord.Interaction,
+                     _button: discord.ui.Button):
+        mclink = self.cog.bot.get_cog("McLink")
+        if mclink is None or not getattr(self, "linked_username", None):
+            await interaction.response.defer()
+            return
+        await mclink.open_mcpass_modal(interaction, self.lang,
+                                       self.linked_username)
+
+    @discord.ui.button(emoji="📱", style=discord.ButtonStyle.secondary, row=1)
+    async def devices(self, interaction: discord.Interaction,
+                      _button: discord.ui.Button):
+        mclink = self.cog.bot.get_cog("McLink")
+        if mclink is None or not getattr(self, "linked_username", None):
+            await interaction.response.defer()
+            return
+        await mclink.open_devices_view(interaction, self.lang,
+                                       self.linked_username,
+                                       home_factory=self._home)
 
 
 class LinkChoiceView(discord.ui.View):
