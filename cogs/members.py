@@ -182,8 +182,13 @@ class ProfileHubView(discord.ui.View):
         can_manage = interaction.user.id == self.member.id or mc_cog._is_mc_operator(interaction.user)
         embed = await mc_link_card_embed(mc_cog, self.member, self.lang,
                                          full=can_manage)
+        linked = None
+        link = mc_cog._mc_link_of(await mc_cog._record_for(self.member.id))
+        if link is not None and link.get("type") == "linked":
+            linked = link.get("username")
         view = ProfileMinecraftTabView(self.cog, self.lang, self.member, mc_cog,
-                                       viewer=interaction.user)
+                                       viewer=interaction.user,
+                                       linked_username=linked)
         await interaction.response.edit_message(embed=embed, view=view)
 
     @discord.ui.button(emoji="🔬", style=discord.ButtonStyle.secondary, row=0)
@@ -208,25 +213,41 @@ class ProfileMinecraftTabView(discord.ui.View):
 
     def __init__(self, cog: "Members", lang: str, member: discord.Member,
                  mc_cog: "Minecraft", *, viewer: discord.Member,
+                 linked_username: str | None = None,
                  timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member, self.mc_cog = cog, lang, member, mc_cog
         self.viewer = viewer
+        self.linked_username = linked_username
         self.link.label = t("mc.hub.link", lang)
         self.unlink.label = t("mc.hub.unlink", lang)
         self.back.label = t("mc.hub.back", lang)
         self.close.label = t("settings.close", lang)
+        self.mcpass.label = t("mc.hub.mcpass", lang)
+        self.devices.label = t("mc.hub.devices", lang)
         if not (viewer.id == member.id or mc_cog._is_mc_operator(viewer)):
             self.remove_item(self.link)
             self.remove_item(self.unlink)
+        # mc-link extras need a real mc_auth profile AND owner/operator access
+        # (device IPs are privacy-sensitive even inside the profile tab).
+        if linked_username is None or not (
+                viewer.id == member.id or mc_cog._is_mc_operator(viewer)):
+            self.remove_item(self.mcpass)
+            self.remove_item(self.devices)
 
     async def _home(self) -> tuple[discord.Embed, "ProfileMinecraftTabView"]:
         can_manage = (self.viewer.id == self.member.id
                       or self.mc_cog._is_mc_operator(self.viewer))
         embed = await mc_link_card_embed(self.mc_cog, self.member, self.lang,
                                          full=can_manage)
+        linked = None
+        link = self.mc_cog._mc_link_of(
+            await self.mc_cog._record_for(self.member.id))
+        if link is not None and link.get("type") == "linked":
+            linked = link.get("username")
         return embed, ProfileMinecraftTabView(
-            self.cog, self.lang, self.member, self.mc_cog, viewer=self.viewer)
+            self.cog, self.lang, self.member, self.mc_cog, viewer=self.viewer,
+            linked_username=linked)
 
     @discord.ui.button(emoji="🔗", style=discord.ButtonStyle.primary, row=0)
     async def link(self, interaction: discord.Interaction,
@@ -254,6 +275,27 @@ class ProfileMinecraftTabView(discord.ui.View):
                     _button: discord.ui.Button):
         await interaction.response.edit_message(
             content=t("profile.closed", self.lang), embed=None, view=None)
+
+    @discord.ui.button(emoji="🔑", style=discord.ButtonStyle.primary, row=2)
+    async def mcpass(self, interaction: discord.Interaction,
+                     _button: discord.ui.Button):
+        mclink = self.cog.bot.get_cog("McLink")
+        if mclink is None or not getattr(self, "linked_username", None):
+            await interaction.response.defer()
+            return
+        await mclink.open_mcpass_modal(interaction, self.lang,
+                                       self.linked_username)
+
+    @discord.ui.button(emoji="📱", style=discord.ButtonStyle.secondary, row=2)
+    async def devices(self, interaction: discord.Interaction,
+                      _button: discord.ui.Button):
+        mclink = self.cog.bot.get_cog("McLink")
+        if mclink is None or not getattr(self, "linked_username", None):
+            await interaction.response.defer()
+            return
+        await mclink.open_devices_view(interaction, self.lang,
+                                       self.linked_username,
+                                       home_factory=self._home)
 
 
 class Members(commands.Cog):
