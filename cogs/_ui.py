@@ -7,10 +7,36 @@ modules import these views with ``from cogs._ui import ...``.
 
 import discord
 
-__all__ = ["ConfirmView", "PaginatorView"]
+__all__ = ["ConfirmView", "PaginatorView", "OwnerView"]
 
 
-class ConfirmView(discord.ui.View):
+class OwnerView:
+    """Shared author-scoping for interactive views.
+
+    Subclasses set ``self.user_id`` (int) on construction; ``owned`` refuses
+    button presses from anyone else with an ephemeral notice. ``user_id=None``
+    leaves the view open to everyone (shared panels such as polls). Override
+    ``_owner_deny_message`` to tailor the refusal text.
+    """
+
+    async def owned(self, interaction: discord.Interaction) -> bool:
+        user_id = getattr(self, "user_id", None)
+        if user_id is None or interaction.user.id == user_id:
+            return True
+        await interaction.response.send_message(
+            self._owner_deny_message(interaction), ephemeral=True)
+        return False
+
+    # Alias used by view callbacks; kept so refactors stay mechanical.
+    async def _owned(self, interaction: discord.Interaction) -> bool:
+        return await self.owned(interaction)
+
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This view belongs to the command author — run the "
+                "command yourself to interact with it.")
+
+
+class ConfirmView(OwnerView, discord.ui.View):
     """Two-button confirm/cancel prompt for destructive actions.
 
     ``on_confirm`` must be an async callable taking the button interaction.
@@ -24,14 +50,8 @@ class ConfirmView(discord.ui.View):
         self.on_confirm = on_confirm
         self.user_id = user.id if hasattr(user, "id") else user
 
-    async def _owned(self, interaction: discord.Interaction) -> bool:
-        """Refuse presses from anyone but the prompting member."""
-        if self.user_id is not None and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "🔒 This prompt belongs to the command author — you can't act on it.",
-                ephemeral=True)
-            return False
-        return True
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return "🔒 This prompt belongs to the command author — you can't act on it."
 
     @discord.ui.button(style=discord.ButtonStyle.danger, label="Confirm")
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
@@ -58,7 +78,7 @@ class ConfirmView(discord.ui.View):
             child.disabled = True
 
 
-class PaginatorView(discord.ui.View):
+class PaginatorView(OwnerView, discord.ui.View):
     """◀ ▶ pager over a list of pages (strings and/or embeds).
 
     Pass ``user`` to scope the pager to its commanding member; without it the
@@ -81,13 +101,9 @@ class PaginatorView(discord.ui.View):
         self.next.disabled = self._index == len(self.pages) - 1
         self.page_label.label = f"{self._index + 1}/{len(self.pages)}"
 
-    async def _owned(self, interaction: discord.Interaction) -> bool:
-        if self.user_id is not None and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "🔒 This pager belongs to the command author — run the command "
-                "yourself to page through it.", ephemeral=True)
-            return False
-        return True
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This pager belongs to the command author — run the command "
+                "yourself to page through it.")
 
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
     async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):
