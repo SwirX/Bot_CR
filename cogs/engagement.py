@@ -12,6 +12,7 @@ import config
 from data.store import store
 from data.store import StoreError
 from cogs._ui import PaginatorView
+from cogs._perms import mod_perms
 
 LOG = logging.getLogger("bot.engagement")
 
@@ -223,7 +224,7 @@ class Engagement(commands.Cog):
         await ctx.send(message)
 
     @challenge.command(name="set", description="Set today's challenge (staff).")
-    @commands.has_permissions(manage_messages=True)
+    @mod_perms(manage_messages=True)
     async def challenge_set(self, ctx, title: str, description: str = ""):
         await store.save_challenge(
             today_str(),
