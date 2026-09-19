@@ -493,9 +493,29 @@ class Minecraft(commands.Cog):
             return {}
 
     @staticmethod
+    def _links_of(record: dict) -> dict:
+        """The member's per-platform identity map, whatever its stored shape.
+
+        Appwrite has no JSON attribute type, so ``links`` lives as a JSON
+        string; legacy/foreign docs may already carry a real dict. Both are
+        accepted here and a single canonical dict is returned.
+        """
+        raw = (record or {}).get("links")
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str) and raw:
+            try:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, dict) else {}
+            except (ValueError, TypeError):
+                LOG.debug("Ignoring unparsable links on member %s",
+                          (record or {}).get("user_id"))
+        return {}
+
+    @staticmethod
     def _mc_link_of(record: dict) -> dict | None:
         """The member's structured links.minecraft entry, or None."""
-        link = ((record or {}).get("links") or {}).get("minecraft") or {}
+        link = Minecraft._links_of(record).get("minecraft") or {}
         return link if link.get("username") else None
 
     async def _save_mc_link(self, user_id: int, canonical: str, account_type: str,
@@ -504,22 +524,25 @@ class Minecraft(commands.Cog):
 
         ``links`` is read-modify-write so future platforms (e.g. ``robotics``)
         survive alongside ``minecraft``; ``mc_username`` stays for back-compat.
+        The map is stored as JSON text (Appwrite has no object attribute type).
         """
         record = await self._record_for(user_id)
-        links = dict(record.get("links") or {})
+        links = Minecraft._links_of(record)
         links["minecraft"] = {
             "username": canonical,
             "type": account_type,
             "uuids": [e["uuid"] for e in entries],
             "linked_at": linked_at,
         }
-        await store.merge_member(user_id, {"links": links, "mc_username": canonical})
+        await store.merge_member(user_id, {"links": json.dumps(links),
+                                           "mc_username": canonical})
 
     async def _clear_mc_link(self, user_id: int) -> None:
         record = await self._record_for(user_id)
-        links = dict(record.get("links") or {})
+        links = Minecraft._links_of(record)
         links.pop("minecraft", None)
-        await store.merge_member(user_id, {"links": links, "mc_username": ""})
+        await store.merge_member(user_id, {"links": json.dumps(links),
+                                           "mc_username": ""})
 
     async def _fetch_status(self, lang: str) -> tuple[dict, str | None]:
         """Live panel data {state, name, version, players} + error text (or None)."""
