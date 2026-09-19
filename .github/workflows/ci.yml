@@ -38,3 +38,6 @@ jobs:
           APPWRITE_API_KEY: ci-placeholder-key
           PORT: "8080"
         run: python scripts/smoke_test.py
+
+      - name: mc-link crypto tests (hermetic)
+        run: python scripts/test_mclink.py
