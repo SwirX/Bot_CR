@@ -23,8 +23,8 @@ from data.appwrite_client import ensure_schema  # noqa: E402
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(name)s: %(message)s")
     ensure_schema()
-    print("\n✓ Appwrite schema is ready (collections: bot_members, bot_counters, "
-          "bot_challenges, bot_modlog, bot_settings).")
+    print("\n✓ Appwrite schema is ready (bot_members, bot_counters, bot_challenges, "
+          "bot_modlog, bot_settings, bot_polls, mc_link_codes, mc_auth, mc_challenges).")
 
 
 if __name__ == "__main__":

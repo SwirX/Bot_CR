@@ -161,6 +161,72 @@ COLLECTIONS = {
         ],
         [{"key": "by_created_at", "type": "key", "attributes": ["created_at"]}],
     ),
+    # ── mc-link (Discord ↔ Minecraft single sign-on) ───────────────────
+    # Appwrite is the shared bus between this bot and the Paper plugin, and the
+    # source of truth for identities and credentials. The bot is the ONLY
+    # component that mints link codes and credentials; the plugin only claims
+    # and consumes them. Minecraft itself is an untrusted client boundary — no
+    # username/UUID/permission a client claims is ever treated as proof.
+    "mc_link_codes": (
+        "MC link one-time codes",
+        [
+            # 6 chars from ACDEFGHJKLMNPQRTUVWXY234679 (case-insensitive).
+            {"key": "code", "type": "string", "size": 8, "required": True},
+            {"key": "username", "type": "string", "size": 64, "required": True},
+            {"key": "discord_id", "type": "string", "size": 32, "required": True},
+            # pending | used | expired.
+            {"key": "status", "type": "string", "size": 8, "required": True},
+            {"key": "expires_at", "type": "datetime", "required": True},
+            {"key": "created_at", "type": "datetime", "required": True},
+            {"key": "used_at", "type": "datetime"},
+            {"key": "claimed_ip", "type": "string", "size": 45},
+        ],
+        [
+            {"key": "by_user_status", "type": "key",
+             "attributes": ["username", "status"]},
+            {"key": "by_status", "type": "key", "attributes": ["status"]},
+        ],
+    ),
+    "mc_auth": (
+        "MC per-username auth profiles",
+        [
+            # Exact/case-sensitive name — the ONLY identity key (no UUIDs, no
+            # paid/free, no whitelist usage).
+            {"key": "username", "type": "string", "size": 64, "required": True},
+            {"key": "discord_id", "type": "string", "size": 32, "required": True},
+            # bcrypt ($2a$…) of the current AuthMe password — server-side
+            # concern; this bot never writes plaintext long-term passwords.
+            {"key": "auth_hash", "type": "string", "size": 128},
+            # JSON array [{ip, seen_at}].
+            {"key": "last_ips", "type": "string", "size": 1024},
+            # Live session IP (server-written; cleared on logout).
+            {"key": "current_ip", "type": "string", "size": 45},
+            {"key": "status", "type": "string", "size": 8},
+            {"key": "linked_at", "type": "datetime"},
+            {"key": "updated_at", "type": "datetime"},
+        ],
+        [{"key": "uniq_username", "type": "unique", "attributes": ["username"]}],
+    ),
+    "mc_challenges": (
+        "MC credential jobs",
+        [
+            {"key": "username", "type": "string", "size": 64, "required": True},
+            # new_ip | change_password.
+            {"key": "kind", "type": "string", "size": 16, "required": True},
+            # pending | approved | done | failed.
+            {"key": "status", "type": "string", "size": 8, "required": True},
+            # AES-256-GCM ciphertext (iv+tag+ct, hex) of the temp/new password.
+            {"key": "payload_enc", "type": "string", "size": 2048},
+            {"key": "ip", "type": "string", "size": 45},
+            {"key": "expires_at", "type": "datetime"},
+            {"key": "created_at", "type": "datetime", "required": True},
+            {"key": "done_at", "type": "datetime"},
+        ],
+        [
+            {"key": "by_user_status", "type": "key",
+             "attributes": ["username", "status"]},
+        ],
+    ),
 }
 
 
