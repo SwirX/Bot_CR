@@ -59,13 +59,19 @@ class ConfirmView(discord.ui.View):
 
 
 class PaginatorView(discord.ui.View):
-    """◀ ▶ pager over a list of pages (strings and/or embeds)."""
+    """◀ ▶ pager over a list of pages (strings and/or embeds).
 
-    def __init__(self, pages: list, *, timeout: float = 180.0, start: int = 0):
+    Pass ``user`` to scope the pager to its commanding member; without it the
+    pager stays open to everyone (legacy callers).
+    """
+
+    def __init__(self, pages: list, *, timeout: float = 180.0, start: int = 0,
+                 user: discord.Member = None):
         super().__init__(timeout=timeout)
         if not pages:
             raise ValueError("PaginatorView needs at least one page")
         self.pages = pages
+        self.user_id = user.id if user is not None else None
         self._index = max(0, min(start, len(pages) - 1))
         self.page_label.label = f"{self._index + 1}/{len(self.pages)}"
         self._sync_buttons()
@@ -75,8 +81,18 @@ class PaginatorView(discord.ui.View):
         self.next.disabled = self._index == len(self.pages) - 1
         self.page_label.label = f"{self._index + 1}/{len(self.pages)}"
 
+    async def _owned(self, interaction: discord.Interaction) -> bool:
+        if self.user_id is not None and interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "🔒 This pager belongs to the command author — run the command "
+                "yourself to page through it.", ephemeral=True)
+            return False
+        return True
+
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
     async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         self._index = max(0, self._index - 1)
         await self._update(interaction)
 
@@ -86,6 +102,8 @@ class PaginatorView(discord.ui.View):
 
     @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary)
     async def next(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         self._index = min(len(self.pages) - 1, self._index + 1)
         await self._update(interaction)
 

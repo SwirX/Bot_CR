@@ -196,7 +196,7 @@ class Engagement(commands.Cog):
         if len(pages) == 1:
             await ctx.send(embed=pages[0])
         else:
-            await ctx.send(embed=pages[0], view=PaginatorView(pages))
+            await ctx.send(embed=pages[0], view=PaginatorView(pages, user=ctx.author))
 
     # ── daily challenge commands ───────────────────────────────
     @commands.hybrid_group(name="challenge", description="Daily challenges.")
