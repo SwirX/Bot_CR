@@ -112,6 +112,13 @@ class TaskDetailView(discord.ui.View):
                 "🚩 This task already has an assignee — use another task.",
                 ephemeral=True)
             return
+        # Same gate as /task claim (P4): the button must not bypass the scope.
+        scopes = await scopes_for_author_like(interaction)
+        if not ({"tasks.claim", "tasks.assign"} & scopes):
+            await interaction.response.send_message(
+                "🔒 Claiming tasks needs the **tasks.claim** scope "
+                "(cell member or above).", ephemeral=True)
+            return
         task["assignee"] = str(interaction.user.id)
         task["status"] = "in_progress"
         task["updated_at"] = datetime.now(timezone.utc).isoformat()
