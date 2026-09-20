@@ -14,15 +14,29 @@ class ConfirmView(discord.ui.View):
     """Two-button confirm/cancel prompt for destructive actions.
 
     ``on_confirm`` must be an async callable taking the button interaction.
-    The buttons disable after the first press so the action can't repeat.
+    Only the member who opened the prompt may confirm or cancel it; strangers
+    get an ephemeral refusal and the buttons stay live for the owner. The
+    buttons disable after the authorized press so the action can't repeat.
     """
 
-    def __init__(self, on_confirm, *, timeout: float = 60.0):
+    def __init__(self, on_confirm, *, user=None, timeout: float = 60.0):
         super().__init__(timeout=timeout)
         self.on_confirm = on_confirm
+        self.user_id = user.id if hasattr(user, "id") else user
+
+    async def _owned(self, interaction: discord.Interaction) -> bool:
+        """Refuse presses from anyone but the prompting member."""
+        if self.user_id is not None and interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "🔒 This prompt belongs to the command author — you can't act on it.",
+                ephemeral=True)
+            return False
+        return True
 
     @discord.ui.button(style=discord.ButtonStyle.danger, label="Confirm")
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(view=self)
@@ -31,6 +45,8 @@ class ConfirmView(discord.ui.View):
 
     @discord.ui.button(style=discord.ButtonStyle.secondary, label="Cancel")
     async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(
