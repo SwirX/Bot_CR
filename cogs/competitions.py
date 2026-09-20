@@ -172,31 +172,96 @@ class Competitions(commands.Cog):
     @competition.command(name="create", description="Create a competition (leadership).")
     @commands.guild_only()
     @require_scope("competitions.manage")
-    async def competition_create(self, ctx, name: str, date: str = "",
+    async def competition_create(self, ctx, name: str = "", date: str = "",
                                  location: str = "", capacity: int = 0,
                                  description: str = ""):
-        """Register a competition so the members can sign up."""
+        """Register a competition so the members can sign up.
+
+        Slash invocation opens a modal form; prefix keeps the inline path.
+        """
+        if ctx.interaction is not None:
+            await ctx.interaction.response.send_modal(CompetitionCreateModal(
+                self, name=name, date=date, location=location,
+                capacity=str(capacity) if capacity else "",
+                description=description))
+            return
+        await self._create_competition(
+            author_id=ctx.author.id, name=name, date=date, location=location,
+            capacity=capacity, description=description, respond=ctx.send)
+
+    async def _create_competition(self, *, author_id: int, name: str, date: str,
+                                  location: str, capacity, description: str,
+                                  respond) -> None:
+        """Shared core for /competition create and its modal form."""
+        if not name.strip():
+            await respond("⚠️ A competition needs a name.")
+            return
         slug = slugify(name)
         if await self._get(slug) is not None:
-            await ctx.send(f"⚠️ A competition named **{name}** already exists.")
+            await respond(f"⚠️ A competition named **{name}** already exists.")
             return
         comp = {
             "name": name.strip(),
             "date": date.strip(),
             "location": location.strip(),
-            "capacity": capacity if capacity > 0 else None,
+            "capacity": int(capacity) if str(capacity).strip().isdigit()
+            and int(capacity) > 0 else None,
             "registered": [],
             "description": description.strip(),
-            "created_by": str(ctx.author.id),
+            "created_by": str(author_id),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
             await store.save_competition(slug, comp)
         except StoreError as exc:
-            await ctx.send(f"⚠️ Couldn't create the competition: {exc}")
+            await respond(f"⚠️ Couldn't create the competition: {exc}")
             return
-        await ctx.send(f"🏆 Created **{name.strip()}** — "
-                       "members can register with `/competition <name>`.")
+        await respond(f"🏆 Created **{name.strip()}** — "
+                      "members can register with `/competition <name>`.")
+
+
+class CompetitionCreateModal(discord.ui.Modal):
+    """Pop-up form for /competition create — pre-filled from slash args."""
+
+    def __init__(self, cog: "Competitions", *, name: str = "", date: str = "",
+                 location: str = "", capacity: str = "", description: str = ""):
+        super().__init__(title="🏆 New competition")
+        self.cog = cog
+        self.name_input = discord.ui.TextInput(
+            label="Name", placeholder="e.g. Sumo Robot Brawl", max_length=128,
+            default=name or None, required=True)
+        self.date_input = discord.ui.TextInput(
+            label="Date (YYYY-MM-DD)", max_length=16,
+            default=date or None, required=False)
+        self.location_input = discord.ui.TextInput(
+            label="Location", max_length=128,
+            default=location or None, required=False)
+        self.capacity_input = discord.ui.TextInput(
+            label="Capacity (0 = unlimited)", max_length=6,
+            default=capacity or None, required=False)
+        self.desc_input = discord.ui.TextInput(
+            label="Description", style=discord.TextStyle.paragraph,
+            max_length=1024, default=description or None, required=False)
+        for item in (self.name_input, self.date_input, self.location_input,
+                     self.capacity_input, self.desc_input):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        cap = self.capacity_input.value or ""
+        if cap and not cap.strip().isdigit():
+            await interaction.followup.send(
+                "⚠️ Capacity must be a number (0 = unlimited).", ephemeral=True)
+            return
+        await self.cog._create_competition(
+            author_id=interaction.user.id,
+            name=self.name_input.value or "",
+            date=self.date_input.value or "",
+            location=self.location_input.value or "",
+            capacity=int(cap) if cap else 0,
+            description=self.desc_input.value or "",
+            respond=lambda text: interaction.followup.send(text),
+        )
 
 
 async def setup(bot):
