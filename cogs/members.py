@@ -167,28 +167,43 @@ class ProfileHubView(OwnerView, discord.ui.View):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member = cog, lang, member
         self.user_id = user.id if user is not None else member.id
-        self.overview.label = t("profile.tab.overview", lang)
-        self.minecraft.label = t("profile.tab.minecraft", lang)
-        self.robotics.label = t("profile.tab.robotics", lang)
         self.close.label = t("settings.close", lang)
+        tabs = discord.ui.Select(
+            placeholder=t("profile.tab.pick", lang), row=0,
+            options=[
+                discord.SelectOption(value="overview", emoji="🏠",
+                                     label=t("profile.tab.overview", lang)),
+                discord.SelectOption(value="minecraft", emoji="⛏️",
+                                     label=t("profile.tab.minecraft", lang)),
+                discord.SelectOption(value="robotics", emoji="🔬",
+                                     label=t("profile.tab.robotics", lang)),
+            ],
+        )
+        tabs.callback = self._tab_select
+        self.add_item(tabs)
 
     def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
         return ("🔒 This profile view belongs to the command author — "
                 "run `/profile` yourself to use its tabs.")
 
-    @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, row=0)
-    async def overview(self, interaction: discord.Interaction,
-                       _button: discord.ui.Button):
+    async def _tab_select(self, interaction: discord.Interaction):
         if not await self._owned(interaction):
             return
-        embed = await self.cog._profile_embed(self.member)
-        await interaction.response.edit_message(embed=embed, view=self)
+        tab = interaction.values[0]
+        if tab == "overview":
+            embed = await self.cog._profile_embed(self.member)
+            await interaction.response.edit_message(embed=embed, view=self)
+        elif tab == "minecraft":
+            await self._go_minecraft(interaction)
+        else:
+            embed = discord.Embed(
+                title=t("profile.tab.robotics", self.lang),
+                description=t("profile.robotics.soon", self.lang),
+                color=discord.Color.dark_teal(),
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(emoji="⛏️", style=discord.ButtonStyle.primary, row=0)
-    async def minecraft(self, interaction: discord.Interaction,
-                        _button: discord.ui.Button):
-        if not await self._owned(interaction):
-            return
+    async def _go_minecraft(self, interaction: discord.Interaction):
         mc_cog = self.cog.bot.get_cog("Minecraft")
         if mc_cog is None:
             embed = discord.Embed(description=t("mc.unconfigured", self.lang),
@@ -206,18 +221,6 @@ class ProfileHubView(OwnerView, discord.ui.View):
                                        viewer=interaction.user,
                                        linked_username=linked)
         await interaction.response.edit_message(embed=embed, view=view)
-
-    @discord.ui.button(emoji="🔬", style=discord.ButtonStyle.secondary, row=0)
-    async def robotics(self, interaction: discord.Interaction,
-                       _button: discord.ui.Button):
-        if not await self._owned(interaction):
-            return
-        embed = discord.Embed(
-            title=t("profile.tab.robotics", self.lang),
-            description=t("profile.robotics.soon", self.lang),
-            color=discord.Color.dark_teal(),
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction,

@@ -27,14 +27,22 @@ _LANGUAGE_META = (("en", "🇬🇧"), ("fr", "🇫🇷"), ("ar", "🇸🇦"))
 
 
 class SettingsView(OwnerView, discord.ui.View):
-    """Root settings menu: [🌐 Language] + [✖️ Close]."""
+    """Root settings menu: 🌐 Language picker + ✖️ Close."""
 
     def __init__(self, lang: str, user_id: int, *, timeout: float = 120.0):
         super().__init__(timeout=timeout)
         self.lang = lang
         self.user_id = user_id
-        self.language.label = t("settings.lang_button", lang)
         self.close.label = t("settings.close", lang)
+        picker = discord.ui.Select(
+            placeholder=t("settings.lang_button", lang),
+            options=[discord.SelectOption(
+                value="language", emoji="🌐",
+                label=t("settings.lang_button", lang))],
+            row=0,
+        )
+        picker.callback = self._open_language
+        self.add_item(picker)
 
     def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
         return ("🔒 This settings panel belongs to someone else — "
@@ -47,8 +55,7 @@ class SettingsView(OwnerView, discord.ui.View):
             color=discord.Color.blurple(),
         )
 
-    @discord.ui.button(emoji="🌐", style=discord.ButtonStyle.primary, label="Language")
-    async def language(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def _open_language(self, interaction: discord.Interaction):
         if not await self._owned(interaction):
             return
         view = LanguageView(self.lang, self.user_id)
@@ -82,16 +89,18 @@ class LanguageView(OwnerView, discord.ui.View):
         super().__init__(timeout=timeout)
         self.lang = lang
         self.user_id = user_id
-        for code, emoji in _LANGUAGE_META:
-            button = discord.ui.Button(
-                emoji=emoji, label=LANGUAGES[code],
-                style=discord.ButtonStyle.secondary,
-            )
-            button.callback = self._make_picker(code)
-            self.add_item(button)
+        picker = discord.ui.Select(
+            placeholder=t("settings.lang_pick", lang),
+            options=[discord.SelectOption(
+                emoji=emoji, label=LANGUAGES[code], value=code)
+                for code, emoji in _LANGUAGE_META],
+            row=0,
+        )
+        picker.callback = self._picked
+        self.add_item(picker)
         back = discord.ui.Button(
             emoji="◀️", label=t("settings.back", lang),
-            style=discord.ButtonStyle.secondary,
+            style=discord.ButtonStyle.secondary, row=1,
         )
         back.callback = self._go_back
         self.add_item(back)
@@ -103,10 +112,11 @@ class LanguageView(OwnerView, discord.ui.View):
             color=discord.Color.blurple(),
         )
 
-    def _make_picker(self, code: str):
-        async def pick(interaction: discord.Interaction):
-            await self._apply(interaction, code)
-        return pick
+    async def _picked(self, interaction: discord.Interaction):
+        """A language was chosen from the dropdown — never for a stranger."""
+        if not await self._owned(interaction):
+            return
+        await self._apply(interaction, interaction.values[0])
 
     async def _apply(self, interaction: discord.Interaction, code: str):
         # Never let a stranger rewrite your stored preference by tapping your
