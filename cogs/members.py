@@ -542,7 +542,8 @@ class Members(commands.Cog):
         embed.set_footer(text="Scopes come from your linked club account + Discord roles.")
         if len(lines) > 25:
             await ctx.send(embed=embed, view=PaginatorView(
-                [f"{' '.join(lines[i:i + 25])}" for i in range(0, len(lines), 25)]))
+                [f"{' '.join(lines[i:i + 25])}" for i in range(0, len(lines), 25)],
+                user=ctx.author))
         else:
             await ctx.send(embed=embed)
 

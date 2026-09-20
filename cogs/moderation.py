@@ -429,7 +429,7 @@ class Moderation(commands.Cog):
         if len(pages) == 1:
             await ctx.send(pages[0])
         else:
-            await ctx.send(pages[0], view=PaginatorView(pages))
+            await ctx.send(pages[0], view=PaginatorView(pages, user=ctx.author))
 
 
 async def setup(bot):

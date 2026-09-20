@@ -28,10 +28,12 @@ class HelpView(discord.ui.View):
         ("Server Ops", "⚙️", ("DashBoard", "Apis", "Tasks", "Welcome", "Goodbye", "BotAdmin")),
     )
 
-    def __init__(self, bot, *, lang: str = "en", timeout: float = 180.0):
+    def __init__(self, bot, *, lang: str = "en", user: discord.Member = None,
+                 timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.bot = bot
         self.lang = lang
+        self.user_id = user.id if user is not None else None
         self.categories: dict[str, tuple] = {}
         for cog in bot.cogs.values():
             cmds = [c for c in cog.walk_commands() if not c.hidden and c.parent is None]
@@ -62,8 +64,19 @@ class HelpView(discord.ui.View):
     def _section_label(self, label: str) -> str:
         return t(f"help.section.{label}", self.lang)
 
+    async def _owned(self, interaction: discord.Interaction) -> bool:
+        """Only the member who opened /help may navigate or close it."""
+        if self.user_id is not None and interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "🔒 This help menu belongs to the command author — "
+                "run `/help` yourself to browse it.", ephemeral=True)
+            return False
+        return True
+
     def _section_callback(self, label: str):
         async def callback(interaction: discord.Interaction):
+            if not await self._owned(interaction):
+                return
             try:
                 await interaction.response.edit_message(
                     embed=self.build_section_embed(label), view=self
@@ -130,6 +143,8 @@ class HelpView(discord.ui.View):
 
     @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, label="All", row=2)
     async def home(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         try:
             await interaction.response.edit_message(
                 embed=self.build_overview_embed(), view=self
@@ -139,6 +154,8 @@ class HelpView(discord.ui.View):
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, label="Close", row=2)
     async def close(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         for child in self.children:
             child.disabled = True
         try:
@@ -182,7 +199,7 @@ class General(commands.Cog):
             ctx.author.id,
             locale=str(ctx.interaction.locale) if ctx.interaction else None,
         )
-        view = HelpView(self.bot, lang=lang)
+        view = HelpView(self.bot, lang=lang, user=ctx.author)
         embed = view.build_overview_embed()
         await ctx.send(embed=embed, view=view)
 
