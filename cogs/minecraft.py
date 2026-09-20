@@ -35,6 +35,7 @@ from discord.ext import commands
 import config
 from data.store import store
 from cogs._scopes import scopes_for_author
+from cogs._ui import LoggedView, close_panel
 from i18n.core import resolve_member_lang, t
 
 LOG = logging.getLogger("bot.minecraft")
@@ -947,7 +948,7 @@ async def _back_to_home(view: discord.ui.View, interaction: discord.Interaction)
     await interaction.message.edit(embed=embed, view=target)
 
 
-class MinecraftHubView(discord.ui.View):
+class MinecraftHubView(LoggedView, discord.ui.View):
     """/mc + /minecraft menu: live status content with action drill-downs."""
 
     def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
@@ -990,9 +991,10 @@ class MinecraftHubView(discord.ui.View):
     @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger, row=0)
     async def unlink(self, interaction: discord.Interaction,
                      _button: discord.ui.Button):
+        await interaction.response.edit_message(embed=_loading_embed(), view=None)
         view = UnlinkConfirmView(self.cog, self.lang, self.member,
                                  home_factory=self._home)
-        await interaction.response.edit_message(embed=await view.embed(), view=view)
+        await interaction.message.edit(embed=await view.embed(), view=view)
 
     @discord.ui.button(emoji="🎛", style=discord.ButtonStyle.primary, row=1)
     async def control(self, interaction: discord.Interaction,
@@ -1004,8 +1006,7 @@ class MinecraftHubView(discord.ui.View):
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction,
                     _button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content=t("mc.hub.closed", self.lang), embed=None, view=None)
+        await close_panel(interaction, text=t("mc.hub.closed", self.lang))
 
     @discord.ui.button(emoji="🔑", style=discord.ButtonStyle.primary, row=1)
     async def mcpass(self, interaction: discord.Interaction,
