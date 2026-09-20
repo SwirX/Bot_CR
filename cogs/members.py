@@ -496,7 +496,9 @@ class Members(commands.Cog):
         member = member or ctx.author
         lang = await resolve_member_lang(ctx.author.id, None)
         embed = await self._profile_embed(member)
-        await ctx.send(embed=embed, view=ProfileHubView(self, lang, member, user=ctx.author))
+        await ctx.send(embed=embed, view=ProfileHubView(self, lang, member,
+                                                        user=ctx.author),
+                       ephemeral=True)
 
     @commands.hybrid_command(name="whois", description="Internal profile for staff.")
     @commands.guild_only()
@@ -617,7 +619,8 @@ class Members(commands.Cog):
     async def notifications(self, ctx):
         """Toggle task/event/competition/announcement notifications (stored)."""
         embed = await self._notif_embed(ctx.author)
-        await ctx.send(embed=embed, view=NotifView(self, ctx.author.id))
+        await ctx.send(embed=embed, view=NotifView(self, ctx.author.id),
+                       ephemeral=True)
 
     @commands.hybrid_command(name="dashboard", description="Your whole club life in one view.")
     @commands.guild_only()

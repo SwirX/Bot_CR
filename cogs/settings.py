@@ -174,7 +174,7 @@ class Settings(commands.Cog):
             pass
         lang = await self._lang(ctx)
         view = SettingsView(lang, ctx.author.id)
-        await ctx.send(embed=view.embed(), view=view)
+        await ctx.send(embed=view.embed(), view=view, ephemeral=True)
 
     @commands.hybrid_command(name="language",
                              description="Set the language the bot answers you in.")
@@ -187,7 +187,8 @@ class Settings(commands.Cog):
             await store.merge_member(ctx.author.id, {"lang": code})
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             LOG.warning("could not save lang for %s: %s", ctx.author.id, exc)
-        await ctx.send(t("settings.lang_set", code, name=LANGUAGES[code]))
+        await ctx.send(t("settings.lang_set", code, name=LANGUAGES[code]),
+                       ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

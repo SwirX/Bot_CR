@@ -124,6 +124,8 @@ class TaskDetailView(discord.ui.View):
         task["updated_at"] = datetime.now(timezone.utc).isoformat()
         await store.save_task(task)
         await interaction.response.edit_message(embed=_task_embed(task), view=self)
+        await interaction.followup.send(
+            "🙋 Claimed — good luck! 💪", ephemeral=True)
 
 
 class TaskCreateModal(discord.ui.Modal):
@@ -404,7 +406,7 @@ class Tasks(commands.Cog):
         task_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
         await store.save_task(task_doc)
         await ctx.send(f"🙋 Claimed **{task_doc.get('title')}** (`{task_doc['task_id']}`). "
-                       "Good luck! 💪")
+                       "Good luck! 💪", ephemeral=True)
 
     @task.command(name="edit", description="Edit a task (staff).")
     @commands.guild_only()
