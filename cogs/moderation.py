@@ -95,7 +95,7 @@ class Moderation(commands.Cog):
             await interaction.followup.send(f"👢 Kicked **{member.display_name}** — {reason}")
             await self._log(ctx, "kick", member, reason)
 
-        view = ConfirmView(do_kick)
+        view = ConfirmView(do_kick, user=ctx.author)
         await ctx.send(f"👢 Kick **{member.display_name}**? — {reason}", view=view)
 
     # ── ban / unban ────────────────────────────────────────────
@@ -119,7 +119,7 @@ class Moderation(commands.Cog):
             await interaction.followup.send(f"🔨 Banned **{member.display_name}** — {reason}")
             await self._log(ctx, "ban", member, reason)
 
-        view = ConfirmView(do_ban)
+        view = ConfirmView(do_ban, user=ctx.author)
         await ctx.send(f"🔨 Ban **{member.display_name}**? — {reason}", view=view)
 
     @commands.hybrid_command(name="unban", description="Unban a user by their ID.")
@@ -429,7 +429,7 @@ class Moderation(commands.Cog):
         if len(pages) == 1:
             await ctx.send(pages[0])
         else:
-            await ctx.send(pages[0], view=PaginatorView(pages))
+            await ctx.send(pages[0], view=PaginatorView(pages, user=ctx.author))
 
 
 async def setup(bot):

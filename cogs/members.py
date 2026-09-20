@@ -7,6 +7,7 @@ the permission-scope resolver in cogs/_scopes.py.
 """
 
 import logging
+import re
 
 import discord
 from discord import app_commands
@@ -17,7 +18,7 @@ from data.store import StoreError
 from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
                           scopes_for_author, require_scope)
 from cogs._dates import days_until, fmt_date
-from cogs._ui import PaginatorView
+from cogs._ui import OwnerView, PaginatorView
 from cogs.minecraft import LinkChoiceView, UnlinkConfirmView, mc_link_card_embed
 from i18n.core import resolve_member_lang, t
 
@@ -109,13 +110,17 @@ class NotifView(discord.ui.View):
         await self.cog._refresh_notif_panel(interaction, self)
 
 
-class DashboardView(discord.ui.View):
+class DashboardView(OwnerView, discord.ui.View):
     """Quick actions for /dashboard — lightweight embeds, same backend."""
 
     def __init__(self, cog, user_id: int):
         super().__init__(timeout=180)
         self.cog = cog
         self.user_id = user_id
+
+    def _owner_deny_message(self, _interaction) -> str:
+        return ("🔒 This dashboard belongs to someone else — run `/dashboard` "
+                "yourself for your own panels.")
 
     @discord.ui.button(label="📋 Tasks", style=discord.ButtonStyle.primary,
                        custom_id="dash:tasks")
@@ -146,33 +151,60 @@ class DashboardView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def _section(self, interaction, text, title):
+        if not await self._owned(interaction):
+            return
         if not text:
             text = "Nothing here yet."
         embed = discord.Embed(title=title, description=text, color=discord.Color.blue())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-class ProfileHubView(discord.ui.View):
+class ProfileHubView(OwnerView, discord.ui.View):
     """/profile identity hub: Overview / Minecraft / Robotics tabs (Dank-Memer style)."""
 
     def __init__(self, cog: "Members", lang: str, member: discord.Member,
-                 *, timeout: float = 180.0):
+                 *, user: discord.Member = None, timeout: float = 180.0):
+        """``user`` is the invoker — only they may navigate or close the view."""
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member = cog, lang, member
-        self.overview.label = t("profile.tab.overview", lang)
-        self.minecraft.label = t("profile.tab.minecraft", lang)
-        self.robotics.label = t("profile.tab.robotics", lang)
+        self.user_id = user.id if user is not None else member.id
         self.close.label = t("settings.close", lang)
+        tabs = discord.ui.Select(
+            placeholder=t("profile.tab.pick", lang), row=0,
+            options=[
+                discord.SelectOption(value="overview", emoji="🏠",
+                                     label=t("profile.tab.overview", lang)),
+                discord.SelectOption(value="minecraft", emoji="⛏️",
+                                     label=t("profile.tab.minecraft", lang)),
+                discord.SelectOption(value="robotics", emoji="🔬",
+                                     label=t("profile.tab.robotics", lang)),
+            ],
+        )
+        tabs.callback = self._tab_select
+        self.add_item(tabs)
 
-    @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, row=0)
-    async def overview(self, interaction: discord.Interaction,
-                       _button: discord.ui.Button):
-        embed = await self.cog._profile_embed(self.member)
-        await interaction.response.edit_message(embed=embed, view=self)
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This profile view belongs to the command author — "
+                "run `/profile` yourself to use its tabs.")
 
-    @discord.ui.button(emoji="⛏️", style=discord.ButtonStyle.primary, row=0)
-    async def minecraft(self, interaction: discord.Interaction,
-                        _button: discord.ui.Button):
+    async def _tab_select(self, interaction: discord.Interaction):
+        if not await self._owned(interaction):
+            return
+        tab = interaction.values[0]
+        if tab == "overview":
+            embed = await self.cog._profile_embed(self.member)
+            await interaction.response.edit_message(embed=embed, view=self)
+        elif tab == "minecraft":
+            await self._go_minecraft(interaction)
+        else:
+            embed = discord.Embed(
+                title=t("profile.tab.robotics", self.lang),
+                description=t("profile.robotics.soon", self.lang),
+                color=discord.Color.dark_teal(),
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _go_minecraft(self, interaction: discord.Interaction):
         mc_cog = self.cog.bot.get_cog("Minecraft")
         if mc_cog is None:
             embed = discord.Embed(description=t("mc.unconfigured", self.lang),
@@ -191,24 +223,16 @@ class ProfileHubView(discord.ui.View):
                                        linked_username=linked)
         await interaction.response.edit_message(embed=embed, view=view)
 
-    @discord.ui.button(emoji="🔬", style=discord.ButtonStyle.secondary, row=0)
-    async def robotics(self, interaction: discord.Interaction,
-                       _button: discord.ui.Button):
-        embed = discord.Embed(
-            title=t("profile.tab.robotics", self.lang),
-            description=t("profile.robotics.soon", self.lang),
-            color=discord.Color.dark_teal(),
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction,
                     _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         await interaction.response.edit_message(
             content=t("profile.closed", self.lang), embed=None, view=None)
 
 
-class ProfileMinecraftTabView(discord.ui.View):
+class ProfileMinecraftTabView(OwnerView, discord.ui.View):
     """Minecraft tab inside /profile: link status + quick link/unlink actions."""
 
     def __init__(self, cog: "Members", lang: str, member: discord.Member,
@@ -218,6 +242,7 @@ class ProfileMinecraftTabView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member, self.mc_cog = cog, lang, member, mc_cog
         self.viewer = viewer
+        self.user_id = viewer.id if viewer is not None else member.id
         self.linked_username = linked_username
         self.link.label = t("mc.hub.link", lang)
         self.unlink.label = t("mc.hub.unlink", lang)
@@ -234,6 +259,10 @@ class ProfileMinecraftTabView(discord.ui.View):
                 viewer.id == member.id or mc_cog._is_mc_operator(viewer)):
             self.remove_item(self.mcpass)
             self.remove_item(self.devices)
+
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This profile view belongs to the command author — "
+                "run `/profile` yourself to use its tabs.")
 
     async def _home(self) -> tuple[discord.Embed, "ProfileMinecraftTabView"]:
         can_manage = (self.viewer.id == self.member.id
@@ -252,6 +281,8 @@ class ProfileMinecraftTabView(discord.ui.View):
     @discord.ui.button(emoji="🔗", style=discord.ButtonStyle.primary, row=0)
     async def link(self, interaction: discord.Interaction,
                    _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         view = LinkChoiceView(self.mc_cog, self.lang, self.member,
                               home_factory=self._home)
         await interaction.response.edit_message(embed=await view.embed(), view=view)
@@ -259,6 +290,8 @@ class ProfileMinecraftTabView(discord.ui.View):
     @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger, row=0)
     async def unlink(self, interaction: discord.Interaction,
                      _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         view = UnlinkConfirmView(self.mc_cog, self.lang, self.member,
                                  home_factory=self._home)
         await interaction.response.edit_message(embed=await view.embed(), view=view)
@@ -266,19 +299,25 @@ class ProfileMinecraftTabView(discord.ui.View):
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def back(self, interaction: discord.Interaction,
                    _button: discord.ui.Button):
-        hub = ProfileHubView(self.cog, self.lang, self.member)
+        if not await self._owned(interaction):
+            return
+        hub = ProfileHubView(self.cog, self.lang, self.member, user=self.viewer)
         embed = await self.cog._profile_embed(self.member)
         await interaction.response.edit_message(embed=embed, view=hub)
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction,
                     _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         await interaction.response.edit_message(
             content=t("profile.closed", self.lang), embed=None, view=None)
 
     @discord.ui.button(emoji="🔑", style=discord.ButtonStyle.primary, row=2)
     async def mcpass(self, interaction: discord.Interaction,
                      _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         mclink = self.cog.bot.get_cog("McLink")
         if mclink is None or not getattr(self, "linked_username", None):
             await interaction.response.defer()
@@ -289,6 +328,8 @@ class ProfileMinecraftTabView(discord.ui.View):
     @discord.ui.button(emoji="📱", style=discord.ButtonStyle.secondary, row=2)
     async def devices(self, interaction: discord.Interaction,
                       _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         mclink = self.cog.bot.get_cog("McLink")
         if mclink is None or not getattr(self, "linked_username", None):
             await interaction.response.defer()
@@ -455,7 +496,9 @@ class Members(commands.Cog):
         member = member or ctx.author
         lang = await resolve_member_lang(ctx.author.id, None)
         embed = await self._profile_embed(member)
-        await ctx.send(embed=embed, view=ProfileHubView(self, lang, member))
+        await ctx.send(embed=embed, view=ProfileHubView(self, lang, member,
+                                                        user=ctx.author),
+                       ephemeral=True)
 
     @commands.hybrid_command(name="whois", description="Internal profile for staff.")
     @commands.guild_only()
@@ -490,7 +533,8 @@ class Members(commands.Cog):
         embed.set_footer(text="Scopes come from your linked club account + Discord roles.")
         if len(lines) > 25:
             await ctx.send(embed=embed, view=PaginatorView(
-                [f"{' '.join(lines[i:i + 25])}" for i in range(0, len(lines), 25)]))
+                [f"{' '.join(lines[i:i + 25])}" for i in range(0, len(lines), 25)],
+                user=ctx.author))
         else:
             await ctx.send(embed=embed)
 
@@ -512,33 +556,62 @@ class Members(commands.Cog):
                              description="Set a member's club role / cell / club ID.")
     @commands.guild_only()
     @require_scope("members.manage")
-    async def setprofile(self, ctx, member: discord.Member,
+    async def setprofile(self, ctx, member: discord.Member = None,
                          club_role: app_commands.Choice[str] = None,
                          cell: str = None, club_id: str = None):
-        """Leadership tool: only staff can promote/place members into cells."""
+        """Leadership tool: only staff can promote/place members into cells.
+
+        Slash invocation opens a modal form; prefix keeps the inline path.
+        """
+        if ctx.interaction is not None:
+            role_value = getattr(club_role, "value", "") if club_role else ""
+            await ctx.interaction.response.send_modal(SetProfileModal(
+                self, member=member, club_role=role_value,
+                cell=cell or "", club_id=club_id or ""))
+            return
+        if member is None:
+            await ctx.send("⚠️ Pass the member to update, e.g. "
+                           "`!setprofile @member role=cell_chief cell=Alpha`.")
+            return
+        await self._set_profile(ctx, member=member, club_role=club_role,
+                                cell=cell, club_id=club_id, respond=ctx.send)
+
+    async def _set_profile(self, ctx, *, member: discord.Member, club_role=None,
+                           cell: str = None, club_id: str = None, respond) -> None:
+        """Shared core for /setprofile and its modal form.
+
+        ``respond`` is ``ctx.send`` for prefix invocations and an interaction
+        followup for modals.
+        """
         if member == self.bot.user:
-            await ctx.send("Nice try. I manage my own account. 🤖")
+            await respond("Nice try. I manage my own account. 🤖")
             return
         payload = {}
-        if club_role is not None:
-            payload["club_role"] = club_role.value
+        if club_role:
+            key = str(club_role.value if hasattr(club_role, "value")
+                      else club_role).strip().lower()
+            if key not in CLUB_ROLE_LABELS:
+                await respond("⚠️ Unknown club role **%s** — pick one of: %s."
+                              % (key, ", ".join(CLUB_ROLE_LABELS.values())))
+                return
+            payload["club_role"] = key
         if cell:
-            payload["cell"] = cell.strip()
+            payload["cell"] = str(cell).strip()
         if club_id:
-            payload["club_id"] = club_id.strip()
+            payload["club_id"] = str(club_id).strip()
         if not payload:
-            await ctx.send("⚠️ Nothing to change — pass `club_role`, `cell` or `club_id`.")
+            await respond("⚠️ Nothing to change — give a `club_role`, `cell` or `club_id`.")
             return
         try:
             await store.merge_member(member.id, payload)
         except StoreError as exc:
-            await ctx.send(f"⚠️ Couldn't update the profile: {exc}")
+            await respond(f"⚠️ Couldn't update the profile: {exc}")
             return
         role_label = CLUB_ROLE_LABELS.get(
-            str(payload.get("club_role", "")).lower(), "") 
+            str(payload.get("club_role", "")).lower(), "")
         piece = ", ".join(f"{k}={v}" for k, v in payload.items())
-        await ctx.send(f"✅ Updated **{member.display_name}**: {piece}"
-                       + (f" → **{role_label}**" if role_label else ""))
+        await respond(f"✅ Updated **{member.display_name}**: {piece}"
+                      + (f" → **{role_label}**" if role_label else ""))
 
     @commands.hybrid_command(name="notifications",
                              description="Configure what the bot notifies you about.")
@@ -546,7 +619,8 @@ class Members(commands.Cog):
     async def notifications(self, ctx):
         """Toggle task/event/competition/announcement notifications (stored)."""
         embed = await self._notif_embed(ctx.author)
-        await ctx.send(embed=embed, view=NotifView(self, ctx.author.id))
+        await ctx.send(embed=embed, view=NotifView(self, ctx.author.id),
+                       ephemeral=True)
 
     @commands.hybrid_command(name="dashboard", description="Your whole club life in one view.")
     @commands.guild_only()
@@ -608,6 +682,48 @@ class Members(commands.Cog):
             return await store.list_events()
         except StoreError:
             return []
+
+
+class SetProfileModal(discord.ui.Modal):
+    """Pop-up form for /setprofile (staff) — pre-filled from slash args."""
+
+    def __init__(self, cog: "Members", *, member: discord.Member = None,
+                 club_role: str = "", cell: str = "", club_id: str = ""):
+        super().__init__(title="🪪 Set profile")
+        self.cog = cog
+        self.member_input = discord.ui.TextInput(
+            label="Member (mention or numeric ID)", max_length=32,
+            default=member.mention if member is not None else None,
+            required=True)
+        self.role_input = discord.ui.TextInput(
+            label="Club role (core_member … archon)", max_length=32,
+            default=club_role or None, required=False)
+        self.cell_input = discord.ui.TextInput(
+            label="Cell", max_length=64, default=cell or None, required=False)
+        self.clubid_input = discord.ui.TextInput(
+            label="Club account ID", max_length=64,
+            default=club_id or None, required=False)
+        for item in (self.member_input, self.role_input, self.cell_input,
+                     self.clubid_input):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        raw = (self.member_input.value or "").strip()
+        digits = re.sub(r"\D", "", raw)
+        member = (interaction.guild.get_member(int(digits))
+                  if digits and interaction.guild is not None else None)
+        if member is None:
+            await interaction.followup.send(
+                "⚠️ Couldn't find that member in this server — paste their "
+                "mention or numeric ID.", ephemeral=True)
+            return
+        await self.cog._set_profile(
+            interaction, member=member,
+            club_role=self.role_input.value or "",
+            cell=self.cell_input.value or "",
+            club_id=self.clubid_input.value or "",
+            respond=lambda text: interaction.followup.send(text))
 
 
 async def setup(bot):

@@ -140,6 +140,10 @@ class MusicPlayer:
         self.current: Track | None = None
         self.loop = False
         self.volume = 0.5
+        # The member who started this playback session — destructive controls
+        # (stop/loop/volume/pause) are limited to them, staff, the requester of
+        # the current track, or whoever is left alone in the voice channel.
+        self.host_id: int | None = None
         self.now_playing_message = None
         self.now_playing_view = None
         self._audio_factory = audio_factory
@@ -354,6 +358,11 @@ class NowPlayingView(discord.ui.View):
         if player.voice is None or player.current is None:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
             return
+        if not self.cog._can_control(interaction.user, player):
+            await interaction.response.send_message(
+                "🔒 Only the session host, the requester, or staff can control the player.",
+                ephemeral=True)
+            return
         if player.voice.is_paused():
             player.voice.resume()
             feedback = "▶️ Resumed"
@@ -380,6 +389,11 @@ class NowPlayingView(discord.ui.View):
 
     @discord.ui.button(emoji="🔂", style=discord.ButtonStyle.secondary, custom_id="music:loop")
     async def loop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.cog._can_control(interaction.user, self.player):
+            await interaction.response.send_message(
+                "🔒 Only the session host, the requester, or staff can toggle loop.",
+                ephemeral=True)
+            return
         state = await self.player.toggle_loop()
         await self._reaction(interaction, "")
         await interaction.followup.send(
@@ -387,6 +401,11 @@ class NowPlayingView(discord.ui.View):
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="music:stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.cog._can_control(interaction.user, self.player):
+            await interaction.response.send_message(
+                "🔒 Only the session host, the requester, or staff can stop the player.",
+                ephemeral=True)
+            return
         await self.player.stop()
         try:
             await interaction.response.edit_message(
@@ -438,6 +457,20 @@ class Music(commands.Cog):
         player = self.players.pop(guild_id, None)
         if player is not None and player._watchdog_task is not None:
             player._watchdog_task.cancel()
+
+    def _can_control(self, member: discord.Member, player: MusicPlayer) -> bool:
+        """Who may use destructive controls on this guild's shared player.
+
+        Bot staff, the session host, the current track's requester, or the
+        only person left listening. Vote-skip stays democratic for everyone.
+        """
+        if is_bot_admin(member):
+            return True
+        if player.host_id is not None and member.id == player.host_id:
+            return True
+        if player.current is not None and player.current.requester_id == member.id:
+            return True
+        return player._listeners() <= 1
 
     async def cog_unload(self):
         for player in list(self.players.values()):
@@ -671,7 +704,10 @@ class Music(commands.Cog):
                                else "⚠️ Couldn't get a stream for that track.")
                 return
         track.requester_id = ctx.author.id
+        fresh = player.current is None and not player.queue
         started = await player.enqueue(track)
+        if fresh:
+            player.host_id = ctx.author.id
         if found_msg:
             await found_msg.delete()
         if started and player.now_playing_message is None:
@@ -686,6 +722,10 @@ class Music(commands.Cog):
         if not player.voice or not player.voice.is_playing():
             await ctx.send("🎵 Nothing is playing to pause.")
             return
+        if not self._can_control(ctx.author, player):
+            await ctx.send("🔒 Only the session host, the current requester, or staff "
+                           "can control the player.")
+            return
         player.voice.pause()
         await player._update_panel()
         await ctx.send("⏸️ Paused.", delete_after=8)
@@ -696,6 +736,10 @@ class Music(commands.Cog):
         player = self._player(ctx.guild.id)
         if not player.voice or not player.voice.is_paused():
             await ctx.send("🎵 Nothing is paused.")
+            return
+        if not self._can_control(ctx.author, player):
+            await ctx.send("🔒 Only the session host, the current requester, or staff "
+                           "can control the player.")
             return
         player.voice.resume()
         await player._update_panel()
@@ -723,6 +767,10 @@ class Music(commands.Cog):
         if player.voice is None or not player.voice.is_connected():
             await ctx.send("🎵 I'm not in a voice channel.")
             return
+        if not self._can_control(ctx.author, player):
+            await ctx.send("🔒 Only the session host, the current requester, or staff "
+                           "can stop the player.")
+            return
         await player.stop()
         await ctx.send("⏹️ Stopped and left.")
 
@@ -733,6 +781,10 @@ class Music(commands.Cog):
         if player.current is None or player.now_playing_message is None:
             await ctx.send("🎵 Queue a song first (`/play`).")
             return
+        if not self._can_control(ctx.author, player):
+            await ctx.send("🔒 Only the session host, the current requester, or staff "
+                           "can toggle loop.")
+            return
         state = await player.toggle_loop()
         await ctx.send(f"🔂 Loop {'on' if state else 'off'}.")
 
@@ -740,6 +792,10 @@ class Music(commands.Cog):
     @commands.guild_only()
     async def volume(self, ctx, percent: int):
         player = self._player(ctx.guild.id)
+        if not self._can_control(ctx.author, player):
+            await ctx.send("🔒 Only the session host, the current requester, or staff "
+                           "can change the volume.")
+            return
         level = await player.set_volume(max(1, min(percent, 100)))
         await ctx.send(f"🔊 Volume set to {round(level * 100)}%.")
 

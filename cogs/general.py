@@ -2,9 +2,10 @@ import discord
 from discord.ext import commands
 
 from i18n.core import resolve_member_lang, t
+from cogs._ui import OwnerView
 
 
-class HelpView(discord.ui.View):
+class HelpView(OwnerView, discord.ui.View):
     """Interactive help: section buttons + overview + close button.
 
     Sections map real cogs onto the categories people think in (fun,
@@ -28,10 +29,12 @@ class HelpView(discord.ui.View):
         ("Server Ops", "⚙️", ("DashBoard", "Apis", "Tasks", "Welcome", "Goodbye", "BotAdmin")),
     )
 
-    def __init__(self, bot, *, lang: str = "en", timeout: float = 180.0):
+    def __init__(self, bot, *, lang: str = "en", user: discord.Member = None,
+                 timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.bot = bot
         self.lang = lang
+        self.user_id = user.id if user is not None else None
         self.categories: dict[str, tuple] = {}
         for cog in bot.cogs.values():
             cmds = [c for c in cog.walk_commands() if not c.hidden and c.parent is None]
@@ -45,32 +48,38 @@ class HelpView(discord.ui.View):
             if present:
                 self.sections[label] = present
 
-        # One button per section (max five per row), then home/close below.
+        # One dropdown for every section that has commands, home/close below.
         # Labels follow the viewer's language; section keys stay English.
-        for idx, (label, emoji, _cog_names) in enumerate(self.SECTIONS):
-            if label not in self.sections:
-                continue
-            button = discord.ui.Button(
-                label=self._section_label(label), emoji=emoji,
-                style=discord.ButtonStyle.secondary, row=idx // 5,
+        options = [
+            discord.SelectOption(value=label, emoji=emoji,
+                                 label=self._section_label(label))
+            for label, emoji, _cog_names in self.SECTIONS
+            if label in self.sections
+        ]
+        if options:
+            section = discord.ui.Select(
+                placeholder=t("help.pick", lang), options=options, row=0,
             )
-            button.callback = self._section_callback(label)
-            self.add_item(button)
+            section.callback = self._section_select
+            self.add_item(section)
         self.home.label = t("help.all", lang)
         self.close.label = t("help.close", lang)
 
     def _section_label(self, label: str) -> str:
         return t(f"help.section.{label}", self.lang)
 
-    def _section_callback(self, label: str):
-        async def callback(interaction: discord.Interaction):
-            try:
-                await interaction.response.edit_message(
-                    embed=self.build_section_embed(label), view=self
-                )
-            except discord.HTTPException:
-                pass
-        return callback
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This help menu belongs to the command author — "
+                "run `/help` yourself to browse it.")
+
+    async def _section_select(self, interaction: discord.Interaction):
+        if not await self._owned(interaction):
+            return
+        try:
+            await interaction.response.edit_message(
+                embed=self.build_section_embed(interaction.values[0]), view=self)
+        except discord.HTTPException:
+            pass
 
     def _section_names(self, label: str) -> list[str]:
         """Sorted command names that belong to a section."""
@@ -128,8 +137,10 @@ class HelpView(discord.ui.View):
             embed.add_field(name="\u200b", value="\n".join(chunk), inline=False)
         return embed
 
-    @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, label="All", row=2)
+    @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, label="All", row=1)
     async def home(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         try:
             await interaction.response.edit_message(
                 embed=self.build_overview_embed(), view=self
@@ -137,8 +148,10 @@ class HelpView(discord.ui.View):
         except discord.HTTPException:
             pass
 
-    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, label="Close", row=2)
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, label="Close", row=1)
     async def close(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         for child in self.children:
             child.disabled = True
         try:
@@ -182,7 +195,7 @@ class General(commands.Cog):
             ctx.author.id,
             locale=str(ctx.interaction.locale) if ctx.interaction else None,
         )
-        view = HelpView(self.bot, lang=lang)
+        view = HelpView(self.bot, lang=lang, user=ctx.author)
         embed = view.build_overview_embed()
         await ctx.send(embed=embed, view=view)
 

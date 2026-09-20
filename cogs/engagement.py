@@ -12,6 +12,7 @@ import config
 from data.store import store
 from data.store import StoreError
 from cogs._ui import PaginatorView
+from cogs._perms import mod_perms
 
 LOG = logging.getLogger("bot.engagement")
 
@@ -195,7 +196,7 @@ class Engagement(commands.Cog):
         if len(pages) == 1:
             await ctx.send(embed=pages[0])
         else:
-            await ctx.send(embed=pages[0], view=PaginatorView(pages))
+            await ctx.send(embed=pages[0], view=PaginatorView(pages, user=ctx.author))
 
     # ── daily challenge commands ───────────────────────────────
     @commands.hybrid_group(name="challenge", description="Daily challenges.")
@@ -223,15 +224,30 @@ class Engagement(commands.Cog):
         await ctx.send(message)
 
     @challenge.command(name="set", description="Set today's challenge (staff).")
-    @commands.has_permissions(manage_messages=True)
-    async def challenge_set(self, ctx, title: str, description: str = ""):
+    @mod_perms(manage_messages=True)
+    async def challenge_set(self, ctx, title: str = "", description: str = ""):
+        """Slash invocation opens a modal form; prefix keeps the inline path."""
+        if ctx.interaction is not None:
+            await ctx.interaction.response.send_modal(ChallengeSetModal(
+                self, title=title, description=description))
+            return
+        await self._save_challenge(
+            author_name=ctx.author.display_name, title=title,
+            description=description, respond=ctx.send)
+
+    async def _save_challenge(self, *, author_name: str, title: str,
+                              description: str, respond) -> None:
+        """Shared core for /challenge set and its modal form."""
+        if not title.strip():
+            await respond("⚠️ A challenge needs a title.")
+            return
         await store.save_challenge(
             today_str(),
-            title=title,
-            description=description,
-            created_by=ctx.author.display_name,
+            title=title.strip(),
+            description=description.strip(),
+            created_by=author_name,
         )
-        await ctx.send(f"✅ Today's challenge set: **{title}**")
+        await respond(f"✅ Today's challenge set: **{title.strip()}**")
 
     @challenge.command(name="claim", description="Claim today's challenge (once).")
     async def challenge_claim(self, ctx):
@@ -261,6 +277,31 @@ class Engagement(commands.Cog):
             for r in recent
         ]
         await ctx.send("🗓️ **Recent challenges**\n" + "\n".join(lines))
+
+
+class ChallengeSetModal(discord.ui.Modal):
+    """Pop-up form for /challenge set — pre-filled from slash args."""
+
+    def __init__(self, cog: "Engagement", *, title: str = "", description: str = ""):
+        super().__init__(title="🔥 Today's challenge")
+        self.cog = cog
+        self.title_input = discord.ui.TextInput(
+            label="Title", placeholder="e.g. Build a line follower", max_length=256,
+            default=title or None, required=True)
+        self.desc_input = discord.ui.TextInput(
+            label="Description", style=discord.TextStyle.paragraph,
+            max_length=2048, default=description or None, required=False)
+        self.add_item(self.title_input)
+        self.add_item(self.desc_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await self.cog._save_challenge(
+            author_name=interaction.user.display_name,
+            title=self.title_input.value or "",
+            description=self.desc_input.value or "",
+            respond=lambda text: interaction.followup.send(text),
+        )
 
 
 async def setup(bot):

@@ -164,13 +164,32 @@ class Events(commands.Cog):
     @event.command(name="create", description="Create an event (chiefs +).")
     @commands.guild_only()
     @require_scope("events.create")
-    async def event_create(self, ctx, title: str, date: str = "",
+    async def event_create(self, ctx, title: str = "", date: str = "",
                            time: str = "", location: str = "",
                            description: str = ""):
-        """Schedule a meeting / event for the club."""
+        """Schedule a meeting / event for the club.
+
+        Slash invocation opens a modal form; prefix keeps the inline path.
+        """
+        if ctx.interaction is not None:
+            await ctx.interaction.response.send_modal(EventCreateModal(
+                self, title=title, date=date, time=time,
+                location=location, description=description))
+            return
+        await self._create_event(
+            author_id=ctx.author.id, title=title, date=date, time=time,
+            location=location, description=description, respond=ctx.send)
+
+    async def _create_event(self, *, author_id: int, title: str, date: str,
+                            time: str, location: str, description: str,
+                            respond) -> None:
+        """Shared core for /event create and its modal form."""
+        if not title.strip():
+            await respond("⚠️ An event needs a title.")
+            return
         slug = slugify(title)
         if await self._get(slug) is not None:
-            await ctx.send(f"⚠️ An event named **{title}** already exists.")
+            await respond(f"⚠️ An event named **{title}** already exists.")
             return
         event = {
             "title": title.strip(),
@@ -180,16 +199,55 @@ class Events(commands.Cog):
             "description": description.strip(),
             "attendees": [],
             "declined": [],
-            "created_by": str(ctx.author.id),
+            "created_by": str(author_id),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
             await store.save_event(slug, event)
         except StoreError as exc:
-            await ctx.send(f"⚠️ Couldn't create the event: {exc}")
+            await respond(f"⚠️ Couldn't create the event: {exc}")
             return
-        await ctx.send(f"📅 Created **{title.strip()}** — members can RSVP with "
-                       f"`/event {title.strip()}`.")
+        await respond(f"📅 Created **{title.strip()}** — members can RSVP with "
+                      f"`/event {title.strip()}`.")
+
+
+class EventCreateModal(discord.ui.Modal):
+    """Pop-up form for /event create — pre-filled from slash args."""
+
+    def __init__(self, cog: "Events", *, title: str = "", date: str = "",
+                 time: str = "", location: str = "", description: str = ""):
+        super().__init__(title="📅 New event")
+        self.cog = cog
+        self.title_input = discord.ui.TextInput(
+            label="Title", placeholder="e.g. Robot showcase", max_length=128,
+            default=title or None, required=True)
+        self.date_input = discord.ui.TextInput(
+            label="Date (YYYY-MM-DD)", max_length=16,
+            default=date or None, required=False)
+        self.time_input = discord.ui.TextInput(
+            label="Time (HH:MM)", max_length=8,
+            default=time or None, required=False)
+        self.location_input = discord.ui.TextInput(
+            label="Location", max_length=128,
+            default=location or None, required=False)
+        self.desc_input = discord.ui.TextInput(
+            label="Description", style=discord.TextStyle.paragraph,
+            max_length=1024, default=description or None, required=False)
+        for item in (self.title_input, self.date_input, self.time_input,
+                     self.location_input, self.desc_input):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await self.cog._create_event(
+            author_id=interaction.user.id,
+            title=self.title_input.value or "",
+            date=self.date_input.value or "",
+            time=self.time_input.value or "",
+            location=self.location_input.value or "",
+            description=self.desc_input.value or "",
+            respond=lambda text: interaction.followup.send(text),
+        )
 
 
 async def setup(bot):

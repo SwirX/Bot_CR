@@ -112,11 +112,59 @@ class TaskDetailView(discord.ui.View):
                 "🚩 This task already has an assignee — use another task.",
                 ephemeral=True)
             return
+        # Same gate as /task claim (P4): the button must not bypass the scope.
+        scopes = await scopes_for_author_like(interaction)
+        if not ({"tasks.claim", "tasks.assign"} & scopes):
+            await interaction.response.send_message(
+                "🔒 Claiming tasks needs the **tasks.claim** scope "
+                "(cell member or above).", ephemeral=True)
+            return
         task["assignee"] = str(interaction.user.id)
         task["status"] = "in_progress"
         task["updated_at"] = datetime.now(timezone.utc).isoformat()
         await store.save_task(task)
         await interaction.response.edit_message(embed=_task_embed(task), view=self)
+        await interaction.followup.send(
+            "🙋 Claimed — good luck! 💪", ephemeral=True)
+
+
+class TaskCreateModal(discord.ui.Modal):
+    """Pop-up form for /task create — pre-filled from slash args when given."""
+
+    def __init__(self, cog: "Tasks", *, title: str = "", description: str = "",
+                 priority: str = "", due: str = "", cell: str = ""):
+        super().__init__(title="📋 New task")
+        self.cog = cog
+        self.title_input = discord.ui.TextInput(
+            label="Title", placeholder="e.g. Build the demo chassis",
+            max_length=255, default=title or None, required=True)
+        self.desc_input = discord.ui.TextInput(
+            label="Description", style=discord.TextStyle.paragraph,
+            max_length=1024, default=description or None, required=False)
+        self.priority_input = discord.ui.TextInput(
+            label="Priority (low / medium / high)", max_length=16,
+            default=priority or None, required=False)
+        self.due_input = discord.ui.TextInput(
+            label="Due (YYYY-MM-DD, tomorrow, in 3d)", max_length=32,
+            default=due or None, required=False)
+        self.cell_input = discord.ui.TextInput(
+            label="Cell (optional)", max_length=64,
+            default=cell or None, required=False)
+        for item in (self.title_input, self.desc_input, self.priority_input,
+                     self.due_input, self.cell_input):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await self.cog._create_task(
+            author_id=interaction.user.id,
+            title=self.title_input.value or "",
+            description=self.desc_input.value or "",
+            priority=self.priority_input.value or "",
+            due=self.due_input.value or "",
+            cell=self.cell_input.value or "",
+            respond=lambda text: interaction.followup.send(text),
+        )
 
 
 class Tasks(commands.Cog):
@@ -211,7 +259,7 @@ class Tasks(commands.Cog):
         if len(pages) == 1:
             await ctx.send(pages[0])
         else:
-            await ctx.send(pages[0], view=PaginatorView(pages))
+            await ctx.send(pages[0], view=PaginatorView(pages, user=ctx.author))
 
     async def _safe_list(self):
         try:
@@ -249,20 +297,20 @@ class Tasks(commands.Cog):
                        view=TaskDetailView(self, str(task_doc["task_id"]),
                                            ctx.author.id))
 
-    @task.command(name="create", description="Create a task (staff/chiefs).")
-    @commands.guild_only()
-    @require_scope("tasks.create")
-    async def task_create(self, ctx, title: str, description: str = "",
-                          priority: str = "medium", due: str = "",
-                          cell: str = ""):
-        """Create an unassigned task; assign it next with /task assign."""
+    async def _create_task(self, *, author_id: int, title: str, description: str,
+                           priority: str, due: str, cell: str, respond) -> None:
+        """Shared core for /task create and its modal form.
+
+        ``respond`` is an async callable that delivers the answer (``ctx.send``
+        for prefix invocations, an interaction followup for modals).
+        """
         if len(title) > 255:
-            await ctx.send("⚠️ Keep the title under 255 characters.")
+            await respond("⚠️ Keep the title under 255 characters.")
             return
         try:
             due_norm = parse_due(due) if due else ""
         except ValueError:
-            await ctx.send("⚠️ Couldn't parse due date — use YYYY-MM-DD, 'tomorrow' or 'in 3d'.")
+            await respond("⚠️ Couldn't parse due date — use YYYY-MM-DD, 'tomorrow' or 'in 3d'.")
             return
         code = await store.next_task_code()
         task_doc = {
@@ -273,16 +321,36 @@ class Tasks(commands.Cog):
             "due": due_norm,
             "cell": cell.strip(),
             "status": "open",
-            "created_by": str(ctx.author.id),
+            "created_by": str(author_id),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
             await store.save_task(task_doc)
         except StoreError as exc:
-            await ctx.send(f"⚠️ Couldn't create the task: {exc}")
+            await respond(f"⚠️ Couldn't create the task: {exc}")
             return
-        await ctx.send(f"📋 Created **{title.strip()}** as `{code}`.\n"
-                       f"Assign it: `/task assign {code} @member`")
+        await respond(f"📋 Created **{title.strip()}** as `{code}`.\n"
+                      f"Assign it: `/task assign {code} @member`")
+
+    @task.command(name="create", description="Create a task (staff/chiefs).")
+    @commands.guild_only()
+    @require_scope("tasks.create")
+    async def task_create(self, ctx, title: str = "", description: str = "",
+                          priority: str = "medium", due: str = "",
+                          cell: str = ""):
+        """Create an unassigned task; assign it next with /task assign.
+
+        Slash invocation opens a modal form (pre-filled from any args given);
+        prefix invocation keeps the inline text path.
+        """
+        if ctx.interaction is not None:
+            await ctx.interaction.response.send_modal(TaskCreateModal(
+                self, title=title, description=description,
+                priority=priority, due=due, cell=cell))
+            return
+        await self._create_task(
+            author_id=ctx.author.id, title=title, description=description,
+            priority=priority, due=due, cell=cell, respond=ctx.send)
 
     @task.command(name="assign", description="Assign a task to a member (staff).")
     @commands.guild_only()
@@ -338,7 +406,7 @@ class Tasks(commands.Cog):
         task_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
         await store.save_task(task_doc)
         await ctx.send(f"🙋 Claimed **{task_doc.get('title')}** (`{task_doc['task_id']}`). "
-                       "Good luck! 💪")
+                       "Good luck! 💪", ephemeral=True)
 
     @task.command(name="edit", description="Edit a task (staff).")
     @commands.guild_only()
