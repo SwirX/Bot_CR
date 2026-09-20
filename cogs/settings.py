@@ -25,7 +25,24 @@ LOG = logging.getLogger("bot.settings")
 _LANGUAGE_META = (("en", "🇬🇧"), ("fr", "🇫🇷"), ("ar", "🇸🇦"))
 
 
-class SettingsView(discord.ui.View):
+class _OwnedView:
+    """Mixin: guard every button of a view to its commanding member.
+
+    ``user_id`` must be set by the subclass. Anyone else who presses a button
+    gets an ephemeral refusal and nothing changes.
+    """
+
+    async def _owned(self, interaction: discord.Interaction) -> bool:
+        if getattr(self, "user_id", None) is not None \
+                and interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "🔒 This settings panel belongs to someone else — "
+                "run `/settings` yourself to change your own.", ephemeral=True)
+            return False
+        return True
+
+
+class SettingsView(_OwnedView, discord.ui.View):
     """Root settings menu: [🌐 Language] + [✖️ Close]."""
 
     def __init__(self, lang: str, user_id: int, *, timeout: float = 120.0):
@@ -44,6 +61,8 @@ class SettingsView(discord.ui.View):
 
     @discord.ui.button(emoji="🌐", style=discord.ButtonStyle.primary, label="Language")
     async def language(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         view = LanguageView(self.lang, self.user_id)
         try:
             await interaction.response.edit_message(embed=view.embed(), view=view)
@@ -52,6 +71,8 @@ class SettingsView(discord.ui.View):
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, label="Close", row=1)
     async def close(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
         for child in self.children:
             child.disabled = True
         try:
@@ -66,7 +87,7 @@ class SettingsView(discord.ui.View):
             child.disabled = True
 
 
-class LanguageView(discord.ui.View):
+class LanguageView(_OwnedView, discord.ui.View):
     """One level deeper: pick a language, or ◀️ back to the root menu."""
 
     def __init__(self, lang: str, user_id: int, *, timeout: float = 120.0):
@@ -100,6 +121,10 @@ class LanguageView(discord.ui.View):
         return pick
 
     async def _apply(self, interaction: discord.Interaction, code: str):
+        # Never let a stranger rewrite your stored preference by tapping your
+        # language buttons (S3: cross-user write).
+        if not await self._owned(interaction):
+            return
         try:
             await store.merge_member(self.user_id, {"lang": code})
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
@@ -117,6 +142,8 @@ class LanguageView(discord.ui.View):
             pass
 
     async def _go_back(self, interaction: discord.Interaction):
+        if not await self._owned(interaction):
+            return
         view = SettingsView(self.lang, self.user_id)
         try:
             await interaction.response.edit_message(embed=view.embed(), view=view)
