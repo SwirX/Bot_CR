@@ -7,6 +7,7 @@ the permission-scope resolver in cogs/_scopes.py.
 """
 
 import logging
+import re
 
 import discord
 from discord import app_commands
@@ -553,33 +554,62 @@ class Members(commands.Cog):
                              description="Set a member's club role / cell / club ID.")
     @commands.guild_only()
     @require_scope("members.manage")
-    async def setprofile(self, ctx, member: discord.Member,
+    async def setprofile(self, ctx, member: discord.Member = None,
                          club_role: app_commands.Choice[str] = None,
                          cell: str = None, club_id: str = None):
-        """Leadership tool: only staff can promote/place members into cells."""
+        """Leadership tool: only staff can promote/place members into cells.
+
+        Slash invocation opens a modal form; prefix keeps the inline path.
+        """
+        if ctx.interaction is not None:
+            role_value = getattr(club_role, "value", "") if club_role else ""
+            await ctx.interaction.response.send_modal(SetProfileModal(
+                self, member=member, club_role=role_value,
+                cell=cell or "", club_id=club_id or ""))
+            return
+        if member is None:
+            await ctx.send("⚠️ Pass the member to update, e.g. "
+                           "`!setprofile @member role=cell_chief cell=Alpha`.")
+            return
+        await self._set_profile(ctx, member=member, club_role=club_role,
+                                cell=cell, club_id=club_id, respond=ctx.send)
+
+    async def _set_profile(self, ctx, *, member: discord.Member, club_role=None,
+                           cell: str = None, club_id: str = None, respond) -> None:
+        """Shared core for /setprofile and its modal form.
+
+        ``respond`` is ``ctx.send`` for prefix invocations and an interaction
+        followup for modals.
+        """
         if member == self.bot.user:
-            await ctx.send("Nice try. I manage my own account. 🤖")
+            await respond("Nice try. I manage my own account. 🤖")
             return
         payload = {}
-        if club_role is not None:
-            payload["club_role"] = club_role.value
+        if club_role:
+            key = str(club_role.value if hasattr(club_role, "value")
+                      else club_role).strip().lower()
+            if key not in CLUB_ROLE_LABELS:
+                await respond("⚠️ Unknown club role **%s** — pick one of: %s."
+                              % (key, ", ".join(CLUB_ROLE_LABELS.values())))
+                return
+            payload["club_role"] = key
         if cell:
-            payload["cell"] = cell.strip()
+            payload["cell"] = str(cell).strip()
         if club_id:
-            payload["club_id"] = club_id.strip()
+            payload["club_id"] = str(club_id).strip()
         if not payload:
-            await ctx.send("⚠️ Nothing to change — pass `club_role`, `cell` or `club_id`.")
+            await respond("⚠️ Nothing to change — give a `club_role`, `cell` or `club_id`.")
             return
         try:
             await store.merge_member(member.id, payload)
         except StoreError as exc:
-            await ctx.send(f"⚠️ Couldn't update the profile: {exc}")
+            await respond(f"⚠️ Couldn't update the profile: {exc}")
             return
         role_label = CLUB_ROLE_LABELS.get(
-            str(payload.get("club_role", "")).lower(), "") 
+            str(payload.get("club_role", "")).lower(), "")
         piece = ", ".join(f"{k}={v}" for k, v in payload.items())
-        await ctx.send(f"✅ Updated **{member.display_name}**: {piece}"
-                       + (f" → **{role_label}**" if role_label else ""))
+        await respond(f"✅ Updated **{member.display_name}**: {piece}"
+                      + (f" → **{role_label}**" if role_label else ""))
 
     @commands.hybrid_command(name="notifications",
                              description="Configure what the bot notifies you about.")
@@ -649,6 +679,48 @@ class Members(commands.Cog):
             return await store.list_events()
         except StoreError:
             return []
+
+
+class SetProfileModal(discord.ui.Modal):
+    """Pop-up form for /setprofile (staff) — pre-filled from slash args."""
+
+    def __init__(self, cog: "Members", *, member: discord.Member = None,
+                 club_role: str = "", cell: str = "", club_id: str = ""):
+        super().__init__(title="🪪 Set profile")
+        self.cog = cog
+        self.member_input = discord.ui.TextInput(
+            label="Member (mention or numeric ID)", max_length=32,
+            default=member.mention if member is not None else None,
+            required=True)
+        self.role_input = discord.ui.TextInput(
+            label="Club role (core_member … archon)", max_length=32,
+            default=club_role or None, required=False)
+        self.cell_input = discord.ui.TextInput(
+            label="Cell", max_length=64, default=cell or None, required=False)
+        self.clubid_input = discord.ui.TextInput(
+            label="Club account ID", max_length=64,
+            default=club_id or None, required=False)
+        for item in (self.member_input, self.role_input, self.cell_input,
+                     self.clubid_input):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        raw = (self.member_input.value or "").strip()
+        digits = re.sub(r"\D", "", raw)
+        member = (interaction.guild.get_member(int(digits))
+                  if digits and interaction.guild is not None else None)
+        if member is None:
+            await interaction.followup.send(
+                "⚠️ Couldn't find that member in this server — paste their "
+                "mention or numeric ID.", ephemeral=True)
+            return
+        await self.cog._set_profile(
+            interaction, member=member,
+            club_role=self.role_input.value or "",
+            cell=self.cell_input.value or "",
+            club_id=self.clubid_input.value or "",
+            respond=lambda text: interaction.followup.send(text))
 
 
 async def setup(bot):
