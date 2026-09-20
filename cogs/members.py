@@ -17,7 +17,7 @@ from data.store import StoreError
 from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
                           scopes_for_author, require_scope)
 from cogs._dates import days_until, fmt_date
-from cogs._ui import PaginatorView
+from cogs._ui import OwnerView, PaginatorView
 from cogs.minecraft import LinkChoiceView, UnlinkConfirmView, mc_link_card_embed
 from i18n.core import resolve_member_lang, t
 
@@ -109,7 +109,7 @@ class NotifView(discord.ui.View):
         await self.cog._refresh_notif_panel(interaction, self)
 
 
-class DashboardView(discord.ui.View):
+class DashboardView(OwnerView, discord.ui.View):
     """Quick actions for /dashboard — lightweight embeds, same backend."""
 
     def __init__(self, cog, user_id: int):
@@ -117,14 +117,9 @@ class DashboardView(discord.ui.View):
         self.cog = cog
         self.user_id = user_id
 
-    async def _owned(self, interaction) -> bool:
-        """The dashboard panels hold private per-member data — owner only."""
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "🔒 This dashboard belongs to someone else — run `/dashboard` "
-                "yourself for your own panels.", ephemeral=True)
-            return False
-        return True
+    def _owner_deny_message(self, _interaction) -> str:
+        return ("🔒 This dashboard belongs to someone else — run `/dashboard` "
+                "yourself for your own panels.")
 
     @discord.ui.button(label="📋 Tasks", style=discord.ButtonStyle.primary,
                        custom_id="dash:tasks")
@@ -163,7 +158,7 @@ class DashboardView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-class ProfileHubView(discord.ui.View):
+class ProfileHubView(OwnerView, discord.ui.View):
     """/profile identity hub: Overview / Minecraft / Robotics tabs (Dank-Memer style)."""
 
     def __init__(self, cog: "Members", lang: str, member: discord.Member,
@@ -177,14 +172,9 @@ class ProfileHubView(discord.ui.View):
         self.robotics.label = t("profile.tab.robotics", lang)
         self.close.label = t("settings.close", lang)
 
-    async def _owned(self, interaction: discord.Interaction) -> bool:
-        """Refuse presses from anyone who didn't run the /profile command."""
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "🔒 This profile view belongs to the command author — "
-                "run `/profile` yourself to use its tabs.", ephemeral=True)
-            return False
-        return True
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This profile view belongs to the command author — "
+                "run `/profile` yourself to use its tabs.")
 
     @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary, row=0)
     async def overview(self, interaction: discord.Interaction,
@@ -238,7 +228,7 @@ class ProfileHubView(discord.ui.View):
             content=t("profile.closed", self.lang), embed=None, view=None)
 
 
-class ProfileMinecraftTabView(discord.ui.View):
+class ProfileMinecraftTabView(OwnerView, discord.ui.View):
     """Minecraft tab inside /profile: link status + quick link/unlink actions."""
 
     def __init__(self, cog: "Members", lang: str, member: discord.Member,
@@ -266,14 +256,9 @@ class ProfileMinecraftTabView(discord.ui.View):
             self.remove_item(self.mcpass)
             self.remove_item(self.devices)
 
-    async def _owned(self, interaction: discord.Interaction) -> bool:
-        """Refuse presses from anyone who didn't open this profile tab."""
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "🔒 This profile view belongs to the command author — "
-                "run `/profile` yourself to use its tabs.", ephemeral=True)
-            return False
-        return True
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This profile view belongs to the command author — "
+                "run `/profile` yourself to use its tabs.")
 
     async def _home(self) -> tuple[discord.Embed, "ProfileMinecraftTabView"]:
         can_manage = (self.viewer.id == self.member.id

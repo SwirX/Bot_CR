@@ -2,9 +2,10 @@ import discord
 from discord.ext import commands
 
 from i18n.core import resolve_member_lang, t
+from cogs._ui import OwnerView
 
 
-class HelpView(discord.ui.View):
+class HelpView(OwnerView, discord.ui.View):
     """Interactive help: section buttons + overview + close button.
 
     Sections map real cogs onto the categories people think in (fun,
@@ -64,14 +65,9 @@ class HelpView(discord.ui.View):
     def _section_label(self, label: str) -> str:
         return t(f"help.section.{label}", self.lang)
 
-    async def _owned(self, interaction: discord.Interaction) -> bool:
-        """Only the member who opened /help may navigate or close it."""
-        if self.user_id is not None and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "🔒 This help menu belongs to the command author — "
-                "run `/help` yourself to browse it.", ephemeral=True)
-            return False
-        return True
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This help menu belongs to the command author — "
+                "run `/help` yourself to browse it.")
 
     def _section_callback(self, label: str):
         async def callback(interaction: discord.Interaction):

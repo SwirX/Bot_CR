@@ -19,30 +19,14 @@ from discord.ext import commands
 
 from data.store import store
 from i18n.core import LANGUAGES, resolve_member_lang, t
+from cogs._ui import OwnerView
 
 LOG = logging.getLogger("bot.settings")
 
 _LANGUAGE_META = (("en", "🇬🇧"), ("fr", "🇫🇷"), ("ar", "🇸🇦"))
 
 
-class _OwnedView:
-    """Mixin: guard every button of a view to its commanding member.
-
-    ``user_id`` must be set by the subclass. Anyone else who presses a button
-    gets an ephemeral refusal and nothing changes.
-    """
-
-    async def _owned(self, interaction: discord.Interaction) -> bool:
-        if getattr(self, "user_id", None) is not None \
-                and interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "🔒 This settings panel belongs to someone else — "
-                "run `/settings` yourself to change your own.", ephemeral=True)
-            return False
-        return True
-
-
-class SettingsView(_OwnedView, discord.ui.View):
+class SettingsView(OwnerView, discord.ui.View):
     """Root settings menu: [🌐 Language] + [✖️ Close]."""
 
     def __init__(self, lang: str, user_id: int, *, timeout: float = 120.0):
@@ -51,6 +35,10 @@ class SettingsView(_OwnedView, discord.ui.View):
         self.user_id = user_id
         self.language.label = t("settings.lang_button", lang)
         self.close.label = t("settings.close", lang)
+
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This settings panel belongs to someone else — "
+                "run `/settings` yourself to change your own.")
 
     def embed(self) -> discord.Embed:
         return discord.Embed(
@@ -87,7 +75,7 @@ class SettingsView(_OwnedView, discord.ui.View):
             child.disabled = True
 
 
-class LanguageView(_OwnedView, discord.ui.View):
+class LanguageView(OwnerView, discord.ui.View):
     """One level deeper: pick a language, or ◀️ back to the root menu."""
 
     def __init__(self, lang: str, user_id: int, *, timeout: float = 120.0):
