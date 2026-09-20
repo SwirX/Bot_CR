@@ -128,6 +128,7 @@
   "profile.tab.robotics": "Robotics",
   "profile.robotics.soon": "🔬 **Compte Robotics** — le système de liaison est prêt pour lui, bientôt. Vous le gérerez ici comme Minecraft.",
   "profile.closed": "Profil fermé. 👋",
+  "profile.load_failed": "⚠️ Impossible de charger cet onglet — réessayez.",
   "mc.linking.title": "🔗 Discord ↔ Minecraft",
   "mc.linking.body": "Rejoignez la liste blanche : `/linkmc <pseudo>` + **compte** :\n• **free** — lanceurs crackés (TLauncher, SKlauncher, PojavLauncher…)\n• **paid** — vous avez acheté Minecraft et vous vous connectez avec le compte officiel (vous savez déjà que vous êtes payant 😉)\n⚠️ Les joueurs *free* doivent choisir **free** — choisir *paid* par erreur vous bloque l'accès au serveur.",
   "linkmc.not_username": "⚠️ Ça ne ressemble pas à un pseudo Minecraft (1 à 16 lettres, chiffres ou tirets bas).",
