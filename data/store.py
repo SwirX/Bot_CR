@@ -50,6 +50,7 @@ from data.appwrite_client import (
     is_missing,
     seed_club_roles as _seed_roles_sync,
 )
+from data.levels import level_from_xp
 
 LOG = logging.getLogger("bot.store")
 
@@ -75,7 +76,10 @@ _T = {
 }
 
 # Defaults used when a discord_data row has to be bootstrapped (REQ columns).
-_DD_DEFAULTS = {"xp": 0, "messages": 0, "voice_seconds": 0, "verified": False}
+# ``level`` mirrors the derived level_from_xp curve, materialized on every XP
+# write so the dashboard/web never has to reimplement the bot's curve.
+_DD_DEFAULTS = {"xp": 0, "messages": 0, "voice_seconds": 0, "verified": False,
+                "level": 0}
 
 # Far-future sentinel for REQUIRED datetime columns (event/comp dates): keeps
 # the "no date = always upcoming" behaviour and round-trips back to "".
@@ -473,6 +477,7 @@ class Store:
                         mship: dict | None, mem: dict | None,
                         side: dict | None, warnings: int = 0) -> dict:
         side = side or {}
+        xp = int((ddata or {}).get("xp") or 0)
         rec = {
             "$id": uid,
             "user_id": uid,
@@ -484,7 +489,8 @@ class Store:
             "birthday": (ddata or {}).get("birthday") or "",
             "birthday_full": (ddata or {}).get("birthday_full") or "",
             "verified": bool((ddata or {}).get("verified")),
-            "xp": int((ddata or {}).get("xp") or 0),
+            "xp": xp,
+            "level": level_from_xp(xp),
             "messages": int((ddata or {}).get("messages") or 0),
             "voice_seconds": int((ddata or {}).get("voice_seconds") or 0),
             "last_xp_at": _iso_text((ddata or {}).get("last_xp_at")),
@@ -608,7 +614,10 @@ class Store:
             return
         cur = await self._get(_T["discord_data"], uid)
         value = int((cur or {}).get(field) or 0) + amount
-        await self._write(_T["discord_data"], uid, {field: value},
+        payload = {field: value}
+        if field == "xp":  # persist the derived level alongside the XP
+            payload["level"] = level_from_xp(value)
+        await self._write(_T["discord_data"], uid, payload,
                           defaults=_DD_DEFAULTS)
 
     async def flush_member_activity(self, activity: dict) -> None:
@@ -641,8 +650,10 @@ class Store:
                         payload[key] = int(payload.get(key) or 0) + int(amount)
                 except (TypeError, ValueError):
                     continue
-            await self._write(_T["discord_data"], uid,
-                              {k: payload[k] for k in fields},
+            out = {k: payload[k] for k in fields}
+            if "xp" in fields:  # persist the derived level alongside the XP
+                out["level"] = level_from_xp(payload["xp"])
+            await self._write(_T["discord_data"], uid, out,
                               defaults=_DD_DEFAULTS)
 
     async def list_members(self, *, limit: int = 100,

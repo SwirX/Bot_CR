@@ -1,5 +1,4 @@
 import logging
-import math
 import random
 import time
 from datetime import datetime
@@ -11,29 +10,13 @@ from discord.ext import commands, tasks
 import config
 from data.store import store
 from data.store import StoreError
+from data.levels import level_from_xp, xp_for_level, xp_progress
 from cogs._ui import PaginatorView
 from cogs._perms import mod_perms
 
 LOG = logging.getLogger("bot.engagement")
 
 tz = ZoneInfo("Africa/Casablanca")
-
-
-def level_from_xp(xp: int) -> int:
-    """Level from cumulative XP. Level L needs 100*L*L total XP."""
-    return int(math.isqrt(max(0, int(xp)) // 100))
-
-
-def xp_for_level(level: int) -> int:
-    return 100 * level * level
-
-
-def xp_progress(xp: int) -> tuple[int, int, int]:
-    """Return (level, xp into level, xp needed for next level)."""
-    level = level_from_xp(xp)
-    into = xp - xp_for_level(level)
-    need = xp_for_level(level + 1) - xp_for_level(level)
-    return level, into, need
 
 
 def today_str() -> str:

@@ -15,6 +15,7 @@ from discord.ext import commands
 
 from data.store import store
 from data.store import StoreError
+from data.levels import level_from_xp
 from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
                           scopes_for_author, require_scope)
 from cogs._dates import days_until, fmt_date
@@ -84,15 +85,6 @@ HIERARCHY_CHART = (
     "   CELL MEMBERS      CORE MEMBERS\n"
     "```"
 )
-
-
-def level_from_xp(xp: int) -> int:
-    """Level for cumulative XP using the club curve 100·L²."""
-    xp = max(0, int(xp or 0))
-    level = 0
-    while 100 * (level + 1) * (level + 1) <= xp:
-        level += 1
-    return level
 
 
 class NotifView(discord.ui.View):
