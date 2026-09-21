@@ -525,7 +525,10 @@ class Minecraft(commands.Cog):
 
         ``links`` is read-modify-write so future platforms (e.g. ``robotics``)
         survive alongside ``minecraft``; ``mc_username`` stays for back-compat.
-        The map is stored as JSON text (Appwrite has no object attribute type).
+        The map is stored as JSON text (TablesDB keeps it in the member
+        sidecar; Appwrite has no object attribute type). The verified link is
+        also mirrored into the hub's discord_mc_links / minecraft_accounts
+        rows so the plugin's login layer sees the same truth.
         """
         record = await self._record_for(user_id)
         links = Minecraft._links_of(record)
@@ -537,13 +540,29 @@ class Minecraft(commands.Cog):
         }
         await store.merge_member(user_id, {"links": json.dumps(links),
                                            "mc_username": canonical})
+        try:
+            primary = entries[0]["uuid"] if entries else None
+            await store.mc_upsert_link(
+                user_id, canonical, verified_at=linked_at,
+                account_uuid=primary,
+                is_cracked=(account_type == "free"))
+        except Exception as exc:  # noqa: BLE001 - hub mirror is best-effort
+            LOG.warning("linkmc: could not mirror hub link for %s: %s",
+                        user_id, exc)
 
     async def _clear_mc_link(self, user_id: int) -> None:
         record = await self._record_for(user_id)
         links = Minecraft._links_of(record)
+        name = (links.get("minecraft") or {}).get("username") or ""
         links.pop("minecraft", None)
         await store.merge_member(user_id, {"links": json.dumps(links),
                                            "mc_username": ""})
+        if name:
+            try:
+                await store.mc_deactivate_link(user_id, name)
+            except Exception as exc:  # noqa: BLE001 - hub mirror is best-effort
+                LOG.warning("unlink: could not deactivate hub link for %s: %s",
+                            user_id, exc)
 
     async def _fetch_status(self, lang: str) -> tuple[dict, str | None]:
         """Live panel data {state, name, version, players} + error text (or None)."""
@@ -884,18 +903,9 @@ def _loading_embed() -> discord.Embed:
 async def render_mc_hub(cog: "Minecraft", lang: str,
                         member: discord.Member
                         ) -> tuple[discord.Embed, "MinecraftHubView"]:
-    """Fresh hub page: live status + the member's link summary + actions.
-
-    The ``🔑 Change password`` / ``📱 Devices`` buttons only appear for
-    members whose link came from mc-link (``links.minecraft.type == "linked"``
-    — i.e. a real ``mc_auth`` profile exists to act on).
-    """
+    """Fresh hub page: live status + the member's link summary + actions."""
     embed = await cog._hub_embed(lang, member)
-    linked = None
-    link = cog._mc_link_of(await cog._record_for(member.id))
-    if link is not None and link.get("type") == "linked":
-        linked = link.get("username")
-    return embed, MinecraftHubView(cog, lang, member, linked_username=linked)
+    return embed, MinecraftHubView(cog, lang, member)
 
 
 async def mc_link_card_embed(cog: "Minecraft", member: discord.Member,
@@ -952,24 +962,16 @@ class MinecraftHubView(LoggedView, discord.ui.View):
     """/mc + /minecraft menu: live status content with action drill-downs."""
 
     def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
-                 *, linked_username: str | None = None,
-                 timeout: float = 180.0):
+                 *, timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member = cog, lang, member
-        self.linked_username = linked_username
         self.refresh.label = t("mc.hub.refresh", lang)
         self.link.label = t("mc.hub.link", lang)
         self.unlink.label = t("mc.hub.unlink", lang)
         self.control.label = t("mc.hub.control", lang)
         self.close.label = t("mc.hub.close", lang)
-        self.mcpass.label = t("mc.hub.mcpass", lang)
-        self.devices.label = t("mc.hub.devices", lang)
         if not cog._is_mc_operator(member):
             self.remove_item(self.control)
-        # mc-link extras only make sense for a real mc_auth profile.
-        if linked_username is None:
-            self.remove_item(self.mcpass)
-            self.remove_item(self.devices)
 
     async def _home(self) -> tuple[discord.Embed, "MinecraftHubView"]:
         return await render_mc_hub(self.cog, self.lang, self.member)
@@ -1007,27 +1009,6 @@ class MinecraftHubView(LoggedView, discord.ui.View):
     async def close(self, interaction: discord.Interaction,
                     _button: discord.ui.Button):
         await close_panel(interaction, text=t("mc.hub.closed", self.lang))
-
-    @discord.ui.button(emoji="🔑", style=discord.ButtonStyle.primary, row=1)
-    async def mcpass(self, interaction: discord.Interaction,
-                     _button: discord.ui.Button):
-        mclink = self.cog.bot.get_cog("McLink")
-        if mclink is None or not getattr(self, "linked_username", None):
-            await interaction.response.defer()
-            return
-        await mclink.open_mcpass_modal(interaction, self.lang,
-                                       self.linked_username)
-
-    @discord.ui.button(emoji="📱", style=discord.ButtonStyle.secondary, row=1)
-    async def devices(self, interaction: discord.Interaction,
-                      _button: discord.ui.Button):
-        mclink = self.cog.bot.get_cog("McLink")
-        if mclink is None or not getattr(self, "linked_username", None):
-            await interaction.response.defer()
-            return
-        await mclink.open_devices_view(interaction, self.lang,
-                                       self.linked_username,
-                                       home_factory=self._home)
 
 
 class LinkChoiceView(discord.ui.View):
