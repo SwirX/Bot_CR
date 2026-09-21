@@ -16,7 +16,7 @@ services:
       - key: APPWRITE_PROJECT_ID
         value: robotics-ops
       - key: APPWRITE_DATABASE_ID
-        value: robotics_ops
+        value: robotics_hub
       # ── Optional ──
       - key: GUILD_ID             # Set for instant slash sync (dev/testing)
         sync: false
