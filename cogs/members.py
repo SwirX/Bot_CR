@@ -16,6 +16,7 @@ from discord.ext import commands
 from data.store import store
 from data.store import StoreError
 from data.levels import level_from_xp
+from data.names import LINK_SEARCH_THRESHOLD, best_match, top_matches
 from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
                           scopes_for_author, require_scope)
 from cogs._dates import days_until, fmt_date
@@ -511,6 +512,75 @@ class Members(commands.Cog):
             await ctx.send(f"⚠️ Couldn't unlink: {exc}")
             return
         await ctx.send("🔓 Unlinked your club account.")
+
+    @commands.hybrid_command(name="linkmember",
+                             description="Link a club member to a Discord user "
+                                         "(writes member_discord_links).")
+    @commands.guild_only()
+    @require_scope("members.manage")
+    async def linkmember(self, ctx, member: discord.Member, club: str):
+        """Staff: attach a Discord user to their club-registry row by name/id.
+
+        Writes the ``member_discord_links`` join row the members list reads;
+        the name matcher de-cursives and fuzzy-matches like the auto-linker.
+        """
+        if member == self.bot.user:
+            await ctx.send("Nice try. I manage my own account. 🤖")
+            return
+        club = (club or "").strip()
+        if not club:
+            await ctx.send("⚠️ Pass the club member by name or id, e.g. "
+                           "`!linkmember @user \"Fatima Bouzarbia\"`.")
+            return
+        try:
+            registry = await store.list_club_members()
+        except StoreError as exc:
+            await ctx.send(f"⚠️ Couldn't load the club registry: {exc}")
+            return
+        low = club.lower()
+        target = next((m for m in registry
+                       if m["$id"] == club or m["name"].lower() == low), None)
+        if target is None:
+            match = best_match(
+                club, [(m["$id"], m["name"]) for m in registry],
+                threshold=LINK_SEARCH_THRESHOLD)
+            if match is None:
+                top = top_matches(
+                    club, [(m["$id"], m["name"]) for m in registry])
+                lines = ", ".join(f"**{name}**" for _, name, _ in top)
+                await ctx.send(f"⚠️ Couldn't pin down “{club}” against the "
+                               "club registry."
+                               + (f"\nClosest: {lines}" if lines else ""))
+                return
+            target = {"$id": match[0], "name": match[1]}
+        try:
+            await store.link_member_discord(target["$id"], member.id,
+                                            verified=True)
+        except StoreError as exc:
+            await ctx.send(f"⚠️ Couldn't link: {exc}")
+            return
+        await ctx.send(f"✅ Linked **{member.display_name}** → club member "
+                       f"**{target['name']}** (verified).\n"
+                       "The members list now shows them joined.")
+
+    @commands.hybrid_command(name="unlinkmember",
+                             description="Remove a Discord user's "
+                                         "club-member link.")
+    @commands.guild_only()
+    @require_scope("members.manage")
+    async def unlinkmember(self, ctx, member: discord.Member):
+        removed = 0
+        try:
+            removed = await store.unlink_member_discord(member.id)
+        except StoreError as exc:
+            await ctx.send(f"⚠️ Couldn't unlink: {exc}")
+            return
+        if removed:
+            await ctx.send(f"🔓 Removed **{member.display_name}**'s "
+                           "club-member link.")
+        else:
+            await ctx.send(f"ℹ️ **{member.display_name}** isn't linked to a "
+                           "club member.")
 
     @commands.hybrid_command(name="profile", description="Show a member's club profile.")
     @commands.guild_only()

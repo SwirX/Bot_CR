@@ -120,6 +120,13 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
         except StoreError:
             LOG.error("Failed to persist onboarding profile for %s", member)
 
+        # Best-effort join: match this Discord user to their club-registry row.
+        try:
+            await store.maybe_auto_link_club_member(member.id, name)
+        except StoreError:
+            LOG.warning("onboarding: auto-link club member failed for %s",
+                        member.id)
+
         ok_name = nickname or name
         reply = f"✅ Verified! Your nickname is now **{ok_name}**."
         if not nickname_applied:

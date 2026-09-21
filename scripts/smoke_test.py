@@ -30,13 +30,13 @@ EXPECTED_COMMANDS = {
     "current_voice_time",
     "dashboard", "define", "del", "dice", "edit", "end", "event", "events",
     "fact", "fixname", "github", "hierarchy", "hello", "help", "history",
-    "hug", "joke", "kick", "language", "leaderboard", "link", "linkmc", "list", "lock", "loop", "lyrics",
+    "hug", "joke", "kick", "language", "leaderboard", "link", "linkmc", "linkmember", "list", "lock", "loop", "lyrics",
     "mc", "mclink", "mcrestart", "mcsession", "mcstart", "mcstop", "meeting", "meme", "minecraft", "modlog", "mute", "notifications", "nowplaying",
     "online_members", "overdue", "pause", "ping", "play", "poll", "profile", "queue",
     "quiz", "quote", "rank", "removerole", "resume", "results", "reverse", "roast",
     "robot", "roles", "rps", "set", "setlead", "setprofile", "settings", "ship", "skip",
     "slap", "slowmode", "spacex", "stop", "task", "tasks", "timeout", "today",
-    "total_messages", "total_voice_time", "unban", "unlink", "unlock", "unmute",
+    "total_messages", "total_voice_time", "unban", "unlink", "unlinkmember", "unlock", "unmute",
     "untimeout", "view", "volume", "vote", "warn", "weather", "website", "whois",
 }
 

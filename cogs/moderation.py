@@ -244,6 +244,12 @@ class Moderation(commands.Cog):
         except discord.HTTPException as exc:
             await ctx.send(f"⚠️ Failed to set the nickname: {exc}")
             return
+        # Best-effort join: match this Discord user to their club-registry row.
+        try:
+            await store.maybe_auto_link_club_member(member.id, source)
+        except StoreError as exc:
+            LOG.warning("fixname: auto-link club member failed for %s: %s",
+                        member.id, exc)
         await ctx.send(f"✏️ Fixed **{member.display_name}** → `{nick}`")
         saved = " (real name saved)" if name is not None else ""
         await self._log(ctx, "fixname", member, f"nickname reset to the cursive real-name form{saved}")
