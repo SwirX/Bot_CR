@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cryptography.exceptions import InvalidTag  # noqa: E402
 
 from cogs._mc_crypto import (  # noqa: E402
-    CODE_ALPHABET, TEMP_ALPHABET, CipherBox, load_ips, mask_ip,
+    CODE_ALPHABET, TEMP_ALPHABET, CipherBox, hash_otp, load_ips, mask_ip,
     new_link_code, new_temp_password, parse_iso, save_ips,
 )
 
@@ -81,9 +81,13 @@ class CredentialMintTests(unittest.TestCase):
     def test_link_code_shape(self):
         for _ in range(200):
             code = new_link_code()
-            self.assertEqual(len(code), 6)
+            self.assertEqual(len(code), 8)  # contract §5.2: OTPs are ≥8 chars
             self.assertTrue(all(c in CODE_ALPHABET for c in code),
                             msg=f"{code!r} has chars outside the alphabet")
+
+    def test_link_code_length_param(self):
+        self.assertEqual(len(new_link_code(6)), 6)  # pair keys may be shorter
+        self.assertEqual(len(new_link_code(12)), 12)
 
     def test_temp_password_shape(self):
         for _ in range(200):
@@ -91,6 +95,29 @@ class CredentialMintTests(unittest.TestCase):
             self.assertEqual(len(pw), 12)
             self.assertTrue(all(c in TEMP_ALPHABET for c in pw),
                             msg=f"{pw!r} has chars outside the alphabet")
+
+
+class OtpHashTests(unittest.TestCase):
+    """The bot side of the plugin's BCrypt.checkpw contract (cost 12, $2a$)."""
+
+    def test_hash_prefix_and_cost(self):
+        h = hash_otp("ABCD2349")
+        self.assertTrue(h.startswith("$2a$12$"), msg=f"unexpected prefix: {h}")
+
+    def test_round_trip(self):
+        import bcrypt
+        code = new_link_code()
+        h = hash_otp(code)
+        self.assertTrue(bcrypt.checkpw(code.encode(), h.encode()))
+
+    def test_wrong_code_fails(self):
+        import bcrypt
+        h = hash_otp("ABCD2349")
+        self.assertFalse(bcrypt.checkpw(b"ABCD2350", h.encode()))
+
+    def test_hashes_differ_per_code(self):
+        self.assertNotEqual(hash_otp("ABCD2349"), hash_otp("ABCD2349"),
+                            "bcrypt salts must differ per hash")
 
 
 class IpHelperTests(unittest.TestCase):

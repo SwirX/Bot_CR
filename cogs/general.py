@@ -2,10 +2,10 @@ import discord
 from discord.ext import commands
 
 from i18n.core import resolve_member_lang, t
-from cogs._ui import OwnerView
+from cogs._ui import OwnerView, LoggedView, close_panel
 
 
-class HelpView(OwnerView, discord.ui.View):
+class HelpView(LoggedView, OwnerView, discord.ui.View):
     """Interactive help: section buttons + overview + close button.
 
     Sections map real cogs onto the categories people think in (fun,
@@ -152,16 +152,7 @@ class HelpView(OwnerView, discord.ui.View):
     async def close(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if not await self._owned(interaction):
             return
-        for child in self.children:
-            child.disabled = True
-        try:
-            await interaction.response.edit_message(
-                content=t("help.closed", self.lang),
-                embed=None,
-                view=self,
-            )
-        except discord.HTTPException:
-            pass
+        await close_panel(interaction, text=t("help.closed", self.lang))
 
     async def on_timeout(self):
         for child in self.children:

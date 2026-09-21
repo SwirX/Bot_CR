@@ -40,7 +40,7 @@ GUILD_ID = _env("GUILD_ID", default=None, cast=int)
 APPWRITE_ENDPOINT = _env("APPWRITE_ENDPOINT", "https://appwrite.alibks.dev/v1")
 APPWRITE_PROJECT_ID = _env("APPWRITE_PROJECT_ID", "robotics-ops", required=True)
 APPWRITE_API_KEY = _env("APPWRITE_API_KEY", required=True)
-APPWRITE_DATABASE_ID = _env("APPWRITE_DATABASE_ID", "robotics_ops")
+APPWRITE_DATABASE_ID = _env("APPWRITE_DATABASE_ID", "robotics_hub")
 
 # ── Channel names (matches #channel names on the server) ───────────────
 CHANNEL_RULES = _env("CHANNEL_RULES", "•📚•-rules-of-the-server")
@@ -115,13 +115,13 @@ MC_PLAYER_ROLE = _env("MC_PLAYER_ROLE", "⛏️ Minecraft Player")
 MC_RALLY_COOLDOWN = _env("MC_RALLY_COOLDOWN", 2700, cast=int)
 
 # ── mc-link (Discord ↔ Minecraft single sign-on) ───────────────────────
-# AES-256-GCM key (32 bytes as hex) shared between this bot and the Paper
-# plugin — used to encrypt one-time codes and temporary passwords written to
-# mc_challenges.payload_enc. AAD bound to the plaintext username.
-MC_LINK_SECRET = _env("MC_LINK_SECRET", "")
-# Link codes expire after this many seconds (default 5 min).
+# OTP-only contract (mitigation plan §5): the bot is the only secret minter.
+# The old shared AES key / code + challenge tables are gone.
+# Pairing codes (pair_key, typed as /mcverify) expire after this many
+# seconds (contract §5.1.6 — 5 minutes; bot-side cleanup).
+MC_PAIR_KEY_TTL = _env("MC_PAIR_KEY_TTL", 300, cast=int)
+# Login OTPs are valid for this many seconds at mint time (contract §5.2.4;
+# must match the plugin's ttl.otp_seconds).
 MC_LINK_CODE_TTL = _env("MC_LINK_CODE_TTL", 300, cast=int)
-# Temporary login passwords for new-IP challenges (default 5 min).
-MC_TEMP_TTL = _env("MC_TEMP_TTL", 300, cast=int)
-# Watcher poll interval for mc_link_codes / mc_challenges (seconds).
+# Watcher poll interval for OTP minting / pair expiry (seconds).
 MC_LINK_POLL_SECONDS = _env("MC_LINK_POLL_SECONDS", 5, cast=int)

@@ -18,9 +18,41 @@ from data.store import StoreError
 from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
                           scopes_for_author, require_scope)
 from cogs._dates import days_until, fmt_date
-from cogs._ui import OwnerView, PaginatorView
+from cogs._ui import OwnerView, PaginatorView, LoggedView, close_panel
 from cogs.minecraft import LinkChoiceView, UnlinkConfirmView, mc_link_card_embed
 from i18n.core import resolve_member_lang, t
+
+
+def _loading_embed() -> discord.Embed:
+    """Transient placeholder acknowledged instantly so slow tabs never time out."""
+    return discord.Embed(description="⏳", color=discord.Color.greyple())
+
+
+async def _render_with_spinner(interaction: discord.Interaction, *,
+                               lang: str, build=None) -> None:
+    """mc idiom: ack the interaction with a spinner, then rewrite the message.
+
+    ``build`` is an async callable returning ``(embed, view)``. Any network
+    (Appwrite) work happens *after* the 3-second interaction window is secured,
+    which is how the profile tabs stay snappy instead of "CR² didn't respond".
+    """
+    try:
+        await interaction.response.edit_message(embed=_loading_embed(), view=None)
+    except (discord.HTTPException, discord.InteractionResponded):
+        return
+    try:
+        embed, view = await build()
+        await interaction.message.edit(embed=embed, view=view)
+    except (discord.HTTPException, discord.NotFound):
+        pass  # panel already closed/deleted — nothing to update
+    except Exception:  # noqa: BLE001 - never leave a spinner stuck on a panel
+        try:
+            await interaction.message.edit(
+                embed=discord.Embed(description=t("profile.load_failed", lang),
+                                    color=discord.Color.red()),
+                view=None)
+        except (discord.HTTPException, AttributeError):
+            pass
 
 LOG = logging.getLogger("bot.members")
 
@@ -141,14 +173,16 @@ class DashboardView(OwnerView, discord.ui.View):
     @discord.ui.button(label="👤 Profile", style=discord.ButtonStyle.secondary,
                        custom_id="dash:profile")
     async def profile(self, interaction, button):
+        await interaction.response.defer()
         embed = await self.cog._profile_embed(interaction.user)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="🔔 Notifications", style=discord.ButtonStyle.secondary,
                        custom_id="dash:notifications")
     async def notifications(self, interaction, button):
+        await interaction.response.defer()
         embed = await self.cog._notif_embed(interaction.user)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _section(self, interaction, text, title):
         if not await self._owned(interaction):
@@ -159,7 +193,7 @@ class DashboardView(OwnerView, discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-class ProfileHubView(OwnerView, discord.ui.View):
+class ProfileHubView(LoggedView, OwnerView, discord.ui.View):
     """/profile identity hub: Overview / Minecraft / Robotics tabs (Dank-Memer style)."""
 
     def __init__(self, cog: "Members", lang: str, member: discord.Member,
@@ -192,73 +226,93 @@ class ProfileHubView(OwnerView, discord.ui.View):
             return
         tab = interaction.values[0]
         if tab == "overview":
-            embed = await self.cog._profile_embed(self.member)
-            await interaction.response.edit_message(embed=embed, view=self)
+            await _render_with_spinner(
+                interaction, lang=self.lang,
+                build=lambda: self._build_overview())
         elif tab == "minecraft":
             await self._go_minecraft(interaction)
         else:
-            embed = discord.Embed(
+            await self._go_robotics(interaction)
+
+    async def _build_overview(self) -> tuple[discord.Embed, "ProfileHubView"]:
+        embed = await self.cog._profile_embed(self.member)
+        return embed, self
+
+    async def _build_robotics(self) -> tuple[discord.Embed, "ProfileHubView"]:
+        """Robotics tab: cell + competitions the member is registered for.
+
+        When there's nothing to show yet it falls back to the "coming soon"
+        placeholder so the tab is never a dead end.
+        """
+        cell = (await self.cog._record(self.member.id)).get("cell")
+        comps = await self.cog._competitions_text(self.member.id)
+        if not cell and not comps:
+            return (discord.Embed(
                 title=t("profile.tab.robotics", self.lang),
                 description=t("profile.robotics.soon", self.lang),
-                color=discord.Color.dark_teal(),
-            )
-            await interaction.response.edit_message(embed=embed, view=self)
+                color=discord.Color.dark_teal()), self)
+        lines = []
+        if cell:
+            lines.append(f"**Cell:** {cell}")
+        if comps:
+            lines.append(f"**🏆 Competitions you're in**\n{comps}")
+        return (discord.Embed(
+            title=f"🔬 {t('profile.tab.robotics', self.lang)}",
+            description="\n\n".join(lines),
+            color=discord.Color.dark_teal()), self)
+
+    async def _go_robotics(self, interaction: discord.Interaction):
+        await _render_with_spinner(interaction, lang=self.lang,
+                                   build=self._build_robotics)
 
     async def _go_minecraft(self, interaction: discord.Interaction):
         mc_cog = self.cog.bot.get_cog("Minecraft")
         if mc_cog is None:
-            embed = discord.Embed(description=t("mc.unconfigured", self.lang),
-                                  color=discord.Color.red())
-            await interaction.response.edit_message(embed=embed, view=self)
+            try:
+                await interaction.response.edit_message(
+                    embed=discord.Embed(description=t("mc.unconfigured", self.lang),
+                                        color=discord.Color.red()),
+                    view=self)
+            except discord.HTTPException:
+                pass
             return
+        await _render_with_spinner(
+            interaction, lang=self.lang,
+            build=lambda: self._build_minecraft(interaction, mc_cog))
+
+    async def _build_minecraft(self, interaction, mc_cog):
         can_manage = interaction.user.id == self.member.id or mc_cog._is_mc_operator(interaction.user)
         embed = await mc_link_card_embed(mc_cog, self.member, self.lang,
                                          full=can_manage)
-        linked = None
-        link = mc_cog._mc_link_of(await mc_cog._record_for(self.member.id))
-        if link is not None and link.get("type") == "linked":
-            linked = link.get("username")
         view = ProfileMinecraftTabView(self.cog, self.lang, self.member, mc_cog,
-                                       viewer=interaction.user,
-                                       linked_username=linked)
-        await interaction.response.edit_message(embed=embed, view=view)
+                                       viewer=interaction.user)
+        return embed, view
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction,
                     _button: discord.ui.Button):
         if not await self._owned(interaction):
             return
-        await interaction.response.edit_message(
-            content=t("profile.closed", self.lang), embed=None, view=None)
+        await close_panel(interaction, text=t("profile.closed", self.lang))
 
 
-class ProfileMinecraftTabView(OwnerView, discord.ui.View):
+class ProfileMinecraftTabView(LoggedView, OwnerView, discord.ui.View):
     """Minecraft tab inside /profile: link status + quick link/unlink actions."""
 
     def __init__(self, cog: "Members", lang: str, member: discord.Member,
                  mc_cog: "Minecraft", *, viewer: discord.Member,
-                 linked_username: str | None = None,
                  timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member, self.mc_cog = cog, lang, member, mc_cog
         self.viewer = viewer
         self.user_id = viewer.id if viewer is not None else member.id
-        self.linked_username = linked_username
         self.link.label = t("mc.hub.link", lang)
         self.unlink.label = t("mc.hub.unlink", lang)
         self.back.label = t("mc.hub.back", lang)
         self.close.label = t("settings.close", lang)
-        self.mcpass.label = t("mc.hub.mcpass", lang)
-        self.devices.label = t("mc.hub.devices", lang)
         if not (viewer.id == member.id or mc_cog._is_mc_operator(viewer)):
             self.remove_item(self.link)
             self.remove_item(self.unlink)
-        # mc-link extras need a real mc_auth profile AND owner/operator access
-        # (device IPs are privacy-sensitive even inside the profile tab).
-        if linked_username is None or not (
-                viewer.id == member.id or mc_cog._is_mc_operator(viewer)):
-            self.remove_item(self.mcpass)
-            self.remove_item(self.devices)
 
     def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
         return ("🔒 This profile view belongs to the command author — "
@@ -269,32 +323,30 @@ class ProfileMinecraftTabView(OwnerView, discord.ui.View):
                       or self.mc_cog._is_mc_operator(self.viewer))
         embed = await mc_link_card_embed(self.mc_cog, self.member, self.lang,
                                          full=can_manage)
-        linked = None
-        link = self.mc_cog._mc_link_of(
-            await self.mc_cog._record_for(self.member.id))
-        if link is not None and link.get("type") == "linked":
-            linked = link.get("username")
         return embed, ProfileMinecraftTabView(
-            self.cog, self.lang, self.member, self.mc_cog, viewer=self.viewer,
-            linked_username=linked)
+            self.cog, self.lang, self.member, self.mc_cog, viewer=self.viewer)
 
     @discord.ui.button(emoji="🔗", style=discord.ButtonStyle.primary, row=0)
     async def link(self, interaction: discord.Interaction,
                    _button: discord.ui.Button):
         if not await self._owned(interaction):
             return
-        view = LinkChoiceView(self.mc_cog, self.lang, self.member,
-                              home_factory=self._home)
-        await interaction.response.edit_message(embed=await view.embed(), view=view)
+        await _render_with_spinner(
+            interaction, lang=self.lang,
+            build=lambda: self._build_link(LinkChoiceView))
+
+    async def _build_link(self, cls) -> tuple[discord.Embed, discord.ui.View]:
+        view = cls(self.mc_cog, self.lang, self.member, home_factory=self._home)
+        return await view.embed(), view
 
     @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger, row=0)
     async def unlink(self, interaction: discord.Interaction,
                      _button: discord.ui.Button):
         if not await self._owned(interaction):
             return
-        view = UnlinkConfirmView(self.mc_cog, self.lang, self.member,
-                                 home_factory=self._home)
-        await interaction.response.edit_message(embed=await view.embed(), view=view)
+        await _render_with_spinner(
+            interaction, lang=self.lang,
+            build=lambda: self._build_link(UnlinkConfirmView))
 
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def back(self, interaction: discord.Interaction,
@@ -302,41 +354,20 @@ class ProfileMinecraftTabView(OwnerView, discord.ui.View):
         if not await self._owned(interaction):
             return
         hub = ProfileHubView(self.cog, self.lang, self.member, user=self.viewer)
+        await _render_with_spinner(
+            interaction, lang=self.lang,
+            build=lambda: self._back_to_hub(hub))
+
+    async def _back_to_hub(self, hub) -> tuple[discord.Embed, "ProfileHubView"]:
         embed = await self.cog._profile_embed(self.member)
-        await interaction.response.edit_message(embed=embed, view=hub)
+        return embed, hub
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction,
                     _button: discord.ui.Button):
         if not await self._owned(interaction):
             return
-        await interaction.response.edit_message(
-            content=t("profile.closed", self.lang), embed=None, view=None)
-
-    @discord.ui.button(emoji="🔑", style=discord.ButtonStyle.primary, row=2)
-    async def mcpass(self, interaction: discord.Interaction,
-                     _button: discord.ui.Button):
-        if not await self._owned(interaction):
-            return
-        mclink = self.cog.bot.get_cog("McLink")
-        if mclink is None or not getattr(self, "linked_username", None):
-            await interaction.response.defer()
-            return
-        await mclink.open_mcpass_modal(interaction, self.lang,
-                                       self.linked_username)
-
-    @discord.ui.button(emoji="📱", style=discord.ButtonStyle.secondary, row=2)
-    async def devices(self, interaction: discord.Interaction,
-                      _button: discord.ui.Button):
-        if not await self._owned(interaction):
-            return
-        mclink = self.cog.bot.get_cog("McLink")
-        if mclink is None or not getattr(self, "linked_username", None):
-            await interaction.response.defer()
-            return
-        await mclink.open_devices_view(interaction, self.lang,
-                                       self.linked_username,
-                                       home_factory=self._home)
+        await close_panel(interaction, text=t("profile.closed", self.lang))
 
 
 class Members(commands.Cog):
@@ -496,9 +527,10 @@ class Members(commands.Cog):
         member = member or ctx.author
         lang = await resolve_member_lang(ctx.author.id, None)
         embed = await self._profile_embed(member)
+        # Public on purpose: members flex XP/level/role. The tabs stay
+        # author-only (ProfileHubView user=ctx.author).
         await ctx.send(embed=embed, view=ProfileHubView(self, lang, member,
-                                                        user=ctx.author),
-                       ephemeral=True)
+                                                        user=ctx.author))
 
     @commands.hybrid_command(name="whois", description="Internal profile for staff.")
     @commands.guild_only()

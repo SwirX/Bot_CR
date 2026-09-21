@@ -34,7 +34,7 @@ jobs:
           BOT_TOKEN: ci-placeholder-token
           APPWRITE_ENDPOINT: https://appwrite.alibks.dev/v1
           APPWRITE_PROJECT_ID: robotics-ops
-          APPWRITE_DATABASE_ID: robotics_ops
+          APPWRITE_DATABASE_ID: robotics_hub
           APPWRITE_API_KEY: ci-placeholder-key
           PORT: "8080"
         run: python scripts/smoke_test.py

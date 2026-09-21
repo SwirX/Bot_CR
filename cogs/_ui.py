@@ -5,9 +5,15 @@ BOT.py (and scripts/smoke_test.py) from treating it as an extension. Cog
 modules import these views with ``from cogs._ui import ...``.
 """
 
+import asyncio
+import logging
+
 import discord
 
-__all__ = ["ConfirmView", "PaginatorView", "OwnerView"]
+LOG = logging.getLogger("bot.ui")
+
+__all__ = ["ConfirmView", "PaginatorView", "OwnerView",
+           "LoggedView", "close_panel"]
 
 
 class OwnerView:
@@ -76,6 +82,48 @@ class ConfirmView(OwnerView, discord.ui.View):
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
+
+
+class LoggedView:
+    """Mixin: surface view interaction errors in the service logs.
+
+    Without this, an exception inside a button/select callback makes Discord
+    show a generic "interaction failed" with no trace anywhere — adding it to
+    a view converts those silent failures into ``bot.ui`` log lines.
+    """
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception,
+                       item) -> None:
+        LOG.error("%s interaction error (item=%s, user=%s): %s",
+                  type(self).__name__, type(item).__name__,
+                  getattr(getattr(interaction, "user", None), "id", "?"),
+                  error)
+
+
+async def close_panel(interaction: discord.Interaction, *, text: str,
+                      delay: float = 5.0) -> None:
+    """✖️ close: swap the panel for ``text``, then delete it after ``delay`` s.
+
+    Discord's original-response delete works even for ephemeral panels
+    (where ``interaction.message`` is ``None``); the ``interaction.message``
+    fallback covers prefix-invoked panels that have no interaction response.
+    """
+    try:
+        await interaction.response.edit_message(content=text, embed=None, view=None)
+    except (discord.HTTPException, discord.InteractionResponded):
+        return
+    if delay > 0:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+    try:
+        await interaction.delete_original_response()
+    except (discord.HTTPException, AttributeError):
+        try:
+            await interaction.message.delete()
+        except (discord.HTTPException, AttributeError):
+            pass
 
 
 class PaginatorView(OwnerView, discord.ui.View):

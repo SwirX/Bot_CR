@@ -19,6 +19,7 @@ import json
 import secrets
 from datetime import datetime, timezone
 
+import bcrypt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # 6-char link codes: unambiguous alphanumerics only (no 0/O, 1/I/L, 5/S, 8/B).
@@ -56,9 +57,22 @@ def parse_iso(value: str | None) -> datetime | None:
         return None
 
 
-def new_link_code() -> str:
-    """Cryptographically random 6-char link code from the unambiguous alphabet."""
-    return "".join(secrets.choice(CODE_ALPHABET) for _ in range(6))
+def new_link_code(length: int = 8) -> str:
+    """Cryptographically random code from the unambiguous uppercase alphabet.
+
+    Used for both pair keys (≥6 chars, contract §5.1) and login OTPs (≥8
+    chars, §5.2); the plugin uppercases player input, so only uppercase is
+    ever minted. Default 8 matches the OTP requirement.
+    """
+    return "".join(secrets.choice(CODE_ALPHABET) for _ in range(length))
+
+
+def hash_otp(otp: str) -> str:
+    """bcrypt cost-12 hash of a minted OTP (the minecraft_otp.otp_hash
+    column). The ``$2a$`` prefix keeps the plugin's jBCrypt 0.4
+    (org.mindrot) BCrypt.checkpw compatible — bcrypt embeds its own salt."""
+    return bcrypt.hashpw(otp.encode("utf-8"),
+                         bcrypt.gensalt(rounds=12, prefix=b"2a")).decode("ascii")
 
 
 def new_temp_password() -> str:

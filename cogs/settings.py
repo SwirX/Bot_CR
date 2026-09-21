@@ -19,14 +19,14 @@ from discord.ext import commands
 
 from data.store import store
 from i18n.core import LANGUAGES, resolve_member_lang, t
-from cogs._ui import OwnerView
+from cogs._ui import OwnerView, LoggedView, close_panel
 
 LOG = logging.getLogger("bot.settings")
 
 _LANGUAGE_META = (("en", "🇬🇧"), ("fr", "🇫🇷"), ("ar", "🇸🇦"))
 
 
-class SettingsView(OwnerView, discord.ui.View):
+class SettingsView(LoggedView, OwnerView, discord.ui.View):
     """Root settings menu: 🌐 Language picker + ✖️ Close."""
 
     def __init__(self, lang: str, user_id: int, *, timeout: float = 120.0):
@@ -68,21 +68,14 @@ class SettingsView(OwnerView, discord.ui.View):
     async def close(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if not await self._owned(interaction):
             return
-        for child in self.children:
-            child.disabled = True
-        try:
-            await interaction.response.edit_message(
-                content=t("settings.closed", self.lang), embed=None, view=self
-            )
-        except discord.HTTPException:
-            pass
+        await close_panel(interaction, text=t("settings.closed", self.lang))
 
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
 
 
-class LanguageView(OwnerView, discord.ui.View):
+class LanguageView(LoggedView, OwnerView, discord.ui.View):
     """One level deeper: pick a language, or ◀️ back to the root menu."""
 
     def __init__(self, lang: str, user_id: int, *, timeout: float = 120.0):
