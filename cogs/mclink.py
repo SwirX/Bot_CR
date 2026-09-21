@@ -1,58 +1,73 @@
 """mc-link — Discord side of the Discord ↔ Minecraft single sign-on layer.
 
 The robotics_hub TablesDB backend is the source of truth; this bot is its
-authenticated client and the ONLY component that mints links and credentials.
-A Paper plugin (deployed alongside the server) consumes backend state — it
-validates the one-time code against ``minecraft_otp.otp_hash``
-(sha256(otp_salt + code)), disables the OTP and activates the pre-seeded
-``discord_mc_links`` row; this bot's watcher picks the activation up.
+authenticated client and the ONLY component that mints secrets:
 
-Trust invariant (hard rule, from PLAN.md §0): **Minecraft is an untrusted
-client boundary.** Never derive an auth decision from anything a Minecraft
-client claims (username, UUID, permissions, "logged in" state). The only real
-proofs are (1) Discord identity and (2) knowledge of a secret this bot issued.
+* /mclink mints an account row + a pending pair row (pair_key) and DMs the
+  pairing code; the Paper plugin claims it in-game via /mcverify by flipping
+  ``is_active`` (one-time pairing, exact-name binding).
+* The plugin arms ``minecraft_otp`` rows as "pending mint" (enabled with an
+  empty otp_hash) at every join; this watcher fills each with a bcrypt-12
+  hash of a fresh uppercase code and DMs the login OTP. The plugin verifies
+  the typed code via BCrypt.checkpw, consumes the row and admits the player
+  through AuthMe.
 
-Regressions vs the legacy backend (reported): /mcpass and the Devices/IP
-drill-downs are gone (the hub has no credential/device store), and the
-new-IP / password-change challenge watchers are gone.
+Contract: MITIGATION-PLAN §5 of the mc-link plugin repo. Codes are always
+DM'd, never posted in guild channels; unclaimed pair rows expire after 5
+minutes (bot-side); a user gets at most one fresh OTP per 60 s (join-spam
+guard). No IP trust, no auto-login, no shared symmetric secret.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
+import re
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import commands
 
 import config
-from cogs._mc_crypto import dt_friendly, iso_now, new_link_code, parse_iso
-from cogs.minecraft import Minecraft, _USERNAME_RE
-from data.store import StoreError, store
+from cogs._mc_crypto import dt_friendly, hash_otp, iso_now, new_link_code, parse_iso
+from cogs.minecraft import Minecraft
+from data.store import StoreError, _rel_id, store
 from i18n.core import resolve_member_lang, t
 
 LOG = logging.getLogger("bot.mclink")
 
+# Pairing codes expire after this long (contract §5.1.6 — 5 minutes).
+_PAIR_TTL_SECONDS = config.MC_PAIR_KEY_TTL
+# OTP TTL at mint time (contract §5.2.4; plugin default ttl.otp_seconds = 300).
+_OTP_TTL_SECONDS = config.MC_LINK_CODE_TTL
+# Join-spam guard: at most one fresh OTP per Discord user per window (§5.2.6).
+_MINT_COOLDOWN_SECONDS = 60
+# Contract §5.1: Minecraft usernames are 3–16 chars of letters/digits/_.
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
+
 
 # ── Cog ────────────────────────────────────────────────────────────────
 class McLink(commands.Cog):
-    """One-time link codes (OTP) and the activation watcher."""
+    """Pairing (pair_key mint) + per-login OTP minting watcher."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._stop = asyncio.Event()
         self._watch_task: asyncio.Task | None = None
+        # discord_id -> epoch seconds of the last OTP minted (join-spam guard).
+        self._last_mint: dict[int, float] = {}
 
     # ── lifecycle ─────────────────────────────────────────────
     def _configured(self) -> bool:
-        return bool(config.MC_LINK_SECRET)
+        # The credential handshake is gone: the only secret the bot needs is
+        # its Appwrite key (scoped to tablesdb on robotics_hub).
+        return bool(config.APPWRITE_API_KEY and config.APPWRITE_ENDPOINT)
 
     async def cog_load(self) -> None:
-        """Start the link-activation watcher (mc-link only when configured)."""
+        """Start the watcher (OTP minting, pair expiry, activation sync)."""
         if self._configured():
             self._watch_task = asyncio.create_task(self._watch())
 
@@ -107,64 +122,64 @@ class McLink(commands.Cog):
     # ── /mclink ───────────────────────────────────────────────
     @commands.hybrid_command(
         name="mclink",
-        description="Link your Minecraft username to Discord via a one-time code.")
+        description="Link your Minecraft username to Discord via a one-time pairing code.")
     @commands.guild_only()
     @commands.cooldown(2, 60, commands.BucketType.user)
     async def mclink(self, ctx: commands.Context, username: str):
-        """Start the link handshake: this bot DMs a code typeable in-game.
+        """Start the one-time pairing: this bot DMs a code typeable in-game.
 
-        The code is single-use, expires in ``MC_LINK_CODE_TTL`` seconds, and is
-        never shown in the guild channel. The in-game claim is made by the
-        Paper plugin against the backend — this command only mints the OTP
-        (``minecraft_otp`` row + pre-seeded inactive ``discord_mc_links`` row)
-        and the watcher completes the link once the plugin activates it.
+        The code is minted UPPERCASE from the unambiguous alphabet, is valid
+        for ``MC_PAIR_KEY_TTL`` seconds and is never shown in the guild
+        channel. The Paper plugin claims it in-game (/mcverify): it creates
+        the account's session gateway and flips the pair row to
+        ``is_active``. Every later login needs a fresh OTP from a follow-up
+        join (this bot's watcher mints and DMs it).
         """
         lang = await self._lang(ctx)
         if not self._configured():
             await ctx.send(t("mc.unconfigured", lang))
             return
         name = (username or "").strip()
-        if not _USERNAME_RE.match(name):
+        if not _USERNAME_RE.fullmatch(name):
             await ctx.send(t("mclink.bad_name", lang, name=name))
             return
-        profile = await store.mc_get_auth(name)
-        if profile and profile.get("status") == "linked":
-            owner = str(profile.get("discord_id") or "")
-            if owner and owner != str(ctx.author.id):
+        try:
+            # One active link per Discord user (contract §5.1.2).
+            if await store.mc_user_linked(ctx.author.id):
+                await ctx.send(t("mclink.already_linked", lang))
+                return
+            # And a name may belong to one account only — refusal is by the
+            # active link pointing at it (contract §5.1.2).
+            if await store.mc_account_linked(name):
                 await ctx.send(t("mclink.taken", lang, name=name))
                 return
-        code = new_link_code()
-        salt = secrets.token_urlsafe(24)
-        otp_hash = hashlib.sha256(f"{salt}{code}".encode("utf-8")).hexdigest()
-        expiry = (datetime.now(timezone.utc)
-                  + timedelta(seconds=config.MC_LINK_CODE_TTL)).isoformat()
-        try:
-            otp_id = await store.mc_create_otp(
-                name, ctx.author.id, expires_at=expiry,
-                username_hint=ctx.author.display_name or ctx.author.name,
-                otp_salt=salt, otp_hash=otp_hash)
+            pair_key = new_link_code()  # 8× uppercase, unambiguous alphabet
+            link_id = await store.mc_create_pair(
+                ctx.author.id, name, pair_key,
+                username_hint=ctx.author.display_name or ctx.author.name)
         except StoreError as exc:
-            LOG.error("mclink: could not mint OTP for %s: %s", ctx.author.id, exc)
+            LOG.error("mclink: could not create pairing for %s: %s",
+                      ctx.author.id, exc)
             await ctx.send(t("mclink.store_fail", lang))
             return
-        minutes = max(1, config.MC_LINK_CODE_TTL // 60)
+        minutes = max(1, _PAIR_TTL_SECONDS // 60)
         dm_text = (f"{t('mclink.announce', lang)}\n\n"
-                   + t("mclink.dm_code", lang, code=code, name=name,
+                   + t("mclink.dm_code", lang, code=pair_key, name=name,
                        minutes=minutes))
         if not await self._dm(ctx.author.id, dm_text):
-            # DMs closed → the code is useless; disable the OTP so nothing
-            # lingers. The inactive link row stays harmlessly behind.
+            # DMs closed → the code is useless; drop the pending pair row so
+            # nothing lingers (expiry would catch it anyway).
             try:
-                await store.mc_expire_otp(otp_id)
+                await store.mc_delete_pair(link_id)
             except StoreError:
                 pass
             await ctx.send(t("mclink.dm_closed", lang))
             return
-        await ctx.send(t("mclink.sent", lang, minutes=minutes))
+        await ctx.send(t("mclink.sent", lang))
 
     # ── watcher ───────────────────────────────────────────────
     async def _watch(self) -> None:
-        """5 s poll loop: OTP-activation follow-up on link rows."""
+        """5 s poll loop: OTP minting, pair expiry, activation sync."""
         try:
             await self.bot.wait_until_ready()
         except RuntimeError:
@@ -174,7 +189,7 @@ class McLink(commands.Cog):
             return
         while not self._stop.is_set():
             try:
-                await self._watch_links()
+                await self._watch_cycle()
             except Exception as exc:  # noqa: BLE001 - a bad cycle must never die
                 LOG.warning("mc-link watcher cycle failed: %s", exc)
             try:
@@ -183,9 +198,77 @@ class McLink(commands.Cog):
             except asyncio.TimeoutError:
                 pass
 
-    async def _watch_links(self) -> None:
-        """Thanks DM, role, display link + audit once the plugin activates a
-        pre-seeded ``discord_mc_links`` row (the OTP claim).
+    async def _watch_cycle(self) -> None:
+        await self._mint_pending_otps()
+        await self._expire_stale_pairs()
+        await self._sync_activated_links()
+
+    async def _mint_pending_otps(self) -> None:
+        """Fill plugin-armed minecraft_otp rows the plugin left as pending
+        mint (``otp_hash == ""``), inside the contract: bcrypt-12 hash, fresh
+        TTL, per-user cooldown, never re-mint a row that already has a hash.
+        """
+        try:
+            pending = await store.mc_list_pending_otps()
+        except StoreError:
+            return
+        now_epoch = time.time()
+        for row in pending:
+            account_id = _rel_id(row.get("minecraft_account"))
+            if not account_id:
+                continue
+            try:
+                owner = await store.mc_account_otp_owner(account_id)
+            except StoreError:
+                continue
+            if not owner:
+                continue  # no stable active link → nobody to send it to
+            username, discord_id = owner
+            last = self._last_mint.get(discord_id)
+            if last is not None and now_epoch - last < _MINT_COOLDOWN_SECONDS:
+                continue  # join-spam guard (§5.2.6)
+            code = new_link_code()
+            now = datetime.now(timezone.utc)
+            try:
+                minted = await store.mc_mint_otp(
+                    row["$id"],
+                    otp_hash=hash_otp(code),
+                    otp_salt=secrets.token_hex(16),
+                    challenge_at=now.isoformat(),
+                    expires_at=(now + timedelta(seconds=_OTP_TTL_SECONDS)
+                                ).isoformat())
+            except StoreError:
+                continue
+            if not minted:
+                continue  # already minted/consumed by a racing cycle
+            self._last_mint[discord_id] = now_epoch
+            lang = await resolve_member_lang(discord_id)
+            minutes = max(1, _OTP_TTL_SECONDS // 60)
+            if not await self._dm(
+                    discord_id, t("mclink.dm_otp", lang, code=code,
+                                  name=username, minutes=minutes)):
+                # DM failed — expire so the plugin re-arms on rejoin instead
+                # of telling the player "code on the way" forever.
+                try:
+                    await store.mc_expire_otp(row["$id"])
+                except StoreError:
+                    pass
+
+    async def _expire_stale_pairs(self) -> None:
+        """Drop unclaimed pair rows older than the 5-minute window (§5.1.6)."""
+        try:
+            stale = await store.mc_stale_pairs(
+                datetime.now(timezone.utc)
+                - timedelta(seconds=_PAIR_TTL_SECONDS))
+            for row in stale:
+                await store.mc_delete_pair(row["$id"])
+        except StoreError:
+            pass
+
+    async def _sync_activated_links(self) -> None:
+        """Post-claim bot work once the plugin flips a link row to active
+        (either a /mcverify pair claim or a /linkmc whitelist upsert): MC
+        role, member-side display link and a modlog entry.
 
         Markers make delivery at-least-once across restarts: a link row is
         only processed once its ``$updatedAt`` passes the persisted marker
@@ -214,8 +297,15 @@ class McLink(commands.Cog):
             await store.set_setting("mc_link.last_claim", latest_raw)
 
     async def _claim_link(self, link: dict) -> bool:
-        username = link.get("pair_key") or ""
-        discord_id = int(link.get("discord_user") or 0)
+        account_id = _rel_id(link.get("minecraft_account"))
+        discord_id = int(_rel_id(link.get("discord_user")) or 0)
+        username = ""
+        if account_id:
+            try:
+                account = await store.mc_resolve_account(account_id)
+                username = (account or {}).get("username") or ""
+            except StoreError:
+                pass
         if not username or not discord_id:
             return True  # malformed — don't retry forever
         lang = await resolve_member_lang(discord_id)
@@ -235,7 +325,7 @@ class McLink(commands.Cog):
             await store.log_moderation(
                 action="mc_link", target_id=discord_id, target_name=username,
                 moderator_id=discord_id,
-                reason="mc-link OTP claimed")
+                reason="mc-link pair claimed in-game")
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             LOG.warning("mc-link display/audit failed for %s: %s",
                         discord_id, exc)

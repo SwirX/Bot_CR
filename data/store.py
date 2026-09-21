@@ -138,6 +138,20 @@ def _norm_iso(text: str) -> str:
         return text
 
 
+def _parse_ts(value) -> datetime | None:
+    """Parse a hub timestamp (ISO-8601, may end in Z) into a tz-aware
+    datetime; None on any unparseable/empty input (never raises)."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 def _event_date_in(text) -> str:
     """Turn a free-text event/competition date into a hub datetime (REQ)."""
     return _to_iso_datetime(text) or _EVENT_NO_DATE
@@ -242,16 +256,55 @@ class Store:
         return row.id
 
     async def _patch(self, table: str, row_id: str, data: dict) -> None:
-        """Partial update — only the given columns change; None clears."""
+        """Partial update — only the given columns change; None clears.
+
+        TablesDB quirk (verified live): a PATCH on a table with relationship
+        columns must re-declare EVERY relationship column (as an id string or
+        null) or the server 400s with ``relationship_value_invalid``. Columns
+        the caller doesn't mention are filled from the row's current values,
+        so a caller changing {closed: true} on a poll never has to know about
+        its ``created_by`` relationship.
+        """
         data = {k: v for k, v in data.items()}
         if not data:
             return  # nothing to update; the SDK rejects empty patches
+        rel_cols = await self._rel_columns(table)
+        if rel_cols:
+            missing = [c for c in rel_cols if c not in data]
+            if missing:
+                current = await self._get(table, row_id)
+                if current is not None:
+                    for col in missing:
+                        data[col] = current.get(col) or None
         tdb, db_id = self._raw()
         try:
             await asyncio.to_thread(
                 tdb.update_row, db_id, table, row_id, data)
         except AppwriteException as exc:
             raise StoreError(f"patch {table}/{row_id}: {exc}") from exc
+
+    # Relationship columns per table, discovered once from the live schema
+    # (list_tables returns full column metadata). Used by _patch to satisfy
+    # the server's re-declaration rule above.
+    _rel_cache: dict[str, tuple[str, ...]] | None = None
+
+    async def _rel_columns(self, table: str) -> tuple[str, ...]:
+        if self._rel_cache is None:
+            cache: dict[str, tuple[str, ...]] = {}
+            try:
+                tdb, db_id = self._raw()
+                result = await asyncio.to_thread(tdb.list_tables, db_id)
+                for entry in result.tables:
+                    d = entry.to_dict() if hasattr(entry, "to_dict") else entry
+                    rels = tuple(c["key"] for c in d.get("columns", [])
+                                 if c.get("type") == "relationship")
+                    if rels:
+                        cache[d.get("$id")] = rels
+            except AppwriteException as exc:
+                LOG.warning("could not inspect table relationships: %s", exc)
+                cache = {}
+            self._rel_cache = cache
+        return self._rel_cache.get(table, ())
 
     async def _write(self, table: str, row_id: str, data: dict,
                      *, defaults: dict | None = None) -> None:
@@ -1077,66 +1130,173 @@ class Store:
             code = f"P-{n}"
         return code
 
-    # ── Minecraft login (OTP) + links ─────────────────────────
-    async def mc_get_auth(self, username: str) -> dict | None:
-        """Profile of the active Discord↔Minecraft link for ``username``.
+    # ── Minecraft login (OTP-only) + links ───────────────────
+    # OTP-only contract (mc-link plugin, MITIGATION-PLAN §5):
+    #   * /mclink mints an ACCOUNT row + a pending PAIR row (pair_key); the
+    #     plugin claims it in-game (/mcverify) by flipping is_active.
+    #   * The PLUGIN arms minecraft_otp rows as "pending mint" (enabled with
+    #     an empty otp_hash) at join; this bot mints a bcrypt-12 hash into
+    #     them and DMs the code. The plugin verifies and consumes.
+    async def mc_find_account(self, username: str) -> dict | None:
+        """The minecraft_accounts row for an exact username (unique index)."""
+        rows = await self._listed(
+            _T["minecraft_accounts"], 25,
+            queries=[Query.equal("username", username)])
+        return rows[0] if rows else None
 
-        Returns ``{"status": "linked", "discord_id": <owner>, ...}`` when an
-        active link row exists — used by /mclink's "already taken" check.
-        """
+    async def mc_resolve_account(self, account_id: str) -> dict | None:
+        """Fetch a minecraft_accounts row by $id, or None."""
+        if not account_id:
+            return None
+        tdb, db_id = self._raw()
+        try:
+            row = await asyncio.to_thread(
+                tdb.get_row, db_id, _T["minecraft_accounts"], account_id)
+        except AppwriteException as exc:
+            if is_missing(exc):
+                return None
+            raise StoreError(f"resolve account {account_id}: {exc}") from exc
+        return self._row_data(row)
+
+    async def mc_account_linked(self, username: str) -> bool:
+        """True when an active link points at this account (name taken)."""
+        account = await self.mc_find_account(username)
+        if not account:
+            return False
         rows = await self._listed(
             _T["discord_mc_links"], 25,
-            queries=[Query.equal("pair_key", username),
+            queries=[Query.equal("minecraft_account", account["$id"]),
                      Query.equal("is_active", True)])
-        for row in rows:
-            return {
-                "$id": row["$id"],
-                "username": row.get("pair_key") or username,
-                "status": "linked",
-                "discord_id": _rel_id(row.get("discord_user")),
-                "verified_at": _iso_text(row.get("verified_at")),
-                "is_active": True,
-            }
-        return None
+        return bool(rows)
 
-    async def mc_create_otp(self, username: str, discord_id: int, *,
-                            expires_at: str, username_hint: str = "",
-                            otp_salt: str = "", otp_hash: str = "") -> str:
-        """Mint an OTP row + the pre-seeded (inactive) link row; returns the
-        OTP row id so the caller can expire it when delivery fails.
+    async def mc_user_linked(self, discord_id: int) -> bool:
+        """True when this Discord user already holds an active link (the
+        "one active link per Discord user" contract rule)."""
+        rows = await self._listed(
+            _T["discord_mc_links"], 25,
+            queries=[Query.equal("discord_user", str(discord_id)),
+                     Query.equal("is_active", True)])
+        return bool(rows)
 
-        The Paper plugin validates the entered code against ``otp_hash``
-        (sha256(otp_salt + code)), disables the OTP and activates the link
-        row; the bot's watcher picks the activation up from ``$updatedAt``.
+    async def mc_create_pair(self, discord_id: int, username: str,
+                             pair_key: str, *, username_hint: str = "") -> str:
+        """/mclink: upsert the account + the Discord identity, then create the
+        pending pair row.
+
+        ``minecraft_accounts.$id == username`` with the exact casing the
+        member typed — the plugin compares the in-game name against this
+        value exactly. The ``discord_users`` row must exist too: TablesDB
+        silently NULLs a relationship column on PATCH when the related
+        document is missing, and the plugin's claim patch touches the link
+        row. Returns the link row id so the caller can drop it if the DM
+        fails; the watcher expires unclaimed rows after 5 minutes.
         """
         uid = str(discord_id)
-        await self._write(_T["discord_users"], uid, {"username": username_hint or ""},
-                          defaults={"username": username_hint or ""})
-        otp_id = await self._create(_T["minecraft_otp"], ID.unique(), {
+        await self._ensure_discord_identity(uid, username_hint)
+        await self._write(
+            _T["minecraft_accounts"], username,
+            {"username": username, "is_cracked": True},
+            defaults={"username": username, "is_cracked": True})
+        return await self._create(_T["discord_mc_links"], ID.unique(), {
+            "pair_key": pair_key,
+            "is_active": False,
+            "verified_at": None,
+            "discord_user": uid,
+            "minecraft_account": username,
+        })
+
+    async def _ensure_discord_identity(self, uid: str,
+                                       username: str = "") -> None:
+        """Create the discord_users row only when it's absent — the ``discord
+        _user`` FK of a link row silently dies on later PATCHes when its
+        related document is missing. Never overwrites an existing profile."""
+        if await self._get(_T["discord_users"], uid) is None:
+            await self._create(_T["discord_users"], uid,
+                               {"username": username or ""})
+
+    async def mc_delete_pair(self, link_id: str) -> None:
+        """Drop an unclaimed pairing row (DM failure or stale expiry)."""
+        if not link_id:
+            return
+        tdb, db_id = self._raw()
+        try:
+            await asyncio.to_thread(tdb.delete_row, db_id,
+                                    _T["discord_mc_links"], link_id)
+        except AppwriteException as exc:
+            if not is_missing(exc):
+                raise StoreError(f"expire pair {link_id}: {exc}") from exc
+
+    async def mc_stale_pairs(self, older_than: datetime) -> list[dict]:
+        """Unclaimed (is_active=False) pair rows created before ``older_than``."""
+        rows = await self._listed(
+            _T["discord_mc_links"], 100,
+            queries=[Query.equal("is_active", False)])
+        out = []
+        for row in rows:
+            created = _parse_ts(row.get("$createdAt"))
+            if created is not None and created < older_than:
+                out.append(row)
+        return out
+
+    # ── OTP minting ──────────────────────────────────────────
+    async def mc_list_pending_otps(self) -> list[dict]:
+        """minecraft_otp rows the plugin armed but no code is minted for yet
+        (enabled with an empty otp_hash — the "pending mint" state)."""
+        rows = await self._listed(
+            _T["minecraft_otp"], 100,
+            queries=[Query.equal("enabled", True)])
+        return [r for r in rows if not str(r.get("otp_hash") or "")]
+
+    async def mc_mint_otp(self, row_id: str, *, otp_hash: str, otp_salt: str,
+                          challenge_at: str, expires_at: str) -> bool:
+        """Fill a pending OTP row with a minted hash. False when the row is
+        gone, consumed/locked, or already minted — a double-watch race guard;
+        a minted row is never re-minted."""
+        tdb, db_id = self._raw()
+        try:
+            row = await asyncio.to_thread(
+                tdb.get_row, db_id, _T["minecraft_otp"], row_id)
+        except AppwriteException as exc:
+            if is_missing(exc):
+                return False
+            raise StoreError(f"mint otp {row_id}: {exc}") from exc
+        data = self._row_data(row)
+        if not data.get("enabled") or str(data.get("otp_hash") or ""):
+            return False
+        await self._patch(_T["minecraft_otp"], row_id, {
             "otp_hash": otp_hash,
-            "otp_salt": otp_salt or "",
-            "challenge_at": _now_iso(),
+            "otp_salt": otp_salt,
+            "challenge_at": challenge_at,
             "expires_at": expires_at,
             "failed_attempts": 0,
-            "enabled": True,
         })
-        # Pre-seed the link row so the plugin has a stable row to activate.
-        # Random id: the watcher and the plugin both find it via queries.
-        await self._write(_T["discord_mc_links"], ID.unique(),
-                          {"pair_key": username,
-                           "is_active": False,
-                           "discord_user": uid},
-                          defaults={"pair_key": username, "is_active": False})
-        return otp_id
+        return True
+
+    async def mc_account_otp_owner(self, account_id: str
+                                   ) -> tuple[str, int] | None:
+        """(username, discord_id) entitled to a minted code, when the account
+        exists AND an active link binds it to a Discord user."""
+        account = await self.mc_resolve_account(account_id)
+        if not account:
+            return None
+        links = await self._listed(
+            _T["discord_mc_links"], 25,
+            queries=[Query.equal("minecraft_account", account_id),
+                     Query.equal("is_active", True)])
+        for link in links:
+            discord_id = _rel_id(link.get("discord_user"))
+            if discord_id:
+                return account.get("username") or "", int(discord_id or 0)
+        return None
 
     async def mc_expire_otp(self, otp_id: str) -> None:
-        """Disable an OTP (DM delivery failed, link taken, …)."""
+        """Disable an OTP (DM delivery failed — the plugin re-arms on rejoin)."""
         if not otp_id:
             return
         await self._patch(_T["minecraft_otp"], otp_id, {"enabled": False})
 
     async def mc_list_active_links(self) -> list[dict]:
-        """Every active discord_mc_links row (the watcher's work queue)."""
+        """Every active discord_mc_links row (the watcher's sync queue)."""
         return await self._listed(
             _T["discord_mc_links"], 100,
             queries=[Query.equal("is_active", True)])
@@ -1147,11 +1307,15 @@ class Store:
 
         TablesDB forbids bulk updates on tables carrying relationship
         attributes, so matching rows are listed (queries are fine) and each
-        row is patched individually.
+        row is patched individually. ``username`` resolves to the account id
+        (pair_key is now a code, not the username).
         """
         queries = [Query.equal("discord_user", str(discord_id))]
         if username:
-            queries.append(Query.equal("pair_key", str(username)))
+            account = await self.mc_find_account(username)
+            if not account:
+                return  # nothing to deactivate — account never existed
+            queries.append(Query.equal("minecraft_account", account["$id"]))
         rows = await self._listed(_T["discord_mc_links"], 100, queries=queries)
         for row in rows:
             await self._patch(_T["discord_mc_links"], row["$id"],
@@ -1164,11 +1328,15 @@ class Store:
         """Record a verified link (whitelist flow): link row + account row.
 
         ``minecraft_accounts.$id == username``; ``discord_mc_links`` rows are
-        matched by (discord_user, pair_key) so re-links update in place.
+        matched by (discord_user, minecraft_account) so re-links update in
+        place and pairing-row FKs survive.
         """
         uid = str(discord_id)
         if verified_at is None:
             verified_at = _now_iso()
+        # Related documents must exist: TablesDB NULLs the link's FK columns
+        # on PATCH when ``discord_users`` or ``minecraft_accounts`` is absent.
+        await self._ensure_discord_identity(uid)
         # Account row first (the link's minecraft_account FK references it).
         await self._write(
             _T["minecraft_accounts"], username,
@@ -1180,7 +1348,7 @@ class Store:
         existing = await self._listed(
             _T["discord_mc_links"], 25,
             queries=[Query.equal("discord_user", uid),
-                     Query.equal("pair_key", username)])
+                     Query.equal("minecraft_account", username)])
         if existing:
             link_id = existing[0]["$id"]
             await self._write(
