@@ -51,6 +51,7 @@ from data.appwrite_client import (
     seed_club_roles as _seed_roles_sync,
 )
 from data.levels import level_from_xp
+from data.names import best_match, normalize_name
 
 LOG = logging.getLogger("bot.store")
 
@@ -471,11 +472,25 @@ class Store:
         side = await self._read_sidecar(uid)
         warnings = await self._count(
             _T["warnings"], [Query.equal("member", uid)])
-        return await self._assemble(uid, duser, ddata, mship, mem, side, warnings)
+        club_member_id, club_member_name = await self._club_link(uid)
+        return await self._assemble(
+            uid, duser, ddata, mship, mem, side, warnings,
+            club_member_id=club_member_id, club_member_name=club_member_name)
+
+    async def _club_link(self, uid: str) -> tuple[str, str]:
+        """(club member id, club member name) via member_discord_links."""
+        link = await self.discord_member_link(uid)
+        member_id = _rel_id((link or {}).get("member")) if link else ""
+        if not member_id:
+            return "", ""
+        row = await self._get(_T["members"], member_id)
+        return member_id, (row or {}).get("name") or ""
 
     async def _assemble(self, uid: str, duser: dict | None, ddata: dict | None,
                         mship: dict | None, mem: dict | None,
-                        side: dict | None, warnings: int = 0) -> dict:
+                        side: dict | None, warnings: int = 0,
+                        club_member_id: str = "",
+                        club_member_name: str = "") -> dict:
         side = side or {}
         xp = int((ddata or {}).get("xp") or 0)
         rec = {
@@ -501,6 +516,8 @@ class Store:
             "cell": await self._cell_display(mship, side.get("cell") or ""),
             "links": side.get("links"),
             "mc_username": side.get("mc_username") or "",
+            "club_member_id": club_member_id,
+            "club_member_name": club_member_name,
         }
         for key in _EMPTY_NOTIFY:
             value = (ddata or {}).get(key)
@@ -673,13 +690,153 @@ class Store:
         mems = await self._get_rows_batch(_T["members"], uids)
         mships = await self._get_rows_batch(_T["memberships"], uids)
         sides = await self._sidecar_batch(uids)
+        links = await self._member_link_index()
+        # Club member names for whatever the links point at (usually few).
+        member_ids = {_rel_id(l.get("member")) for l in links.values() if l}
+        club_rows = await self._get_rows_batch(_T["members"], member_ids)
         out = []
         for row in rows:
             uid = row["$id"]
+            link = links.get(uid)
+            club_member_id = _rel_id((link or {}).get("member")) if link else ""
             out.append(await self._assemble(
                 uid, dusers.get(uid), row, mships.get(uid), mems.get(uid),
-                sides.get(uid)))
+                sides.get(uid),
+                club_member_id=club_member_id,
+                club_member_name=(club_rows.get(club_member_id) or {})
+                .get("name") or ""))
         return out
+
+    # ── Club member ↔ Discord links (member_discord_links) ─────────
+    # The web "Members" page joins the club registry (members, UUID rows) with
+    # Discord identities through member_discord_links (1:1 both sides). The bot
+    # writes these rows via /linkmember (staff, always verified) and via
+    # auto-linking when a Discord real name uniquely matches a club member.
+
+    async def list_club_members(self, *, limit: int = 500) -> list[dict]:
+        """The club registry: members rows, as {"$id", "name"}."""
+        rows = await self._listed(_T["members"], limit)
+        return [{"$id": r["$id"], "name": str(r.get("name") or "")}
+                for r in rows]
+
+    async def _member_link_index(self) -> dict[str, dict]:
+        """discord uid -> {"member": club member id, "is_verified": bool}."""
+        rows = await self._listed(_T["member_discord_links"], 250)
+        out: dict[str, dict] = {}
+        for row in rows:
+            duser = _rel_id(row.get("discord_user"))
+            if duser:
+                out[duser] = {
+                    "member": _rel_id(row.get("member")),
+                    "is_verified": bool(row.get("is_verified")),
+                }
+        return out
+
+    async def discord_member_link(self, discord_id) -> dict | None:
+        """The member_discord_links row for a Discord user (orphans cleaned)."""
+        uid = str(discord_id)
+        rows = await self._listed(
+            _T["member_discord_links"], 25,
+            queries=[Query.equal("discord_user", uid)])
+        return rows[0] if rows else None
+
+    async def member_discord_link(self, member_id: str) -> dict | None:
+        """The member_discord_links row for a club member."""
+        rows = await self._listed(
+            _T["member_discord_links"], 25,
+            queries=[Query.equal("member", str(member_id))])
+        return rows[0] if rows else None
+
+    async def link_member_discord(self, member_id: str, discord_id,
+                                  *, verified: bool = True) -> str:
+        """Write/repair a member_discord_links row (1:1 both sides).
+
+        Creates the link, or re-points the row already held by either side
+        (oneToOne uniqueness would otherwise 409). Both related rows must
+        exist — TablesDB silently drops FKs whose related doc is missing.
+        """
+        uid = str(discord_id)
+        member_id = str(member_id)
+        await self._ensure_discord_identity(uid)
+        if await self._get(_T["members"], member_id) is None:
+            raise StoreError(f"club member {member_id!r} not found")
+        existing = await self.discord_member_link(uid) \
+            or await self.member_discord_link(member_id)
+        now = _now_iso()
+        if existing:
+            await self._patch(_T["member_discord_links"], existing["$id"], {
+                "member": member_id,
+                "discord_user": uid,
+                "is_verified": bool(verified),
+                "linked_at": now,
+            })
+            return existing["$id"]
+        try:
+            return await self._create(_T["member_discord_links"], ID.unique(), {
+                "is_verified": bool(verified),
+                "linked_at": now,
+                "member": member_id,
+                "discord_user": uid,
+            })
+        except StoreError:
+            # 409 race — someone else just linked this side; re-point instead.
+            existing = await self.discord_member_link(uid) \
+                or await self.member_discord_link(member_id)
+            if existing:
+                await self._patch(_T["member_discord_links"],
+                                  existing["$id"], {
+                                      "member": member_id,
+                                      "discord_user": uid,
+                                      "is_verified": bool(verified),
+                                      "linked_at": now,
+                                  })
+                return existing["$id"]
+            raise
+
+    async def unlink_member_discord(self, discord_id) -> int:
+        """Drop the Discord side's member_discord_links row(s); return count."""
+        uid = str(discord_id)
+        rows = await self._listed(
+            _T["member_discord_links"], 25,
+            queries=[Query.equal("discord_user", uid)])
+        removed = 0
+        tdb, db_id = self._raw()
+        for row in rows:
+            try:
+                await asyncio.to_thread(
+                    tdb.delete_row, db_id, _T["member_discord_links"],
+                    row["$id"])
+                removed += 1
+            except AppwriteException as exc:
+                if not is_missing(exc):
+                    raise StoreError(f"unlink {row['$id']}: {exc}") from exc
+        return removed
+
+    async def maybe_auto_link_club_member(self, discord_id,
+                                          real_name: str) -> str | None:
+        """Auto-link a Discord user to their club member row by name.
+
+        Runs when a real name is set (onboarding / /fixname). Never clobbers
+        an existing link; only fires on a confident, unambiguous match (best
+        score ≥ AUTO_LINK_THRESHOLD, no tie). Exact matches are verified, fuzzy
+        ones land as unverified pending a staff check.
+        """
+        name = normalize_name(real_name)
+        if not name:
+            return None
+        uid = str(discord_id)
+        if await self.discord_member_link(uid):
+            return None  # already linked — staff links win, nothing to do
+        if await self._get(_T["discord_users"], uid) is None:
+            return None  # never seen on Discord — don't invent identities
+        members = await self.list_club_members()
+        match = best_match(real_name, [(m["$id"], m["name"])
+                                       for m in members])
+        if not match:
+            return None
+        member_id, member_name, score = match
+        return await self.link_member_discord(
+            member_id, uid, verified=(score >= 0.99))
 
     # ── global counters (derived) ─────────────────────────────
     async def get_counters(self) -> dict:
