@@ -40,7 +40,7 @@ GUILD_ID = _env("GUILD_ID", default=None, cast=int)
 APPWRITE_ENDPOINT = _env("APPWRITE_ENDPOINT", "https://appwrite.alibks.dev/v1")
 APPWRITE_PROJECT_ID = _env("APPWRITE_PROJECT_ID", "robotics-ops", required=True)
 APPWRITE_API_KEY = _env("APPWRITE_API_KEY", required=True)
-APPWRITE_DATABASE_ID = _env("APPWRITE_DATABASE_ID", "robotics_ops")
+APPWRITE_DATABASE_ID = _env("APPWRITE_DATABASE_ID", "robotics_hub")
 
 # ── Channel names (matches #channel names on the server) ───────────────
 CHANNEL_RULES = _env("CHANNEL_RULES", "•📚•-rules-of-the-server")
