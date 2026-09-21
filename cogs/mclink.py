@@ -165,7 +165,13 @@ class McLink(commands.Cog):
     # ── watcher ───────────────────────────────────────────────
     async def _watch(self) -> None:
         """5 s poll loop: OTP-activation follow-up on link rows."""
-        await self.bot.wait_until_ready()
+        try:
+            await self.bot.wait_until_ready()
+        except RuntimeError:
+            # Only reachable in test harnesses that never connect the client;
+            # production always has a live gateway before the watcher spins.
+            LOG.warning("mc-link watcher idle: client never started")
+            return
         while not self._stop.is_set():
             try:
                 await self._watch_links()
