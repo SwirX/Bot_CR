@@ -130,6 +130,12 @@ class GwLightClient:
             "filter": "ALL", "output": "TRACK"})
         return data.get("data") or []
 
+    async def radio(self, track_id: int) -> list[dict]:
+        """Similar-track radio seed for a song (song.getRadio)."""
+        data = await self._call("song.getRadio", {
+            "song_id": track_id, "lang": "en"})
+        return data.get("data") or []
+
     async def stream_url(self, track_id: int, format: str) -> str:
         token = (await self._call("song.getData", {
             "sng_id": track_id, "array_default": ["TRACK_TOKEN"]})).get("TRACK_TOKEN")

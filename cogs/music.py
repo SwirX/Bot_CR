@@ -15,6 +15,7 @@ loop math is unit-testable without a real Discord voice connection.
 import asyncio
 import concurrent.futures
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ import discord
 from discord.ext import commands
 
 from cogs._perms import is_bot_admin
+from cogs.music_sources import deezer as deezer_provider
 from cogs.music_sources import radio as radio_provider
 from cogs.music_sources import resolve_playable, youtube as youtube_provider
 from cogs.music_sources.model import AllSourcesFailed, Playable, SourceUnavailable
@@ -33,6 +35,42 @@ LOG = logging.getLogger("bot.music")
 USER_AGENT = "Bot_CR/1.0 (robotics-club Discord bot; contact: server staff)"
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+
+
+@dataclass
+class Track:
+    """One queued song. Votes reset when the track starts playing."""
+
+    title: str
+    url: str
+    webpage_url: str = ""
+    video_id: str = ""
+    duration: int | None = None
+    thumbnail: str = ""
+    artist: str = ""
+    requester_id: int | None = None
+    headers: dict = field(default_factory=dict)
+    votes: set = field(default_factory=set)
+    # Decrypted local audio file (Deezer); when set, playback reads this path
+    # instead of `url`.
+    local_path: str = ""
+
+
+def _ffmpeg_kwargs(track: Track) -> dict:
+    """The ffmpeg options for a track: HTTP knobs only for streamed URLs.
+
+    The ``-reconnect`` family belongs to ffmpeg's HTTP input layer. Pointing
+    them at a local file makes ffmpeg abort with "Option reconnect not found"
+    (exit 8) — exactly the "resolved but nothing plays" bug, because Deezer's
+    decrypted files used to get the same before-options as a URL. A local file
+    needs no before-options at all.
+    """
+    if track.local_path:
+        return {"options": "-vn"}
+    before = FFMPEG_BEFORE
+    if track.headers:
+        before = f"{before} {_header_option(track.headers)}"
+    return {"before_options": before, "options": "-vn"}
 
 
 def _header_option(headers: dict) -> str:
@@ -68,25 +106,6 @@ def fmt_duration(seconds) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-@dataclass
-class Track:
-    """One queued song. Votes reset when the track starts playing."""
-
-    title: str
-    url: str
-    webpage_url: str = ""
-    video_id: str = ""
-    duration: int | None = None
-    thumbnail: str = ""
-    artist: str = ""
-    requester_id: int | None = None
-    headers: dict = field(default_factory=dict)
-    votes: set = field(default_factory=set)
-    # Decrypted local audio file (Deezer); when set, playback reads this path
-    # instead of `url`.
-    local_path: str = ""
-
-
 class MusicPlayer:
     """Per-guild queue + playback state machine (voice injected for tests)."""
 
@@ -105,6 +124,9 @@ class MusicPlayer:
         self.host_id: int | None = None
         self.now_playing_message = None
         self.now_playing_view = None
+        # Set by the owning cog; used to rebuild the control view each time
+        # the panel is (re)posted so buttons never go stale on an old message.
+        self.now_playing_view_factory = None
         self._audio_factory = audio_factory
         self._watchdog_task: asyncio.Task | None = None
         self._last_active = time.monotonic()
@@ -148,10 +170,14 @@ class MusicPlayer:
 
     # ── queue / playback ────────────────────────────────────────
     async def enqueue(self, track: Track):
-        """Add a track; start playback immediately if nothing is playing."""
+        """Add a track; start playback only when nothing else is busy.
+
+        A paused track counts as busy — auto-starting over it would silently
+        drop what the user paused.
+        """
         self.queue.append(track)
         self._touch()
-        if self.voice and self.voice.is_playing():
+        if self.voice and (self.voice.is_playing() or self.voice.is_paused()):
             return False
         await self.play_next()
         return True
@@ -179,19 +205,9 @@ class MusicPlayer:
     def _make_source(self, track: Track):
         if self._audio_factory is not None:
             return self._audio_factory(track)
-        before = FFMPEG_BEFORE
-        if track.local_path:
-            return discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(
-                    track.local_path, before_options=before, options="-vn"),
-                volume=self.volume)
-        if track.headers:
-            before = f"{before} {_header_option(track.headers)}"
+        kwargs = _ffmpeg_kwargs(track)
         audio = discord.FFmpegPCMAudio(
-            track.url,
-            before_options=before,
-            options="-vn",
-        )
+            track.local_path or track.url, **kwargs)
         return discord.PCMVolumeTransformer(audio, volume=self.volume)
 
     def _after_hook(self, error):
@@ -292,29 +308,48 @@ class MusicPlayer:
         return embed
 
     async def _update_panel(self, stopped: str = ""):
-        message = self.now_playing_message
-        if message is None:
+        """(Re)post the now-playing panel so it stays the newest chat message.
+
+        The old panel is deleted and a fresh copy — control view included —
+        is sent to the player's text channel: no buttons ever sit on a buried
+        message, and the panel is always one message the user can act on.
+        ``stopped`` posts a plain notice without controls instead.
+        """
+        old = self.now_playing_message
+        self.now_playing_message = None
+        self.now_playing_view = None
+        if old is not None:
+            try:
+                await old.delete()
+            except (discord.HTTPException, discord.NotFound):
+                pass
+        if self.text_channel is None:
             return
-        view = self.now_playing_view
+        view = None
+        if not stopped and self.now_playing_view_factory is not None:
+            view = self.now_playing_view_factory()
         embed = self.embed(stopped=stopped)
         try:
-            await message.edit(embed=embed, view=view if not stopped else None)
-        except discord.NotFound:
-            self.now_playing_message = None
-            self.now_playing_view = None
+            message = await self.text_channel.send(embed=embed, view=view)
+        except (discord.HTTPException, discord.NotFound):
+            return
+        if not stopped:
+            self.now_playing_message = message
+            self.now_playing_view = view
 
 
 class NowPlayingView(discord.ui.View):
-    """Interactive panel: pause/resume, vote-skip, loop, stop, lyrics."""
+    """Interactive panel: pause/resume, vote-skip, loop, stop, lyrics.
+
+    Every action defers immediately, lets the player (re)post the panel as
+    the newest message, then answers the user privately — the controls never
+    edit a message that may have just been replaced.
+    """
 
     def __init__(self, cog, player: MusicPlayer):
         super().__init__(timeout=None)
         self.cog = cog
         self.player = player
-
-    async def _reaction(self, interaction: discord.Interaction, feedback: str):
-        await interaction.response.edit_message(
-            embed=self.player.embed(), view=self.player.now_playing_view or self)
 
     @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.secondary, custom_id="music:pause")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -336,14 +371,17 @@ class NowPlayingView(discord.ui.View):
         else:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
             return
-        await self._reaction(interaction, feedback)
+        await interaction.response.defer()
+        await player._update_panel()
         await interaction.followup.send(feedback, ephemeral=True)
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="music:skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = self.player
+        await interaction.response.defer()
         skipped, needed, votes = await player.vote_skip(interaction.user)
-        await self._reaction(interaction, "")
+        if not skipped:
+            await player._update_panel()  # skipping reposts via the after-hook
         if skipped:
             await interaction.followup.send(
                 f"⏭️ Skipped by {interaction.user.mention}.", ephemeral=True)
@@ -358,8 +396,8 @@ class NowPlayingView(discord.ui.View):
                 "🔒 Only the session host, the requester, or staff can toggle loop.",
                 ephemeral=True)
             return
-        state = await self.player.toggle_loop()
-        await self._reaction(interaction, "")
+        await interaction.response.defer()
+        state = await self.player.toggle_loop()  # reposts the panel itself
         await interaction.followup.send(
             f"🔂 Loop {'on' if state else 'off'}.", ephemeral=True)
 
@@ -370,12 +408,9 @@ class NowPlayingView(discord.ui.View):
                 "🔒 Only the session host, the requester, or staff can stop the player.",
                 ephemeral=True)
             return
+        await interaction.response.defer()
         await self.player.stop()
-        try:
-            await interaction.response.edit_message(
-                embed=self.player.embed("⏹️ Stopped."), view=None)
-        except discord.NotFound:
-            await interaction.response.send_message("⏹️ Stopped.", ephemeral=True)
+        await interaction.followup.send("⏹️ Stopped and left the channel.", ephemeral=True)
 
     @discord.ui.button(emoji="🎤", style=discord.ButtonStyle.success, custom_id="music:lyrics")
     async def lyrics(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -412,6 +447,7 @@ class Music(commands.Cog):
         player = self.players.get(guild_id)
         if player is None:
             player = MusicPlayer(self.bot, guild_id, text_channel)
+            player.now_playing_view_factory = lambda: NowPlayingView(self, player)
             self.players[guild_id] = player
         elif text_channel is not None:
             player.text_channel = text_channel
@@ -484,17 +520,16 @@ class Music(commands.Cog):
         player._touch()
         return player
 
-    async def _send_panel(self, ctx, player: MusicPlayer):
-        view = NowPlayingView(self, player)
-        player.now_playing_view = view
-        player.now_playing_message = await ctx.send(embed=player.embed(), view=view)
-
     # ── commands ────────────────────────────────────────────────
     @commands.hybrid_command(name="play", description="Play a song (search or URL).")
     @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def play(self, ctx, *, query: str):
-        """Stream the first playable source for the query, in provider order."""
+        """Stream the first playable source for the query, in provider order.
+
+        While anything is busy (playing *or* paused) the song is only queued —
+        playback is never interrupted by an extra `/play`.
+        """
         # Slash interactions expire after ~3s; joining voice and resolving a
         # source can easily take longer, so acknowledge before any awaits.
         # On prefix invocations ctx.defer() is a no-op.
@@ -515,10 +550,13 @@ class Music(commands.Cog):
         started = await player.enqueue(track)
         if fresh:
             player.host_id = ctx.author.id
-        if started and player.now_playing_message is None:
-            await self._send_panel(ctx, player)
-        elif not started:
-            await ctx.send(f"➕ **{track.title}** added to the queue (#{len(player.queue)}).")
+        if started:
+            await ctx.send(f"🎵 Now playing: **{track.title}**")
+        else:
+            await ctx.send(
+                f"➕ **{track.title}** added to the queue (#{len(player.queue)}).")
+        # Re-post the controls panel last so it stays the newest message.
+        await player._update_panel()
 
     @commands.hybrid_command(name="pause", description="Pause the current track.")
     @commands.guild_only()
@@ -559,7 +597,8 @@ class Music(commands.Cog):
             await ctx.send("🎵 Nothing is playing to skip.")
             return
         skipped, needed, votes = await player.vote_skip(ctx.author)
-        await player._update_panel()
+        if not skipped:
+            await player._update_panel()  # skipping reposts via the play hook
         if skipped:
             await ctx.send("⏭️ Skipped.")
         else:
@@ -623,51 +662,57 @@ class Music(commands.Cog):
         await ctx.send(embed=player.embed())
 
     async def _queue_auto(self, ctx, player: MusicPlayer, size: int = 8):
-        """Generate a radio queue from the currently playing track."""
+        """Generate a radio queue around the current track.
+
+        The Deezer track-radio runs first when an ARL is configured (works on
+        datacenter IPs where YouTube Music is blocked); the YTMusic radio is
+        the fallback for YouTube-sourced tracks.
+        """
         if player.voice is None or not player.voice.is_connected():
             await ctx.send("🎧 I need to be in a voice channel first — use `/play`.")
             return
-        if player.current is None or not player.current.video_id:
+        if player.current is None:
             await ctx.send("🎵 Play something first, then run `/queue auto` "
                            "to generate a 📻 radio queue.")
             return
         await ctx.defer()
         current = player.current
-        try:
-            seed_ids = await asyncio.to_thread(
-                youtube_provider.radio_seed_ids, current.video_id, size)
-        except Exception as exc:
-            LOG.warning("Auto-queue seed failed for %r: %s", current.title, exc)
-            await ctx.send("⚠️ Couldn't generate a radio for the current track.")
-            return
-        if not seed_ids:
-            await ctx.send("⚠️ No related tracks found for the current track.")
-            return
-        await ctx.send(f"📻 Building a radio queue from **{current.title}**…")
-        playables = await youtube_provider.resolve_parallel(seed_ids)
+        playables: list[Playable] = []
+        if os.environ.get("DEEZER_ARL"):
+            try:
+                playables = await deezer_provider.radio_tracks(current.title, size)
+            except Exception as exc:
+                LOG.warning("Auto-queue Deezer radio failed for %r: %s",
+                            current.title, exc)
+                playables = []
+        if not playables and current.video_id:
+            try:
+                seed_ids = await asyncio.to_thread(
+                    youtube_provider.radio_seed_ids, current.video_id, size)
+                if seed_ids:
+                    playables = await youtube_provider.resolve_parallel(seed_ids)
+            except Exception as exc:
+                LOG.warning("Auto-queue seed failed for %r: %s", current.title, exc)
+                playables = []
         if not playables:
-            await ctx.send("⚠️ Couldn't resolve any of the radio tracks.")
+            await ctx.send("⚠️ Couldn't generate a radio for the current track.")
             return
         for playable in playables:
             await player.enqueue(
                 Music._track_from_playable(playable, ctx.author.id))
-        await player._update_panel()
         await ctx.send(
-            f"➕ **{len(playables)}** songs from the radio of **{current.title}** "
+            f"📻 **{len(playables)}** songs from the radio of **{current.title}** "
             f"added to the queue.")
+        await player._update_panel()  # keep the controls panel as the newest message
 
     @commands.hybrid_command(name="nowplaying", description="Show the current track.")
     @commands.guild_only()
     async def nowplaying(self, ctx):
-        player = self._player(ctx.guild.id)
+        player = self._player(ctx.guild.id, ctx.channel)
         if player.current is None:
             await ctx.send("🎵 Nothing is playing.")
             return
-        if player.now_playing_message is None:
-            await self._send_panel(ctx, player)
-        else:
-            await player._update_panel()
-            await ctx.send(embed=player.embed())
+        await player._update_panel()
 
     @commands.hybrid_command(name="radio",
                              description="Play a public internet radio station.")
@@ -688,10 +733,11 @@ class Music(commands.Cog):
         started = await player.enqueue(track)
         if fresh:
             player.host_id = ctx.author.id
-        if started and player.now_playing_message is None:
-            await self._send_panel(ctx, player)
-        elif not started:
+        if started:
+            await ctx.send(f"🎵 Now playing: **{track.title}**")
+        else:
             await ctx.send(f"➕ **{track.title}** added to the queue.")
+        await player._update_panel()  # keep the controls panel as the newest message
 
     # ── lyrics (LRCLIB) ─────────────────────────────────────────
     async def _lyrics_for(self, title: str, artist: str):

@@ -181,6 +181,18 @@ class DeezerGuardTests(unittest.TestCase):
             if saved is not None:
                 os.environ["DEEZER_ARL"] = saved
 
+    def test_missing_arl_disables_radio_without_network(self):
+        from cogs.music_sources import deezer
+        saved = os.environ.get("DEEZER_ARL")
+        os.environ.pop("DEEZER_ARL", None)
+        try:
+            with self.assertRaises(SourceUnavailable) as ctx:
+                asyncio.run(deezer.radio_tracks("ed sheeran"))
+            self.assertEqual(ctx.exception.reason_code, "no_config")
+        finally:
+            if saved is not None:
+                os.environ["DEEZER_ARL"] = saved
+
     def test_registry_orders_youtube_deezer_audius(self):
         from cogs.music_sources import audius, deezer, youtube
         self.assertEqual(sources._PROVIDERS,
