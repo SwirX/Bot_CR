@@ -126,6 +126,11 @@ class Stats(commands.Cog):
     async def flush_loop(self):
         await self.flush()
 
+    async def flush_now(self):
+        """Alias used by BOT.shutdown() so a deploy doesn't drop a whole
+        flush interval of message/voice counters."""
+        await self.flush()
+
     async def flush(self):
         """Persist accumulated counters and per-member deltas in one pass."""
         activity, messages, voice_seconds = self._drain()

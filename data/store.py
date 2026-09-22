@@ -787,7 +787,7 @@ class Store:
 
     async def _member_link_index(self) -> dict[str, dict]:
         """discord uid -> {"member": club member id, "is_verified": bool}."""
-        rows = await self._listed(_T["member_discord_links"], 250)
+        rows = await self._listed(_T["member_discord_links"], 2000)
         out: dict[str, dict] = {}
         for row in rows:
             duser = _rel_id(row.get("discord_user"))
@@ -1080,7 +1080,7 @@ class Store:
         return side if isinstance(side, dict) else {}
 
     async def list_tasks(self) -> list[dict]:
-        rows = await self._listed(_T["tasks"], 100)
+        rows = await self._listed(_T["tasks"], 1000)
         side = await self._batch_settings([f"task_cell.{r['$id']}" for r in rows])
         out = []
         for r in rows:
@@ -1193,7 +1193,7 @@ class Store:
         }
 
     async def list_competitions(self) -> list[dict]:
-        rows = await self._listed(_T["competitions"], 100)
+        rows = await self._listed(_T["competitions"], 1000)
         return [self._competition_out(r) for r in rows]
 
     async def get_competition(self, slug: str) -> dict | None:
@@ -1273,7 +1273,7 @@ class Store:
         }
 
     async def list_events(self) -> list[dict]:
-        rows = await self._listed(_T["events"], 100)
+        rows = await self._listed(_T["events"], 1000)
         return [self._event_out(r) for r in rows]
 
     async def get_event(self, slug: str) -> dict | None:
@@ -1552,7 +1552,7 @@ class Store:
     async def mc_stale_pairs(self, older_than: datetime) -> list[dict]:
         """Unclaimed (is_active=False) pair rows created before ``older_than``."""
         rows = await self._listed(
-            _T["discord_mc_links"], 100,
+            _T["discord_mc_links"], 1000,
             queries=[Query.equal("is_active", False)])
         out = []
         for row in rows:
@@ -1753,7 +1753,7 @@ class Store:
             if not account:
                 return  # nothing to deactivate — account never existed
             queries.append(Query.equal("minecraft_account", account["$id"]))
-        rows = await self._listed(_T["discord_mc_links"], 100, queries=queries)
+        rows = await self._listed(_T["discord_mc_links"], 1000, queries=queries)
         for row in rows:
             await self._patch(_T["discord_mc_links"], row["$id"],
                               {"is_active": False})

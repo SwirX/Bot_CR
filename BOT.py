@@ -1,16 +1,15 @@
 import asyncio
 import logging
+import signal
 
 import discord
 from discord.ext import commands
 
 import config
 from data.store import store
-from KeepAlive import keep_alive
+from KeepAlive import keep_alive, mark_not_ready, mark_ready
 
 LOG = logging.getLogger("bot")
-
-keep_alive()
 
 # Create a bot instance
 intents = discord.Intents.default()
@@ -36,6 +35,7 @@ def configure_logging() -> None:
 @bot.event
 async def on_ready():
     LOG.info("Logged in as %s (latency %.1f ms)", bot.user, bot.latency * 1000)
+    mark_ready()  # keepalive readiness probe
     await sync_commands()
 
 
@@ -165,8 +165,49 @@ async def load_cogs() -> int:
     return loaded
 
 
+async def shutdown(signal_name: str = "") -> None:
+    """Graceful shutdown. Installed on SIGTERM/SIGINT by main().
+
+    Previously there was no shutdown path at all, so Python's default handler
+    killed the process outright on every deploy. That left:
+      * voice connections open — members stuck in a channel with a bot still
+        "hearing" it until Discord's gateway timeout, and a /play panel that
+        never got a stop notice;
+      * up to one flush interval (DASHBOARD_REFRESH_SECONDS, default 60s) of
+        message/voice counts and XP discarded;
+      * aiohttp sessions and the Deezer cache orphaned.
+    """
+    mark_not_ready()
+    LOG.info("shutdown requested (%s) — closing voice and flushing…", signal_name)
+    try:
+        for vc in list(bot.voice_clients):
+            try:
+                await vc.disconnect(force=True)
+            except Exception:  # noqa: BLE001 - best-effort on the way out
+                LOG.debug("voice disconnect failed for %s", vc, exc_info=True)
+    finally:
+        # Push any buffered activity before the loop closes.
+        for cog in list(bot.cogs):
+            flush = getattr(cog, "flush_now", None)
+            if callable(flush):
+                try:
+                    await flush()
+                except Exception:  # noqa: BLE001 - never block the exit
+                    LOG.debug("flush failed for %s", type(cog).__name__,
+                              exc_info=True)
+        await bot.close()
+
+
 async def main():
     configure_logging()
+    keep_alive()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(
+                lambda s=sig: asyncio.create_task(shutdown(s.name)))
+        except NotImplementedError:  # pragma: no cover - non-POSIX
+            pass
     # Fail fast on a dead store. Booting without persistence was worse than
     # not booting: every command answered from an empty database, OTP logins
     # "succeeded" without being written, and XP/stat flushes vanished — with
