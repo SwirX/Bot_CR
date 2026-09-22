@@ -489,9 +489,20 @@ class Minecraft(commands.Cog):
 
     async def _record_for(self, user_id: int) -> dict:
         try:
-            return (await store.get_member(user_id)) or {}
+            record = (await store.get_member(user_id)) or {}
         except Exception:  # noqa: BLE001 - store down means "no record", never crash
             return {}
+        record["mc_hub_link"] = None
+        if not Minecraft._mc_link_of(record):
+            # The sidecar slot is only refreshed by the claim watcher for
+            # activations after its marker — consult the hub (the source of
+            # truth) so pre-existing links display too.
+            try:
+                record["mc_hub_link"] = \
+                    await store.mc_active_link_for_user(user_id)
+            except Exception:  # noqa: BLE001 - fall back to "not linked"
+                record["mc_hub_link"] = None
+        return record
 
     @staticmethod
     def _links_of(record: dict) -> dict:
@@ -515,9 +526,18 @@ class Minecraft(commands.Cog):
 
     @staticmethod
     def _mc_link_of(record: dict) -> dict | None:
-        """The member's structured links.minecraft entry, or None."""
+        """The member's structured links.minecraft entry, or None.
+
+        Prefers the sidecar slot (written by /linkmc and the claim watcher)
+        and falls back to the hub's ``discord_mc_links`` (carried in
+        ``mc_hub_link`` by ``_record_for``), so links created before the
+        claim marker still display.
+        """
         link = Minecraft._links_of(record).get("minecraft") or {}
-        return link if link.get("username") else None
+        if link.get("username"):
+            return link
+        hub = (record or {}).get("mc_hub_link")
+        return hub if isinstance(hub, dict) and hub.get("username") else None
 
     async def _save_mc_link(self, user_id: int, canonical: str, account_type: str,
                             entries: list, linked_at: str) -> None:
