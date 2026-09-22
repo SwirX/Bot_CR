@@ -405,7 +405,7 @@ class McLink(commands.Cog):
 
     async def _sync_activated_links(self) -> None:
         """Post-claim bot work once the plugin flips a link row to active
-        (either a /mcverify pair claim or a /linkmc whitelist upsert): MC
+        (i.e. a completed /mcverify pair claim): MC
         role, member-side display link and a modlog entry.
 
         Markers make delivery at-least-once across restarts: a link row is

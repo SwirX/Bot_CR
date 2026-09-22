@@ -9,10 +9,10 @@ and live-reloaded via ``whitelist reload`` when the server is running), and
 the ping works on any vanilla/paper server with nothing enabled server-side.
 
 The server runs cracked/offline mode (``online-mode=false``), so matching is
-by the UUID the client presents. ``/linkmc`` therefore asks the member to
-declare their account type: **paid** accounts get their real UUID *and* the
-offline UUID (so the official and free launchers both work), while **free**
-accounts get only the offline UUID of the exact-case name they type
+by the UUID the client presents. A **paid** account therefore needs both its
+real UUID and the offline UUID of the same name (so the official and free
+launchers both work), while a **free** account needs only the offline UUID
+of the exact-case name it uses
 (``MD5("OfflinePlayer:<name>")`` — Mojang's capitalisation would be a
 different account, e.g. ``hatim`` vs ``Hatim``).
 """
@@ -557,7 +557,7 @@ class Minecraft(commands.Cog):
     def _mc_link_of(record: dict) -> dict | None:
         """The member's structured links.minecraft entry, or None.
 
-        Prefers the sidecar slot (written by /linkmc and the claim watcher)
+        Prefers the sidecar slot (written by the mclink claim watcher)
         and falls back to the hub's ``discord_mc_links`` (carried in
         ``mc_hub_link`` by ``_record_for``), so links created before the
         claim marker still display.
