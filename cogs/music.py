@@ -27,7 +27,7 @@ from discord.ext import commands
 from cogs._perms import is_bot_admin
 from cogs.music_sources import deezer as deezer_provider
 from cogs.music_sources import radio as radio_provider
-from cogs.music_sources import resolve_playable
+from cogs.music_sources import describe, resolve_playable
 from cogs.music_sources.model import AllSourcesFailed, Playable, SourceUnavailable
 
 LOG = logging.getLogger("bot.music")
@@ -788,6 +788,7 @@ class Music(commands.Cog):
         player = await self._ensure_voice(ctx)
         if player is None:
             return
+        described = await describe(query)
         try:
             playable = await resolve_playable(query)
         except AllSourcesFailed as exc:
@@ -796,6 +797,8 @@ class Music(commands.Cog):
             await ctx.send(f"⚠️ {hint}" if hint
                            else "⚠️ Couldn't find anything playable for that query.")
             return
+        if described and described != query:
+            await ctx.send(f"🔗 Link parsed as **{described}** — playing it.")
         track = Music._track_from_playable(playable, ctx.author.id)
         fresh = player.current is None and not player.queue
         started = await player.enqueue(track)
