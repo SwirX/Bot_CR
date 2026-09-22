@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import signal
 
 import discord
@@ -198,6 +199,77 @@ async def shutdown(signal_name: str = "") -> None:
         await bot.close()
 
 
+async def self_check() -> None:
+    """Log what the bot actually resolved to, so a misconfiguration is visible.
+
+    Every knob here fails *silently* by default: a wrong channel/role name just
+    means a feature quietly does nothing, and ``Minecraft._configured()``
+    returning False removes the whole ``/mc*`` surface with no log line at all.
+    Worse, a staff identity that silently stops matching only shows up as
+    "Bot admins only." at the moment somebody needs it.
+
+    This prints the resolved admin set and a capability table at startup so
+    both are checkable without waiting for a failure.
+    """
+    from cogs._perms import is_bot_admin  # local import: avoids a cycle
+
+    LOG.info("── bot identity ──────────────────────────────")
+    LOG.info("  guild sync       : %s", config.GUILD_ID or "GLOBAL (slow to propagate)")
+    LOG.info("  prefix           : %s", config.PREFIX)
+    LOG.info("  bot admins (ids) : %s",
+             sorted(config.BOT_ADMIN_USER_IDS) or "— none (roles only)")
+    LOG.info("  MC power (ids)   : %s",
+             sorted(config.MC_CONTROL_USER_IDS) or "— none")
+    LOG.info("  meeting admin    : ids=%s roles=%s",
+             sorted(config.MEETING_ADMIN_USER_IDS) or "— none",
+             sorted(config.MEETING_ADMIN_ROLES) or "— none")
+
+    LOG.info("── capabilities ───────────────────────────────")
+    checks = [
+        ("appwrite endpoint", bool(config.APPWRITE_ENDPOINT)),
+        ("appwrite project/db", bool(config.APPWRITE_PROJECT_ID
+                                      and config.APPWRITE_DATABASE_ID)),
+        ("pterodactyl client key", bool(config.MC_PTERO_CLIENT_KEY)),
+        ("minecraft server id", bool(config.MC_SERVER_ID)),
+        ("minecraft address", bool(config.MC_ADDRESS)),
+        ("deezer ARL (radio/fallback)", bool(os.environ.get("DEEZER_ARL"))),
+        ("level role rewards", bool(config.LEVEL_ROLE_REWARDS)),
+    ]
+    for label, ok in checks:
+        LOG.info("  %-26s %s", label, "ok" if ok else "MISSING — feature disabled")
+
+    # Which configured role/channel names actually exist in the guild?
+    if config.GUILD_ID:
+        guild = bot.get_guild(config.GUILD_ID)
+        if guild is None:
+            LOG.warning("  guild %s not available yet; skipping name checks",
+                        config.GUILD_ID)
+            return
+        role_names = [("ROLE_ARCHON", config.ROLE_ARCHON),
+                      ("ROLE_VERIFIED", config.ROLE_VERIFIED),
+                      ("ROLE_MEMBER", config.ROLE_MEMBER),
+                      ("MC_PLAYER_ROLE", config.MC_PLAYER_ROLE)]
+        for label, name in role_names:
+            found = discord.utils.get(guild.roles, name=name)
+            LOG.info("  %-26s %s", label,
+                     "ok" if found else f"MISSING role named {name!r}")
+        channel_names = [("CHANNEL_ANNOUNCEMENTS", config.CHANNEL_ANNOUNCEMENTS),
+                         ("CHANNEL_DASHBOARD", config.CHANNEL_DASHBOARD),
+                         ("CHANNEL_BOTLOG", config.CHANNEL_BOTLOG)]
+        for label, name in channel_names:
+            found = discord.utils.get(guild.text_channels, name=name)
+            LOG.info("  %-26s %s", label,
+                     "ok" if found else f"MISSING channel named {name!r}")
+
+        # Confirm the configured operator IDs are actually members here.
+        for uid in sorted(config.BOT_ADMIN_USER_IDS):
+            member = guild.get_member(uid)
+            state = ("ok, is_bot_admin="
+                     + str(is_bot_admin(member)) if member else
+                     "NOT A MEMBER of this guild — admin powers will not apply")
+            LOG.info("  operator %-18s %s", uid, state)
+
+
 async def main():
     configure_logging()
     keep_alive()
@@ -228,6 +300,8 @@ async def main():
         LOG.critical("Appwrite store unavailable after 5 attempts: %s", last)
         raise SystemExit(1)
     await load_cogs()
+    bot.add_listener(
+        lambda: asyncio.create_task(self_check()), "on_ready")
     await bot.start(config.BOT_TOKEN)
 
 # Run the bot
