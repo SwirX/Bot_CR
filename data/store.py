@@ -42,6 +42,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from appwrite.exception import AppwriteException
@@ -497,16 +498,23 @@ class Store:
     # ── members (flat legacy record shape) ────────────────────
     async def get_member(self, user_id: int) -> dict | None:
         uid = str(user_id)
-        duser = await self._get(_T["discord_users"], uid)
-        ddata = await self._get(_T["discord_data"], uid)
+        # The five independent reads below used to run strictly one after
+        # another — 7-9 sequential HTTP round trips for a single profile card.
+        # /cell add calls this once per tagged member, so ten tags meant ~150
+        # sequential requests: well past Discord's 3s interaction deadline, with
+        # the writes partly applied. They don't depend on each other, so gather.
+        duser, ddata, mship, mem, side, warnings, club_link = await asyncio.gather(
+            self._get(_T["discord_users"], uid),
+            self._get(_T["discord_data"], uid),
+            self._get(_T["memberships"], uid),
+            self._get(_T["members"], uid),
+            self._read_sidecar(uid),
+            self._count(_T["warnings"], [Query.equal("member", uid)]),
+            self._club_link(uid),
+        )
         if duser is None and ddata is None:
             return None  # never seen — same contract as the legacy collection
-        mship = await self._get(_T["memberships"], uid)
-        mem = await self._get(_T["members"], uid)
-        side = await self._read_sidecar(uid)
-        warnings = await self._count(
-            _T["warnings"], [Query.equal("member", uid)])
-        club_member_id, club_member_name = await self._club_link(uid)
+        club_member_id, club_member_name = club_link
         return await self._assemble(
             uid, duser, ddata, mship, mem, side, warnings,
             club_member_id=club_member_id, club_member_name=club_member_name)
@@ -897,8 +905,24 @@ class Store:
             member_id, uid, verified=(score >= 0.99))
 
     # ── global counters (derived) ─────────────────────────────
+    # get_counters() sums the whole discord_data table. The dashboard called it
+    # twice a minute (once directly, once via stats.view_total_voice_seconds),
+    # so this is the single hottest read path in the bot: 2 x ceil(N/25)
+    # sequential HTTP round trips per refresh, all through asyncio.to_thread and
+    # therefore competing with every other store call for the default executor.
+    # A short TTL cache collapses a burst of dashboard refreshes into one scan;
+    # the numbers only move on a flush, so a 60s window is imperceptible.
+    _counters_cache: tuple[float, dict] | None = None
+    _COUNTERS_TTL_SECONDS = 60.0
+
     async def get_counters(self) -> dict:
         """Global totals derived by summing discord_data + settings stamps."""
+        cached = self.__dict__.get("_counters_cache")
+        if cached is not None:
+            stamp, payload = cached
+            if (time.monotonic() - stamp) < self._COUNTERS_TTL_SECONDS:
+                return dict(payload)
+
         boot = (await self.get_setting("boot_at")) or ""
         last = (await self.get_setting("last_flush_at")) or ""
         total_messages = 0
@@ -913,16 +937,20 @@ class Store:
             if len(page) < 25:
                 break
             offset += 25
-        return {
+        payload = {
             "total_messages": total_messages,
             "total_voice_seconds": total_voice,
             "boot_at": boot,
             "last_flush_at": last,
         }
+        self.__dict__["_counters_cache"] = (time.monotonic(), payload)
+        return dict(payload)
 
     async def bump_counters(self, *, messages: int = 0,
                             voice_seconds: float = 0.0) -> None:
         """Stamp the flush marker (totals are derived, not stored)."""
+        # The derived totals just changed underneath the TTL cache.
+        self.__dict__.pop("_counters_cache", None)
         now = _now_iso()
         if (await self.get_setting("boot_at")) is None:
             await self.set_setting("boot_at", now)
@@ -1986,12 +2014,19 @@ class Store:
 
     async def list_meeting_sessions(self, meeting_id: str, *,
                                     open_only: bool = False) -> list[dict]:
-        """Attendance rows for one meeting, oldest join first."""
+        """Attendance rows for one meeting, oldest join first.
+
+        Paged to 5000, not 500: the CSV export, the report, ``absentee_ids``,
+        ``lock_targets`` and /meeting end's close loop all read through here, so
+        a club-wide meeting where people leave and return produced more than 500
+        rows and the overflow vanished with no warning — the CSV silently
+        under-reported and /meeting end left the tail unclosed.
+        """
         queries = [Query.equal("meeting", str(meeting_id)),
                    Query.order_asc("joined_at")]
         if open_only:
             queries.append(Query.equal("open", True))
-        rows = await self._listed(_T["meeting_sessions"], 500, queries=queries)
+        rows = await self._listed(_T["meeting_sessions"], 5000, queries=queries)
         return [self._session_out(r) for r in rows]
 
     # ── Meeting channel-permission snapshot (bot_settings sidecar) ────────

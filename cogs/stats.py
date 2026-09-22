@@ -303,7 +303,15 @@ class Stats(commands.Cog):
         pending = self._pending_per_user()
         rows = []
         for rec in records:
-            uid = rec.get("user_id") or rec.get("$id") or ""
+            # `pending` is keyed by int (member.id), but the store hands back
+            # str ids — so `pending.get(uid)` with a str uid ALWAYS missed.
+            # The result: anyone currently sitting in voice showed 00:00:00 and
+            # was then dropped by rank_voice's `secs > 0` filter. Cast to int
+            # like cogs/engagement.py:345 already does.
+            try:
+                uid = int(rec.get("user_id") or rec.get("$id") or 0)
+            except (TypeError, ValueError):
+                uid = 0
             name = rec.get("display_name") or rec.get("real_name") or "Unknown"
             total = float(rec.get("voice_seconds") or 0.0) + pending.get(uid, 0.0)
             rows.append((name, total))
