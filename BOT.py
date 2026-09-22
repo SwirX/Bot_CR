@@ -275,9 +275,10 @@ async def main():
     keep_alive()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
+        def _on_signal(name=sig.name):
+            asyncio.create_task(shutdown(name))
         try:
-            loop.add_signal_handler(
-                lambda s=sig: asyncio.create_task(shutdown(s.name)))
+            loop.add_signal_handler(sig, _on_signal)
         except NotImplementedError:  # pragma: no cover - non-POSIX
             pass
     # Fail fast on a dead store. Booting without persistence was worse than
