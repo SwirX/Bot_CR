@@ -100,6 +100,18 @@ class LoggedView:
                   error)
 
 
+def select_value(interaction: discord.Interaction) -> str:
+    """The first selected value of a Select interaction, or "".
+
+    discord.py 2.x removed ``Interaction.values`` — the selection now lives in
+    ``interaction.data["values"]``. Callers must read it through this helper so
+    a future version bump can't silently kill dropdown callbacks again.
+    """
+    data = interaction.data or {}
+    values = data.get("values")
+    return str(values[0]) if values else ""
+
+
 async def close_panel(interaction: discord.Interaction, *, text: str,
                       delay: float = 5.0) -> None:
     """✖️ close: swap the panel for ``text``, then delete it after ``delay`` s.

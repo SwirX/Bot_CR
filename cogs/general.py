@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 
 from i18n.core import resolve_member_lang, t
-from cogs._ui import OwnerView, LoggedView, close_panel
+from cogs._ui import OwnerView, LoggedView, close_panel, select_value
 
 
 class HelpView(LoggedView, OwnerView, discord.ui.View):
@@ -77,7 +77,7 @@ class HelpView(LoggedView, OwnerView, discord.ui.View):
             return
         try:
             await interaction.response.edit_message(
-                embed=self.build_section_embed(interaction.values[0]), view=self)
+                embed=self.build_section_embed(select_value(interaction)), view=self)
         except discord.HTTPException:
             pass
 
