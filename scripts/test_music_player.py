@@ -475,122 +475,52 @@ class VoiceLifecycleTests(unittest.TestCase):
         self.assertTrue(any("Quiet" in c and "Lounge" in c for c in contents))
 
 
-class VoteTests(unittest.TestCase):
+class QueueControlTests(unittest.TestCase):
+    """The simplified model: skip is open, remove is ownership."""
+
     def _track(self, title, requester_id, key=""):
         return Track(title=title, url=f"u-{title}", requester_id=requester_id,
                      webpage_url=key)
 
-    def test_requester_skips_instantly(self):
+    def test_skip_now_advances_the_queue(self):
         player, _ = _room_player(11, 22)
-        player.current = self._track("Mine", 11)
-        status, yes, no = asyncio.run(
-            player.cast_vote("skip", _FakeMember(11)))
-        self.assertEqual(status, "passed")
-        self.assertIsNone(player._vote)
-        self.assertIsNone(player.current)  # skipped into an empty queue
-
-    def test_non_requester_opens_a_vote(self):
-        player, _ = _room_player(11, 22)
+        player.voice = _FakeVoice(playing=True, paused=False)
+        player.text_channel = _FakeTextChannel()
+        player._audio_factory = lambda track: "source"
         player.current = self._track("Theirs", 33)
-        status, yes, no = asyncio.run(
-            player.cast_vote("skip", _FakeMember(11)))
-        self.assertEqual(status, "vote")
-        self.assertEqual((yes, no), (1, 0))
-        self.assertIsNotNone(player._vote)
-        self.assertEqual(player.current.title, "Theirs")  # still playing
+        player.queue.append(self._track("Next", 44))
+        asyncio.run(player._skip_now())
+        # _skip_now stops the voice; play_next is normally driven by the
+        # after-hook. With the fake voice we call play_next directly to
+        # inspect the outcome.
+        asyncio.run(player.play_next())
+        self.assertEqual(player.current.title, "Next")
+        self.assertEqual(len(player.queue), 0)
 
-    def test_split_vote_stays_pending_in_a_duo(self):
-        player, _ = _room_player(11, 22)
-        player.current = self._track("Theirs", 33)
-        asyncio.run(player.cast_vote("skip", _FakeMember(11)))
-        status, yes, no = asyncio.run(
-            player.cast_vote("skip", _FakeMember(22), want=False))
-        self.assertEqual(status, "vote")
-        self.assertEqual((yes, no), (1, 1))  # 1v1 — no instant majority
-
-    def test_tie_resolves_toward_skip_at_the_deadline(self):
-        """The troll deadlock: 1 yes vs 1 no must not hang forever."""
-        import cogs.music as music_module
-        old = music_module.VOTE_SECONDS
-        music_module.VOTE_SECONDS = 3600  # keep the spawned closer quiet
-        try:
-            player, _ = _room_player(11, 22)
-            player.text_channel = _FakeTextChannel()
-            player.current = self._track("Theirs", 33)
-            asyncio.run(player.cast_vote("skip", _FakeMember(11)))
-            asyncio.run(player.cast_vote("skip", _FakeMember(22), want=False))
-            vote = player._vote
-            self.assertIsNotNone(vote)
-            music_module.VOTE_SECONDS = 0.01
-            asyncio.run(player._close_vote(vote))
-        finally:
-            music_module.VOTE_SECONDS = old
-        self.assertIsNone(player._vote)  # the motion went through
-        self.assertIsNone(player.current)
-
-    def test_full_turnout_passes_in_a_duo(self):
-        player, _ = _room_player(11, 22)
-        player.current = self._track("Theirs", 33)
-        asyncio.run(player.cast_vote("skip", _FakeMember(11)))
-        status, yes, no = asyncio.run(
-            player.cast_vote("skip", _FakeMember(22)))
-        self.assertEqual(status, "passed")
-        self.assertIsNone(player._vote)
-
-    def test_majority_of_listeners_passes_instantly(self):
-        player, _ = _room_player(11, 22, 33, 44)
-        player.current = self._track("Theirs", 99)
-        asyncio.run(player.cast_vote("skip", _FakeMember(11)))
-        asyncio.run(player.cast_vote("skip", _FakeMember(22)))
-        status, yes, no = asyncio.run(
-            player.cast_vote("skip", _FakeMember(33)))
-        self.assertEqual(status, "passed")  # 3 yes > half of 4 listeners
-        self.assertIsNone(player._vote)
-
-    def test_requester_removes_their_own_queue_entry_instantly(self):
+    def test_remove_from_queue_drops_the_named_track(self):
         player, _ = _room_player(11, 22)
         key = "https://www.deezer.com/track/5"
         player.queue.append(self._track("Mine2", 11, key))
-        status, yes, no = asyncio.run(player.cast_vote(
-            "remove", _FakeMember(11), target_key=key, target_title="Mine2"))
-        self.assertEqual(status, "passed")
-        self.assertEqual(list(player.queue), [])
+        player.queue.append(self._track("Other", 33, "https://www.deezer.com/track/6"))
+        removed = player.remove_from_queue(key)
+        self.assertEqual(removed.title, "Mine2")
+        self.assertEqual([t.title for t in player.queue], ["Other"])
 
-    def test_removing_someone_elses_song_opens_a_vote(self):
-        player, _ = _room_player(11, 22)
-        key = "https://www.deezer.com/track/5"
-        player.queue.append(self._track("Theirs2", 33, key))
-        status, yes, no = asyncio.run(player.cast_vote(
-            "remove", _FakeMember(22), target_key=key, target_title="Theirs2"))
-        self.assertEqual(status, "vote")
-        self.assertEqual(len(player.queue), 1)
-        self.assertEqual(player._vote.kind, "remove")
-
-    def test_requester_veto_cancels_a_pending_vote(self):
-        player, _ = _room_player(11, 22)
-        player.current = self._track("Theirs", 33)
-        asyncio.run(player.cast_vote("skip", _FakeMember(11)))
-        self.assertIsNotNone(player._vote)
-        status, yes, no = asyncio.run(
-            player.cast_vote("skip", _FakeMember(33), want=False))
-        self.assertEqual(status, "kept")
-        self.assertIsNone(player._vote)
-        self.assertEqual(player.current.title, "Theirs")
-
-    def test_keep_with_no_open_vote_is_idle(self):
+    def test_remove_from_queue_is_a_noop_for_unknown_keys(self):
         player, _ = _room_player(11)
-        player.current = self._track("Mine", 11)
-        status, yes, no = asyncio.run(
-            player.cast_vote("skip", _FakeMember(22), want=False))
-        self.assertEqual(status, "idle")
+        player.queue.append(self._track("Mine2", 11, "https://x/1"))
+        self.assertIsNone(player.remove_from_queue("https://x/other"))
+        self.assertEqual(len(player.queue), 1)
 
-    def test_a_new_track_clears_pending_motions(self):
-        player, _ = _room_player(11, 22)
-        player.current = self._track("Theirs", 33)
-        asyncio.run(player.cast_vote("skip", _FakeMember(11)))
-        self.assertIsNotNone(player._vote)
-        asyncio.run(player.play_next())
-        self.assertIsNone(player._vote)
+    def test_vote_machinery_is_gone(self):
+        """The old /keep-a-skip-vote surface must not come back silently."""
+        import cogs.music as music_module
+        self.assertFalse(hasattr(MusicPlayer, "cast_vote"))
+        self.assertFalse(hasattr(MusicPlayer, "cancel_vote"))
+        self.assertFalse(hasattr(music_module, "VOTE_SECONDS"))
+        self.assertFalse(hasattr(music_module, "_Vote"))
+        # The cog side: no `keep` command registered.
+        self.assertFalse(hasattr(music_module.Music, "keep"))
 
 
 
