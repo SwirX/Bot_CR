@@ -91,6 +91,13 @@ RADIO_REFILL_AT = 6         # top the queue back up when fewer than this many so
 RADIO_REFILL_SIZE = 8       # songs to add per refill
 RADIO_REFILL_FETCH = 12     # fetch a little extra so history-dedup still finds fresh songs
 RADIO_REFILL_COOLDOWN = 30  # minimum seconds between refills
+LINK_NUDGE_AFTER = 3        # songs before the link-parsing tip lands
+
+_LINK_NUDGE = (
+    "💡 Psst {user} — head's up: you can paste a **YouTube or Deezer link** "
+    "straight into `/play` and I'll pull the title, artist and art from it and "
+    "play that song for you. Or use `/playsearch` to see the top matches and "
+    "pick one yourself before anything plays.")
 
 
 def fmt_duration(seconds) -> str:
@@ -168,6 +175,11 @@ class MusicPlayer:
         # One long-lived task per session that edits the panel message in
         # place on a timer — the old delete+repost churn is gone.
         self._panel_task: asyncio.Task | None = None
+        # Link-parse nudge bookkeeping: how many tracks a member has played
+        # since joining, and who has already been told about link parsing.
+        self._play_counts: dict[int, int] = {}
+        self._nudged_members: set[int] = set()
+        self._last_counted_key: str | None = None
 
 
     def _touch(self):
@@ -320,6 +332,34 @@ class MusicPlayer:
             self._watchdog_task.cancel()
             self._watchdog_task = None
 
+    # ── link-parsing nudge ───────────────────────────────────
+    async def _count_and_maybe_link_nudge(self, track: Track) -> None:
+        """Tell each member, once, after their third started track, that
+        YouTube/Deezer links work in /play — the feature they most likely
+        haven't found yet. Counts tracks that actually *start*, not requests
+        (a queue-add that never plays because the bot got pulled counts
+        nothing), and counts each track once even when loop replays it.
+        """
+        requester = track.requester_id
+        if not requester:
+            return
+        key = self._key_of(track)
+        if key in (self._last_counted_key, ""):
+            return  # loop replay of the same track — not a fresh play
+        self._last_counted_key = key
+        count = self._play_counts.get(requester, 0) + 1
+        self._play_counts[requester] = count
+        if count != LINK_NUDGE_AFTER or requester in self._nudged_members:
+            return
+        self._nudged_members.add(requester)
+        if self.text_channel is None:
+            return
+        try:
+            await self.text_channel.send(
+                content=_LINK_NUDGE.format(user=f"<@{requester}>"))
+        except (discord.HTTPException, discord.NotFound):
+            pass
+
     # ── panel refresh clock ─────────────────────────────────────
     def _start_panel_refresh(self):
         if self._panel_task is not None:
@@ -391,6 +431,7 @@ class MusicPlayer:
         await self._update_panel()
         self._maybe_refill()
         self._start_panel_refresh()
+        await self._count_and_maybe_link_nudge(track)
 
     def _make_source(self, track: Track):
         if self._audio_factory is not None:
