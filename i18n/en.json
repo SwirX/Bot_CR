@@ -72,7 +72,7 @@
   "mc.unlink.done": "✅ Unlinked **{name}** — removed from the whitelist and your record is cleared.",
   "mc.unlink.failed": "Couldn't remove the whitelist entry — try again or ask staff.",
   "mc.link.type_linked": "linked",
-  "mclink.bad_name": "❌ That doesn't look like a valid Minecraft username (letters, numbers, `_`, up to 16 chars).",
+  "mclink.bad_name": "❌ That doesn't look like a valid Minecraft username (letters, numbers, `_`, `-`, up to 16 chars).",
   "mclink.taken": "❌ **{name}** is already linked to another Discord account. If that's you, ask leadership to re-link it.",
   "mclink.already_linked": "❌ Your Discord account already has an active Minecraft link. Unlink it first (`/unlinkmc`) to pair a different name.",
   "mclink.announce": "🔐 **Robotics CMC — one-time login setup**",
