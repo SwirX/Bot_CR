@@ -15,7 +15,7 @@ import aiohttp
 
 from cogs.music_sources import deezer_radio
 from cogs.music_sources.deezer_gw import GwLightClient
-from cogs.music_sources.model import Playable, SourceUnavailable
+from cogs.music_sources.model import Candidate, Playable, SourceUnavailable
 
 ARL_ENV = "DEEZER_ARL"
 _CACHE_DIR = Path(tempfile.gettempdir()) / "botcr-deezer"
@@ -82,6 +82,68 @@ async def _build_playable(client: GwLightClient, track: dict) -> Playable | None
         thumbnail=(f"https://e-cdn-images.dzcdn.net/images/cover/{picture}/"
                    "250x250-000000-80-0-0.jpg") if picture else "",
     )
+
+
+async def candidates(query: str, limit: int = 5) -> list[Candidate]:
+    """Metadata-only search hits for the picker — no download/decrypt yet.
+
+    The picker needs titles, artists and durations before anyone commits to a
+    stream; paying the decrypt round-trip for five tracks just to list them
+    would also hammer the Deezer CDN. The full track dict is kept on each
+    Candidate's payload so :func:`materialize` can stream the pick.
+    """
+    if "://" in query:
+        return []
+    _sweep_cache()
+    try:
+        async with aiohttp.ClientSession() as session:
+            client = GwLightClient(_session_arl(), session)
+            await client.login()
+            tracks = await client.search(query, limit=limit)
+    except SourceUnavailable:
+        raise
+    except aiohttp.ClientError as exc:
+        raise SourceUnavailable(
+            "deezer", "api_error", f"Deezer unreachable: {exc}") from exc
+    return [_track_to_candidate(t) for t in tracks[:limit] if t.get("SNG_ID")]
+
+
+def _track_to_candidate(track: dict) -> Candidate:
+    picture = track.get("ALB_PICTURE") or ""
+    track_id = track.get("SNG_ID")
+    return Candidate(
+        provider="deezer",
+        title=track.get("SNG_TITLE") or "",
+        artist=_artists_of(track),
+        duration=int(track["DURATION"]) if track.get("DURATION") else None,
+        webpage_url=f"https://www.deezer.com/track/{track_id}",
+        thumbnail=(f"https://e-cdn-images.dzcdn.net/images/cover/{picture}/"
+                   "250x250-000000-80-0-0.jpg") if picture else "",
+        payload=track,
+    )
+
+
+async def materialize(candidate: Candidate) -> Playable:
+    """Turn a picked candidate into a streamable Playable (download+decrypt)."""
+    if candidate.provider != "deezer" or not candidate.payload:
+        raise SourceUnavailable(
+            "deezer", "bad_candidate", "Not a Deezer candidate.")
+    _sweep_cache()
+    try:
+        async with aiohttp.ClientSession() as session:
+            client = GwLightClient(_session_arl(), session)
+            await client.login()
+            playable = await _build_playable(client, candidate.payload)
+    except SourceUnavailable:
+        raise
+    except aiohttp.ClientError as exc:
+        raise SourceUnavailable(
+            "deezer", "api_error", f"Deezer unreachable: {exc}") from exc
+    if playable is None:
+        raise SourceUnavailable(
+            "deezer", "no_stream",
+            f"Couldn't fetch a stream for {candidate.title!r}.")
+    return playable
 
 
 async def resolve(query: str) -> Playable:

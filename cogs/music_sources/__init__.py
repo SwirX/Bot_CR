@@ -23,11 +23,13 @@ import logging
 import aiohttp
 
 from . import audius, deezer, links
-from .model import AllSourcesFailed, Playable, SourceFailure, SourceUnavailable
+from .model import (AllSourcesFailed, Candidate, Playable, SourceFailure,
+                    SourceUnavailable)
 
 LOG = logging.getLogger("bot.music.sources")
 
 _PROVIDERS = (deezer.resolve, audius.resolve)
+_CANDIDATE_PROVIDERS = (deezer.candidates, audius.candidates)
 
 # oEmbed is a single cheap metadata call, so link parsing is bounded on its own
 # budget before the (much slower) audio providers are tried at all.
@@ -92,6 +94,51 @@ async def resolve_link(intent: "links.LinkIntent") -> Playable:
     )
 
 
+# ── picker path (metadata first, stream on pick) ─────────────────────
+async def search_candidates(query: str, limit: int = 5) -> list[Candidate]:
+    """Metadata-only hits across providers, merged and de-duplicated.
+
+    Runs the providers concurrently and swallows individual failures (a dead
+    provider just shrinks the list — the picker is still useful). Output is
+    capped at ``limit`` with Deezer first, matching the play chain's order.
+    """
+    if links.classify(query) is not None:
+        # A link is one intended track, not a search — the picker can't help.
+        return []
+    settled = await asyncio.gather(
+        *(candidates(query, limit) for candidates in _CANDIDATE_PROVIDERS),
+        return_exceptions=True)
+    results: list[Candidate] = []
+    seen: set[str] = set()
+    for outcome in settled:
+        if isinstance(outcome, Exception):
+            LOG.debug("candidate provider failed: %s", outcome)
+            continue
+        for candidate in outcome:
+            key = _dedupe_key(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(candidate)
+    return results[:limit]
+
+
+def _dedupe_key(candidate: Candidate) -> str:
+    """Same artist+title on two providers is one picker entry, keep the first."""
+    return (candidate.artist + "|" + candidate.title).strip().lower()
+
+
+async def materialize(candidate: Candidate) -> Playable:
+    """Pay for the stream only once the member has actually picked one."""
+    if candidate.provider == "deezer":
+        return await deezer.materialize(candidate)
+    if candidate.provider == "audius":
+        return await audius.materialize(candidate)
+    raise SourceUnavailable(
+        candidate.provider or "unknown", "no_provider",
+        f"No provider is registered for {candidate.provider!r}.")
+
+
 async def describe(query: str) -> str:
     """What ``query`` resolved to, for the "I picked this for you" line.
 
@@ -112,6 +159,7 @@ async def describe(query: str) -> str:
 
 
 __all__ = [
-    "AllSourcesFailed", "Playable", "SourceFailure", "SourceUnavailable",
-    "resolve_playable", "resolve_link", "describe", "links",
+    "AllSourcesFailed", "Candidate", "Playable", "SourceFailure",
+    "SourceUnavailable", "resolve_playable", "resolve_link", "describe",
+    "search_candidates", "materialize", "links",
 ]
