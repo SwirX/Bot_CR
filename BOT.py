@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from pathlib import Path
 
 import discord
 from discord.ext import commands
@@ -133,27 +132,60 @@ def _argument_hint(error: Exception) -> str | None:
     return None
 
 
-async def load_cogs():
+async def load_cogs() -> int:
     """Auto-discover and load every cog in the cogs/ package.
 
     Drop a new file in cogs/ and it is picked up automatically; no wiring
     needed in this launcher.
+
+    The directory is resolved from ``config.BASE_DIR`` rather than the
+    process CWD: a relative ``Path("cogs")`` globs to nothing when systemd
+    starts us anywhere but the repo root, which loaded *zero* cogs silently —
+    the bot connected, synced no commands and answered health checks while
+    every feature was simply absent. The count is asserted below so that can
+    never fail quietly again.
     """
-    cogs_dir = Path("cogs")
+    cogs_dir = config.BASE_DIR / "cogs"
+    if not cogs_dir.is_dir():
+        raise RuntimeError(f"Cog directory not found: {cogs_dir}")
+    loaded = 0
     for path in sorted(cogs_dir.glob("*.py")):
         if path.name.startswith("_") or path.name == "__init__.py":
             continue
         extension = f"cogs.{path.stem}"
         await bot.load_extension(extension)
+        loaded += 1
         LOG.info("Loaded cog: %s", extension)
+    if loaded < 20:
+        raise RuntimeError(
+            f"Only {loaded} cog(s) loaded — expected the full set. "
+            "Refusing to start with a partial feature set."
+        )
+    LOG.info("Loaded %d cog(s) total", loaded)
+    return loaded
 
 
 async def main():
     configure_logging()
-    try:
-        await store.init()
-    except Exception as exc:  # keep the bot alive even if Appwrite is down
-        LOG.critical("Appwrite store unavailable: %s — continuing without persistence", exc)
+    # Fail fast on a dead store. Booting without persistence was worse than
+    # not booting: every command answered from an empty database, OTP logins
+    # "succeeded" without being written, and XP/stat flushes vanished — with
+    # nothing but a CRITICAL line in a journal nobody reads. Retry briefly so a
+    # blip on Appwrite's side doesn't need a human restart, then give up loudly.
+    last: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            await store.init()
+            break
+        except Exception as exc:  # noqa: BLE001 - retried, then fatal below
+            last = exc
+            wait = 2 ** attempt
+            LOG.warning("Appwrite init failed (attempt %d/5): %s — retrying in %ds",
+                        attempt, exc, wait)
+            await asyncio.sleep(wait)
+    else:
+        LOG.critical("Appwrite store unavailable after 5 attempts: %s", last)
+        raise SystemExit(1)
     await load_cogs()
     await bot.start(config.BOT_TOKEN)
 

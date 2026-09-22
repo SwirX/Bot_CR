@@ -283,10 +283,15 @@ class DeezerGuardTests(unittest.TestCase):
             if saved is not None:
                 os.environ["DEEZER_ARL"] = saved
 
-    def test_registry_orders_youtube_deezer_audius(self):
-        from cogs.music_sources import audius, deezer, youtube
-        self.assertEqual(sources._PROVIDERS,
-                         (youtube.resolve, deezer.resolve, audius.resolve))
+    def test_registry_orders_deezer_audius(self):
+        """Deezer first, Audius fallback — no YouTube.
+
+        yt-dlp was reachable with member-supplied URLs (blind SSRF), so the
+        provider was removed rather than merely reordered.
+        """
+        from cogs.music_sources import audius, deezer
+        self.assertEqual(sources._PROVIDERS, (deezer.resolve, audius.resolve))
+        self.assertFalse(any("youtube" in str(p) for p in sources._PROVIDERS))
 
 
 class DeezerLoginFormatTests(unittest.TestCase):

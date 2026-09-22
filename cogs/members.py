@@ -23,7 +23,7 @@ from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
 from cogs._dates import days_until, fmt_date
 from cogs._ui import OwnerView, PaginatorView, LoggedView, close_panel, select_value
 from cogs.birthday_tracker import announce_birthday, parse_birthday
-from cogs.minecraft import LinkChoiceView, UnlinkConfirmView, mc_link_card_embed
+from cogs.minecraft import LinkInfoView, UnlinkConfirmView, mc_link_card_embed
 from cogs.onboarding import cursive_nickname
 from i18n.core import resolve_member_lang, t
 
@@ -329,7 +329,7 @@ class ProfileMinecraftTabView(LoggedView, OwnerView, discord.ui.View):
             return
         await _render_with_spinner(
             interaction, lang=self.lang,
-            build=lambda: self._build_link(LinkChoiceView))
+            build=lambda: self._build_link(LinkInfoView))
 
     async def _build_link(self, cls) -> tuple[discord.Embed, discord.ui.View]:
         view = cls(self.mc_cog, self.lang, self.member, home_factory=self._home)

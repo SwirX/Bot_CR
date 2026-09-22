@@ -29,7 +29,7 @@ EXPECTED_COMMANDS = {
     "competitions", "complete", "compliment", "create", "crypto",
     "dashboard", "define", "del", "dice", "edit", "end", "endroom", "event", "events",
     "fact", "fixname", "github", "hierarchy", "hello", "help", "history",
-    "hug", "joke", "kick", "language", "last", "leaderboard", "levelrewards", "link", "linkmc", "linkmember", "list", "lock", "loop", "lyrics",
+    "hug", "joke", "kick", "language", "last", "leaderboard", "levelrewards", "link", "linkmember", "list", "lock", "loop", "lyrics",
     "mc", "mclink", "mcotp", "mcrestart", "mcsession", "mcstart", "mcstop", "meeting", "meme", "minecraft", "modlog", "mute", "notifications", "nowplaying",
     "overdue", "pause", "ping", "play", "poll", "profile", "queue",
     "quiz", "quote", "rank", "remind", "removerole", "resume", "results", "reverse", "roast",
@@ -39,7 +39,20 @@ EXPECTED_COMMANDS = {
     "unban", "unlink", "unlinkmember", "unlock", "unmute",
     "untimeout", "view", "voicetime", "volume", "vote", "warn", "weather", "website", "whois",
     "namesweep",
+    # Identity / record sync — prefix-only (see PREFIX_ONLY_COMMANDS).
+    "syncdb", "joindatesync", "askbirthday", "askname",
 }
+
+# Deliberately NOT hybrid: these are admin data-maintenance commands that must
+# never appear as slash commands, so they can't be triggered by clicking in the
+# Discord UI. Using a prefix command keeps them a deliberate typed action.
+PREFIX_ONLY_COMMANDS = {"syncdb", "joindatesync", "askbirthday", "askname"}
+
+# Commands that must NOT exist any more. Guards against a silent regression
+# reintroducing a self-service Minecraft-link path (see cogs/minecraft.py:
+# `/linkmc` allowed claiming an arbitrary username and receiving the owner's
+# login OTP — a full account takeover).
+FORBIDDEN_COMMANDS = {"linkmc"}
 
 
 def main() -> int:
@@ -52,7 +65,9 @@ def main() -> int:
     bot = commands.Bot(command_prefix="!", intents=discord.Intents.all(), help_command=None)
 
     async def run() -> None:
-        cogs_dir = Path("cogs")
+        # Anchored to the repo root: a CWD-relative "cogs" globs to nothing when
+        # run from elsewhere, which silently verified nothing.
+        cogs_dir = ROOT / "cogs"
         loaded = 0
         for path in sorted(cogs_dir.glob("*.py")):
             if path.name.startswith("_") or path.name == "__init__.py":
@@ -63,12 +78,17 @@ def main() -> int:
 
         names = {c.name for c in bot.walk_commands()}
         missing = EXPECTED_COMMANDS - names
+        forbidden = FORBIDDEN_COMMANDS & names
         non_hybrid = [
             c.name for c in bot.walk_commands()
-            if not isinstance(c, (commands.HybridCommand, commands.HybridGroup))
+            if c.name not in PREFIX_ONLY_COMMANDS
+            and not isinstance(c, (commands.HybridCommand, commands.HybridGroup))
         ]
         if missing:
             print(f"✗ Missing expected commands: {sorted(missing)}")
+            raise SystemExit(1)
+        if forbidden:
+            print(f"✗ Forbidden commands are back: {sorted(forbidden)}")
             raise SystemExit(1)
         if non_hybrid:
             print(f"✗ Non-hybrid commands: {non_hybrid}")
