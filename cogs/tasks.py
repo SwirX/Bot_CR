@@ -9,12 +9,11 @@ import logging
 from datetime import datetime, timezone
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from data.store import store
 from data.store import StoreError
-from cogs._dates import days_until, fmt_date, is_overdue, parse_due
+from cogs._dates import fmt_date, is_overdue, parse_due
 from cogs._scopes import require_scope, scopes_for_author
 from cogs._ui import PaginatorView
 

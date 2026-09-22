@@ -22,7 +22,6 @@ if str(ROOT) not in sys.path:
 
 import discord  # noqa: E402
 
-import config  # noqa: E402
 from cogs import _meetings as ml  # noqa: E402
 
 T0 = datetime(2026, 9, 25, 18, 0, 0, tzinfo=timezone.utc)

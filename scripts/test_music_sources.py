@@ -173,7 +173,7 @@ class DeezerDrmTests(unittest.TestCase):
     def test_decrypt_restores_striped_audio(self):
         from Crypto.Cipher import Blowfish
         from cogs.music_sources.deezer_gw import (
-            _BF_IV, CHUNK_BYTES, blowfish_key, decrypt_chunks,
+            _BF_IV, blowfish_key, decrypt_chunks,
         )
 
         async def _aiter(items):
@@ -215,7 +215,7 @@ class DeezerDrmTests(unittest.TestCase):
         """
         from Crypto.Cipher import Blowfish
         from cogs.music_sources.deezer_gw import (
-            _BF_IV, CHUNK_BYTES, blowfish_key, decrypt_stream,
+            _BF_IV, blowfish_key, decrypt_stream,
         )
 
         class _SlicingReader:

@@ -95,19 +95,42 @@ async def server_name(session: aiohttp.ClientSession) -> str:
     return (data.get("attributes") or {}).get("name", "")
 
 
+class WhitelistReadError(RuntimeError):
+    """The whitelist could not be read reliably — refuse to write after one."""
+
+
 async def read_whitelist(session: aiohttp.ClientSession) -> list:
-    """Current whitelist.json entries ([] if missing/empty)."""
+    """Current whitelist.json entries.
+
+    Raises :class:`WhitelistReadError` rather than degrading to ``[]``. The
+    caller rewrites the *whole* file, so an unreadable whitelist that looked
+    empty turned into a full overwrite containing only the new entry: one
+    transient 502, a proxy error page, or a non-list body silently
+    de-whitelisted every other member while the operator saw "✅ success".
+    Aborting the write is the only safe behaviour when the read is untrusted.
+    """
     async with session.get(_server_url("files", "contents"),
                            params={"file": "/whitelist.json"}) as resp:
         if resp.status == 404:
+            # Genuinely absent == genuinely empty. This is the one case where
+            # "no whitelist" is the correct reading.
             return []
-        resp.raise_for_status()
+        if resp.status >= 400:
+            raise WhitelistReadError(f"whitelist read failed: HTTP {resp.status}")
         text = await resp.text()
-    try:
-        entries = json.loads(text or "[]")
-    except ValueError:
+    if not text.strip():
         return []
-    return entries if isinstance(entries, list) else []
+    try:
+        entries = json.loads(text)
+    except ValueError as exc:
+        raise WhitelistReadError(
+            f"whitelist is not valid JSON: {exc}") from exc
+    if not isinstance(entries, list):
+        raise WhitelistReadError(
+            f"whitelist is a {type(entries).__name__}, expected a list")
+    if any(not isinstance(e, dict) or not e.get("uuid") for e in entries):
+        raise WhitelistReadError("whitelist entries are malformed (no uuid)")
+    return entries
 
 
 async def write_whitelist(session: aiohttp.ClientSession, entries: list) -> None:
@@ -218,6 +241,10 @@ class Minecraft(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Serialises whitelist.json read-modify-write cycles. The file is
+        # rewritten whole on every change, so two concurrent link/unlink
+        # operations would otherwise silently drop one member's entry.
+        self._whitelist_lock = asyncio.Lock()
         # Console websocket (join/leave detection) state.
         self._ws_stop = asyncio.Event()
         self._ws_task: asyncio.Task | None = None
@@ -654,16 +681,24 @@ class Minecraft(commands.Cog):
         try:
             async with self._new_session() as session:
                 state = await server_state(session)
-                existing = await read_whitelist(session)
-                kept = [
-                    e for e in existing
-                    if str(e.get("uuid")) not in uuids
-                    and str(e.get("name")) != name
-                ]
-                if len(kept) != len(existing):
-                    await write_whitelist(session, kept)
-                    if state == "running":
-                        await send_command(session, "whitelist reload")
+                # Serialise the read-modify-write: two concurrent unlinks both
+                # read the same base list and the second write erased the
+                # first member's entry, while both were told "done".
+                async with self._whitelist_lock:
+                    existing = await read_whitelist(session)
+                    kept = [
+                        e for e in existing
+                        if str(e.get("uuid")) not in uuids
+                    ]
+                    if len(kept) != len(existing):
+                        await write_whitelist(session, kept)
+                        if state == "running":
+                            await send_command(session, "whitelist reload")
+        except WhitelistReadError as exc:
+            # Never fall through to a partial rewrite on an untrusted read.
+            LOG.error("unlink aborted for %s — whitelist unreadable: %s",
+                      member.id, exc)
+            return False, t("mc.unlink.failed", lang)
         except Exception as exc:
             LOG.warning("unlink failed for %s: %s", member.id, exc)
             return False, t("mc.unlink.failed", lang)

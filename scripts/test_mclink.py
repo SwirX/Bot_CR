@@ -202,7 +202,7 @@ class McLinkFlowTests(unittest.TestCase):
 
     def _run(self, ctx: _FakeCtx) -> None:
         async def go():
-            from cogs.mclink import resolve_member_lang, store
+            from cogs.mclink import store
 
             cog = self._cog()
             with mock.patch("cogs.mclink.resolve_member_lang",
@@ -255,7 +255,7 @@ class McOtpFlowTests(unittest.TestCase):
 
     def _run(self, ctx: _FakeCtx, *, dm_ok: bool = False) -> None:
         async def go():
-            from cogs.mclink import resolve_member_lang, store
+            from cogs.mclink import store
 
             cog = self._cog(dm_ok)
             with mock.patch("cogs.mclink.resolve_member_lang",
@@ -308,7 +308,7 @@ class McOtpFlowTests(unittest.TestCase):
 
     def test_no_pending_otp_row(self):
         async def go():
-            from cogs.mclink import resolve_member_lang, store
+            from cogs.mclink import store
 
             cog = self._cog(dm_ok=False)
             ctx = _FakeCtx(interaction=_FakeInteraction())

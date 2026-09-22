@@ -21,7 +21,6 @@ from uuid import uuid4
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config  # noqa: E402 - loads .env before the store
 from data.store import store  # noqa: E402
 
 USERNAME = "SwirXHubTest"

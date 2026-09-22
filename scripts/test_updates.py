@@ -5,7 +5,6 @@ Needs dummy BOT_TOKEN/APPWRITE_API_KEY (like smoke_test) so config imports.
 The git-state test fetches origin/nightly from this checkout (local, cached).
 """
 
-import asyncio
 import os
 import sys
 import unittest

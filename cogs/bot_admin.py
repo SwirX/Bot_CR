@@ -323,8 +323,8 @@ class BotAdmin(commands.Cog):
         if ahead:
             embed.add_field(
                 name="Update",
-                value=f"⚠️ **Diverged** from `origin/nightly` — a fast-forward "
-                      f"update isn't possible; rebuild/deploy manually.")
+                value="⚠️ **Diverged** from `origin/nightly` — a fast-forward "
+                      "update isn't possible; rebuild/deploy manually.")
             await ctx.send(embed=embed)
             return
         preview = "\n".join(
