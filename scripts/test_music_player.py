@@ -596,5 +596,70 @@ class ProgressBarTests(unittest.TestCase):
         self.assertIn("0:30", progress.value)
         self.assertIn("2:00", progress.value)
 
+
+class LinkNudgeTests(unittest.TestCase):
+    """After a member's third *started* track they get the link-parse tip."""
+
+    def _player(self):
+        player = MusicPlayer(bot=object(), guild_id=1)
+        player.text_channel = _FakeTextChannel()
+        return player
+
+    def _start(self, player, title, requester_id):
+        player.current = Track(title=title, url=f"u-{title}",
+                               requester_id=requester_id, webpage_url=f"k-{title}")
+        asyncio.run(player._count_and_maybe_link_nudge(player.current))
+
+    def sent_texts(self, player):
+        return [s.get("content") for s in player.text_channel.sent
+                if s.get("content") is not None]
+
+    def test_no_nudge_before_three_tracks(self):
+        player = self._player()
+        self._start(player, "A", 7)
+        self._start(player, "B", 7)
+        self.assertEqual(self.sent_texts(player), [])
+
+    def test_third_track_delivers_the_tip(self):
+        player = self._player()
+        for t in ("A", "B", "C"):
+            self._start(player, t, 7)
+        texts = self.sent_texts(player)
+        self.assertEqual(len(texts), 1)
+        self.assertIn("YouTube or Deezer link", texts[0])
+        self.assertIn("<@7>", texts[0])
+
+    def test_each_member_gets_it_once(self):
+        player = self._player()
+        for t in ("A", "B", "C", "D", "E", "F"):
+            self._start(player, t, 7)
+        self.assertEqual(len(self.sent_texts(player)), 1)  # once, not six
+
+    def test_loop_replay_is_not_a_new_play(self):
+        player = self._player()
+        for t in ("A", "B", "C"):
+            self._start(player, t, 7)
+        # Loop mode starts the same track again: no second nudge, no count bump.
+        same = player.current
+        asyncio.run(player._count_and_maybe_link_nudge(same))
+        self.assertEqual(len(self.sent_texts(player)), 1)
+        self.assertEqual(player._play_counts[7], 3)
+
+    def test_another_member_counts_independently(self):
+        player = self._player()
+        for t in ("A", "B", "C"):
+            self._start(player, t, 7)   # 7 has seen the tip
+        for t in ("D", "E", "F"):
+            self._start(player, t, 9)   # 9 has not
+        texts = self.sent_texts(player)
+        self.assertEqual(len(texts), 2)
+        self.assertIn("<@9>", texts[1])
+
+    def test_radio_tracks_without_a_requester_are_not_counted(self):
+        player = self._player()
+        self._start(player, "radio", 0)
+        self._start(player, "radio2", None)
+        self.assertEqual(player._play_counts, {})
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
