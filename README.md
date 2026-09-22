@@ -244,10 +244,13 @@ flushed in small batches to keep writes in the single-digits-per-minute range.
 
 ### 🍪 YouTube cookies for `/play` (recommended)
 
-YouTube bot-flags datacenter-server IPs, which makes most `yt-dlp` extractions
+YouTube bot-flags datacenter-server IPs, which makes most stream extractions
 fail with *"Sign in to confirm you're not a bot"*. **YTMusic search still
 works** (the bot finds the right song every time), but the actual audio stream
-needs a trusted session. Fix it once with cookies:
+needs a trusted session. Cookies help — and are still worth configuring — but
+note that on heavily flagged networks even cookies + proof-of-origin tokens
+may not unlock streams. The bot never fails outright: YouTube is tried first,
+then **Deezer** (see below), then **Audius**.
 
 1. In a browser you're logged into YouTube with, install a cookies-exporter
    extension (e.g. *Get cookies.txt LOCALLY*) and export cookies for
@@ -255,11 +258,29 @@ needs a trusted session. Fix it once with cookies:
 2. Place it on the server (e.g. `/home/ubuntu/Bot_CR/cookies.txt`).
 3. Point the bot at it in `.env`:
    `YT_COOKIES_FILE=/home/ubuntu/Bot_CR/cookies.txt`
-4. Restart the bot. `/play` now streams reliably, and `/queue auto` radio
-   works too.
+4. Restart the bot. Videos YouTube lets through now stream with the account.
 
 > 🔒 Treat `cookies.txt` like a password — it grants YouTube access as that
 > account. Keep it out of version control and out of the repo.
+
+### 🎧 Deezer source for `/play` (mainstream catalog, any network)
+
+When YouTube is bot-blocked, Deezer fills the top-40 gap: full-length tracks
+stream from any network (no datacenter-IP wall), and a **free account is
+enough** (128 kbps MP3). The bot grabs the track through Deezer's grey-web
+API, downloads the encrypted stream, and decrypts its BF-CBC "stripe" locally
+before playing.
+
+1. Log into https://www.deezer.com in a browser used for nothing else.
+2. Open DevTools → **Storage → Cookies** (or Application → Cookies) and copy
+   the value of the `arl` cookie for `deezer.com`.
+3. Put it in `.env`:
+   `DEEZER_ARL=<the arl cookie value>`
+4. Restart the bot. `/play <any mainstream song>` now has a working source.
+
+> 🔒 The ARL is the account's session key — keep it in `.env` only, never in
+> version control. If the account is ever flagged, the fix is a fresh
+> throwaway account + a new ARL.
 
 ---
 
