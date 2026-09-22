@@ -22,6 +22,28 @@ class Playable:
 
 
 @dataclass(frozen=True)
+class Candidate:
+    """A search hit: all the metadata a picker needs, nothing downloaded.
+
+    The old flow searched and immediately streamed the first hit, which made
+    two things bad: the user had no say over which match played, and showing
+    several matches meant paying several download/decrypt rounds up front.
+    A Candidate is the cheap half of a result — :func:`materialize` turns one
+    into a Playable only after the member actually picks it.
+    """
+
+    provider: str
+    title: str
+    artist: str = ""
+    duration: int | None = None
+    webpage_url: str = ""
+    thumbnail: str = ""
+    # Provider-specific payload used to materialize a stream (Deezer's
+    # gw-light track dict, Audius's track id...). Members never see it.
+    payload: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class SourceFailure:
     """Why a single provider could not deliver audio for the query."""
 

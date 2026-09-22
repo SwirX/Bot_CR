@@ -31,7 +31,7 @@ EXPECTED_COMMANDS = {
     "fact", "fixname", "github", "hierarchy", "hello", "help", "history",
     "hug", "joke", "kick", "language", "last", "leaderboard", "levelrewards", "link", "linkmember", "list", "lock", "loop", "lyrics",
     "mc", "mclink", "mcotp", "mcrestart", "mcsession", "mcstart", "mcstop", "meeting", "meme", "minecraft", "modlog", "mute", "notifications", "nowplaying",
-    "overdue", "pause", "ping", "play", "poll", "profile", "queue",
+    "overdue", "pause", "ping", "play", "playsearch", "poll", "profile", "queue",
     "quiz", "quote", "rank", "remind", "removerole", "resume", "results", "reverse", "roast",
     "robot", "roles", "rps", "set", "setbirthday", "setlead", "setname", "setprofile",
     "settings", "ship", "skip",

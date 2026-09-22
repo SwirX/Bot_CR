@@ -27,7 +27,8 @@ from discord.ext import commands
 from cogs._perms import is_bot_admin
 from cogs.music_sources import deezer as deezer_provider
 from cogs.music_sources import radio as radio_provider
-from cogs.music_sources import describe, resolve_playable
+from cogs.music_sources import (describe, materialize, resolve_playable,
+                                search_candidates)
 from cogs.music_sources.model import AllSourcesFailed, Playable, SourceUnavailable
 
 LOG = logging.getLogger("bot.music")
@@ -571,6 +572,79 @@ class MusicPlayer:
             self.now_playing_view = view
 
 
+class SearchPickView(discord.ui.View):
+    """The /playsearch picker: one select, one pick, one song.
+
+    A select menu rather than buttons so titles can be long enough to be
+    recognisable ("Ed Sheeran – Shape of You (Official Music Video)"). Only the
+    member who ran the search can choose; everyone else gets a polite note.
+    """
+
+    def __init__(self, cog, ctx, candidates: list, player: MusicPlayer):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.ctx = ctx
+        self.candidates = candidates
+        self.player = player
+        self._message: discord.Message | None = None
+        select = discord.ui.Select(
+            placeholder="Pick the track to play…",
+            min_values=1, max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=f"{c.title} — {c.artist}"[:100],
+                    description=(f"{c.provider} · {fmt_duration(c.duration)}"
+                                 if c.duration else c.provider)[:100],
+                    value=str(i))
+                for i, c in enumerate(candidates)
+            ])
+        select.callback = self._pick
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                f"That's {self.ctx.author.mention}'s search — run /playsearch "
+                "yourself to pick.", ephemeral=True)
+            return False
+        return True
+
+    async def _pick(self, interaction: discord.Interaction) -> None:
+        candidate = self.candidates[int(interaction.data["values"][0])]
+        await interaction.response.defer()
+        try:
+            playable = await materialize(candidate)
+        except Exception as exc:
+            await interaction.followup.send(
+                f"⚠️ Couldn't fetch **{candidate.title}**: {exc}",
+                ephemeral=True)
+            return
+        track = Music._track_from_playable(playable, self.ctx.author.id)
+        started = await self.player.enqueue(track)
+        where = (f"#{len(self.player.queue)} in the queue"
+                 if not started else "now playing")
+        await self._finish(interaction, f"🎵 **{track.title}** — {where}.")
+        await self.player._update_panel()
+
+    async def _finish(self, interaction: discord.Interaction, text: str) -> None:
+        self.clear_items()
+        self.stop()
+        try:
+            await interaction.message.edit(content=text, view=self)
+        except (discord.HTTPException, discord.NotFound):
+            pass
+
+    async def on_timeout(self) -> None:
+        self.clear_items()
+        if self._message is not None:
+            try:
+                await self._message.edit(
+                    content="⌛ Search expired — run /playsearch again.",
+                    view=None)
+            except (discord.HTTPException, discord.NotFound):
+                pass
+
+
 class NowPlayingView(discord.ui.View):
     """Interactive panel: pause/resume, vote-skip, loop, stop, lyrics.
 
@@ -809,6 +883,36 @@ class Music(commands.Cog):
                 f"➕ **{track.title}** added to the queue (#{len(player.queue)}).")
         # Re-post the controls panel last so it stays the newest message.
         await player._update_panel()
+
+    @commands.hybrid_command(
+        name="playsearch",
+        description="Search and pick a song from the results — you choose which match plays.")
+    @commands.guild_only()
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def playsearch(self, ctx, *, query: str):
+        """Search providers and let the member pick the winning track.
+
+        ``/play`` keeps going straight to the top result — fast, and fine for
+        names you know. ``/playsearch`` is the fix for everything else: long
+        or ambiguous titles, covers, remixes — anything where the top hit
+        might not be the song you meant.
+        """
+        await ctx.defer()
+        player = await self._ensure_voice(ctx)
+        if player is None:
+            return
+        try:
+            candidates = await search_candidates(query, limit=5)
+        except Exception:
+            candidates = []  # provider failures are logged inside; treat as no hits
+        if not candidates:
+            await ctx.send(f"🔍 No matches for **{query}** — try a different query.")
+            return
+        view = SearchPickView(self, ctx, candidates, player)
+        view._message = await ctx.send(
+            content=(f"🔍 Top matches for **{query}** — pick one, "
+                     "or run `/play` next time to take the first hit:"),
+            view=view)
 
     @commands.hybrid_command(name="pause", description="Pause the current track.")
     @commands.guild_only()

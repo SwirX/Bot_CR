@@ -112,6 +112,84 @@ class RegistryTests(unittest.TestCase):
                          ["first", "second"])
 
 
+class CandidateMergeTests(unittest.TestCase):
+    """The picker path: metadata-only, no eager stream downloads."""
+
+    def setUp(self):
+        self._saved = list(sources._CANDIDATE_PROVIDERS)
+
+    def tearDown(self):
+        sources._CANDIDATE_PROVIDERS = self._saved
+
+    def _provider(self, hits: list[Candidate]):
+        async def provide(query, limit):
+            return hits[:limit]
+        return provide
+
+    def test_hits_from_both_providers_are_merged_and_capped(self):
+        from cogs.music_sources.model import Candidate
+        deezer_hits = [Candidate("deezer", f"Song {i}", "Artist A") for i in range(4)]
+        audius_hits = [Candidate("audius", f"Track {i}", "Artist B") for i in range(4)]
+        sources._CANDIDATE_PROVIDERS = (self._provider(deezer_hits),
+                                        self._provider(audius_hits))
+        results = asyncio.run(sources.search_candidates("q", limit=5))
+        self.assertEqual(len(results), 5)
+        self.assertEqual({c.provider for c in results}, {"deezer", "audius"})
+
+    def test_same_artist_title_is_deduplicated(self):
+        from cogs.music_sources.model import Candidate
+        dup = Candidate("audius", "Shape of You", "Ed Sheeran")
+        first = Candidate("deezer", "shape of you", "ed sheeran")
+        sources._CANDIDATE_PROVIDERS = (self._provider([first]),
+                                        self._provider([dup]))
+        results = asyncio.run(sources.search_candidates("q"))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].provider, "deezer")
+
+    def test_a_dead_provider_shrinks_but_does_not_kill_results(self):
+        from cogs.music_sources.model import Candidate
+
+        async def boom(query, limit):
+            raise RuntimeError("deezer is down")
+
+        alive = [Candidate("audius", "Song", "Artist")]
+        sources._CANDIDATE_PROVIDERS = (boom, self._provider(alive))
+        results = asyncio.run(sources.search_candidates("q"))
+        self.assertEqual([c.provider for c in results], ["audius"])
+
+    def test_link_queries_return_no_candidates(self):
+        # A link names one track; offering a list of search hits would be wrong.
+        results = asyncio.run(
+            sources.search_candidates("https://youtu.be/dQw4w9WgXcQ"))
+        self.assertEqual(results, [])
+
+    def test_materialize_routes_by_provider(self):
+        from cogs.music_sources.model import Candidate
+
+        marker = {}
+
+        async def fake_materialize(candidate):
+            marker["provider"] = candidate.provider
+            return Playable(provider=candidate.provider, title="T", stream_url="u")
+
+        import cogs.music_sources.deezer as dz
+        import cogs.music_sources.audius as au
+        old_dz, old_au = dz.materialize, au.materialize
+        dz.materialize = fake_materialize
+        au.materialize = fake_materialize
+        try:
+            for provider in ("deezer", "audius"):
+                result = asyncio.run(
+                    sources.materialize(Candidate(provider, "T", payload={"SNG_ID": 1})))
+                self.assertEqual(marker["provider"], provider)
+                self.assertEqual(result.title, "T")
+            with self.assertRaises(SourceUnavailable):
+                asyncio.run(sources.materialize(Candidate("mystery", "T")))
+        finally:
+            dz.materialize = old_dz
+            au.materialize = old_au
+
+
 class LinkRoutingTests(unittest.TestCase):
     """A pasted link must become an ordinary provider search, never a fetch."""
 
