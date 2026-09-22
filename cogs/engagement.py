@@ -55,7 +55,13 @@ class Engagement(commands.Cog):
         self.name_cache[uid] = message.author.name
 
         now = time.monotonic()
-        if now - self.xp_cooldown.get(uid, 0.0) < config.XP_COOLDOWN_SECONDS:
+        # None == "no cooldown yet". Using 0.0 as the default silently suppressed
+        # XP for the first XP_COOLDOWN_SECONDS of every process lifetime:
+        # time.monotonic() is measured from boot, so right after a restart
+        # `now - 0.0` is still below the threshold and every message was
+        # treated as "too soon".
+        last = self.xp_cooldown.get(uid)
+        if last is not None and now - last < config.XP_COOLDOWN_SECONDS:
             return
         self.xp_cooldown[uid] = now
 
