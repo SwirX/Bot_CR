@@ -30,9 +30,10 @@ URL_RE = re.compile(r"^https?://", re.I)
 
 # "Sign in to confirm you're not a bot" on datacenter IPs.
 _BOT_BLOCKED = re.compile(r"sign in to confirm you.*not a bot", re.I)
-COOKIES_HINT = ("YouTube is bot-flagging this server's network, so it needs "
-                "login cookies before it will stream. Add a cookies.txt for "
-                "youtube.com and set `YT_COOKIES_FILE` — see README for how.")
+COOKIES_HINT = ("YouTube refused to stream from this server's network, which "
+                "flags datacenter IPs even with login cookies. The bot already "
+                "tried its fallback sources — try a query the other providers "
+                "carry.")
 
 # Authenticated-but-frameless: the cookie account is too new/trust-less for
 # YouTube to hand out stream formats yet.
