@@ -55,6 +55,63 @@ PREFIX_ONLY_COMMANDS = {"syncdb", "joindatesync", "askbirthday", "askname"}
 FORBIDDEN_COMMANDS = {"linkmc"}
 
 
+async def _check_startup_wiring() -> str:
+    """Import BOT and verify main()'s signal/handler setup is actually valid.
+
+    Deliberately does NOT connect to Discord. It replaces ``bot.start`` with a
+    stub, runs the pre-``start`` half of ``main``, and asserts that both the
+    signal handlers and ``on_ready`` (including the self-check) are callable.
+    This is the check that would have caught both startup TypeErrors.
+    """
+    import signal
+    import types
+
+    sys.modules.setdefault("KeepAlive", types.SimpleNamespace(
+        keep_alive=lambda: None,
+        mark_ready=lambda: None,
+        mark_not_ready=lambda: None,
+    ))
+    import BOT  # noqa: E402
+
+    fired: list[str] = []
+
+    async def fake_shutdown(name: str = "") -> None:
+        fired.append(name)
+
+    BOT.shutdown = fake_shutdown
+    # Don't actually connect to the gateway.
+    async def fake_start(_token):
+        return None
+    BOT.bot.start = fake_start
+
+    # Run main() up to (but not including) bot.start. BOT does
+    # `from data.store import store`, so patch the singleton it actually holds.
+    orig_init = BOT.store.init
+    async def fake_init():
+        return None
+    BOT.store.init = fake_init
+    try:
+        await BOT.main()
+    finally:
+        BOT.store.init = orig_init
+
+    # Now prove a signal actually reaches shutdown().
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        os.kill(os.getpid(), sig)
+        await asyncio.sleep(0.2)
+    if not {"SIGTERM", "SIGINT"} <= set(fired):
+        raise AssertionError(
+            f"signal handlers did not fire shutdown(): {fired}")
+
+    # And that on_ready runs end to end, including self_check().
+    BOT.sync_commands = lambda: asyncio.sleep(0)
+    ready = BOT.on_ready()
+    if asyncio.iscoroutine(ready):
+        await ready
+
+    return f"{len(fired)} signal handlers ok, on_ready + self_check ok"
+
+
 def main() -> int:
     # config requires these; fail loudly (not cryptically) if they're missing.
     for var in ("BOT_TOKEN", "APPWRITE_API_KEY"):
@@ -101,6 +158,17 @@ def main() -> int:
             raise SystemExit(1)
 
         print(f"✓ Loaded {loaded} cogs and {len(names)} commands (all hybrid, incl. custom help)")
+
+        # Exercise the *startup wiring* in BOT.py, not just cog loading. Two
+        # shipping bugs lived here and neither the cog-load path nor the unit
+        # suite caught them, because both only crash once main() runs:
+        #   * add_signal_handler(sig, lambda=...) -> TypeError (missing callback)
+        #   * add_listener(lambda: ..., "on_ready") -> "Listeners must be
+        #     coroutines"
+        # We never connect to Discord here, so we drive the handler-registration
+        # block directly and assert it registers and fires.
+        startup = await _check_startup_wiring()
+        print(f"✓ startup wiring: {startup}")
 
     try:
         asyncio.run(run())

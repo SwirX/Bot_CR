@@ -38,6 +38,13 @@ async def on_ready():
     LOG.info("Logged in as %s (latency %.1f ms)", bot.user, bot.latency * 1000)
     mark_ready()  # keepalive readiness probe
     await sync_commands()
+    # Report the resolved config. Runs off on_ready rather than via
+    # add_listener(): that API requires a coroutine, not a lambda returning a
+    # task, and getting that wrong kills the process at startup.
+    try:
+        await self_check()
+    except Exception:  # noqa: BLE001 - diagnostics must never stop the bot
+        LOG.exception("startup self-check failed")
 
 
 async def sync_commands():
@@ -301,8 +308,6 @@ async def main():
         LOG.critical("Appwrite store unavailable after 5 attempts: %s", last)
         raise SystemExit(1)
     await load_cogs()
-    bot.add_listener(
-        lambda: asyncio.create_task(self_check()), "on_ready")
     await bot.start(config.BOT_TOKEN)
 
 # Run the bot
