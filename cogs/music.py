@@ -1,10 +1,11 @@
-"""Music streaming for Bot_CR (YTMusic search + yt-dlp + ffmpeg).
+"""Music streaming for Bot_CR (multi-source: YouTube, Audius, internet radio).
 
-Joins the author's voice channel and streams the best audio source from YouTube
-(queries are searched via YTMusic, URLs are used directly), with a queue, a
-``/queue auto`` YTMusic-radio generator, majority vote-skip, per-track loop,
-volume control and an interactive now-playing panel that also looks up lyrics
-on LRCLIB. The bot auto-disconnects after being idle for a bit.
+Joins the author's voice channel and streams the first playable source for a
+query (YouTube via yt-dlp first, Audius as the automatic keyless fallback,
+public radio stations on request), with a queue, a ``/queue auto`` YTMusic-radio
+generator, majority vote-skip, per-track loop, volume control and an
+interactive now-playing panel that also looks up lyrics on LRCLIB. The bot
+auto-disconnects after being idle for a bit.
 
 The playback state machine lives in :class:`MusicPlayer` and is deliberately
 voice-independent where possible (``voice`` is injected), so the queue / vote /
@@ -14,9 +15,6 @@ loop math is unit-testable without a real Discord voice connection.
 import asyncio
 import concurrent.futures
 import logging
-import os
-import re
-import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -25,56 +23,14 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-try:
-    import yt_dlp
-except ImportError:  # pragma: no cover - exercised at deploy time
-    yt_dlp = None
-
-try:
-    from ytmusicapi import YTMusic
-except ImportError:  # pragma: no cover - exercised at deploy time
-    YTMusic = None
-
 from cogs._perms import is_bot_admin
+from cogs.music_sources import radio as radio_provider
+from cogs.music_sources import resolve_playable, youtube as youtube_provider
+from cogs.music_sources.model import AllSourcesFailed, Playable, SourceUnavailable
 
 LOG = logging.getLogger("bot.music")
 
 USER_AGENT = "Bot_CR/1.0 (robotics-club Discord bot; contact: server staff)"
-
-URL_RE = re.compile(r"^https?://", re.I)
-
-# YouTube's "Sign in to confirm you're not a bot" block on datacenter IPs.
-_BOT_BLOCKED = re.compile(r"sign in to confirm you.*not a bot", re.I)
-COOKIES_HINT = ("YouTube is bot-flagging this server's network, so it needs "
-                "login cookies before it will stream. Add a cookies.txt for "
-                "youtube.com and set `YT_COOKIES_FILE` — see README for how.")
-
-# Authenticated-but-frameless: the account serving cookies is too new/trust-less
-# for YouTube to hand out stream formats yet.
-_NO_FORMATS = re.compile(r"requested format is not available", re.I)
-ACCOUNT_HINT = ("YouTube let us in but offered no stream for that video. This "
-                "usually means the YouTube account behind the cookies isn't "
-                "trusted yet — watch a few videos while logged in as it, then "
-                "re-export cookies.txt and restart the bot.")
-
-# ytmusicapi is not thread-safe, and its calls run via asyncio.to_thread.
-_YT_MUSIC: "YTMusic | None" = None
-_YT_MUSIC_LOCK = threading.Lock()
-
-
-def _ytmusic() -> "YTMusic":
-    global _YT_MUSIC
-    if _YT_MUSIC is None:
-        _YT_MUSIC = YTMusic()
-    return _YT_MUSIC
-
-YTDL_OPTS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "extract_flat": False,
-}
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
@@ -437,7 +393,7 @@ class NowPlayingView(discord.ui.View):
 
 
 class Music(commands.Cog):
-    """Queue music from YouTube — /play, /queue auto, /skip, /loop and more."""
+    """Queue music from any source — /play, /queue auto, /radio, /skip and more."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -479,161 +435,21 @@ class Music(commands.Cog):
         if self._http is not None and not self._http.closed:
             await self._http.close()
 
-    # ── lookup helpers ──────────────────────────────────────────
+    # ── source wiring ────────────────────────────────────────────
     @staticmethod
-    def _ytdl_opts() -> dict:
-        """Base yt-dlp options (+ cookiefile from ``YT_COOKIES_FILE``).
-
-        Env is read lazily so setting ``YT_COOKIES_FILE`` in ``.env`` works
-        without restarting at import time.
-        """
-        opts = dict(YTDL_OPTS)
-        cookies = os.environ.get("YT_COOKIES_FILE")
-        if cookies:
-            opts["cookiefile"] = cookies
-        return opts
-
-    @staticmethod
-    def _extract_audio(url: str) -> Track:
-        """Blocking yt-dlp stream extraction for a video URL (to_thread)."""
-        if yt_dlp is None:
-            raise RuntimeError("yt-dlp is not installed")
-        if not URL_RE.match(url):
-            raise RuntimeError(f"not a resolvable URL: {url!r}")
-        try:
-            with yt_dlp.YoutubeDL(Music._ytdl_opts()) as ydl:
-                info = ydl.extract_info(url, download=False)
-        except Exception as exc:
-            if _BOT_BLOCKED.search(str(exc)):
-                raise RuntimeError(COOKIES_HINT) from exc
-            if _NO_FORMATS.search(str(exc)):
-                raise RuntimeError(ACCOUNT_HINT) from exc
-            raise
-        if info.get("entries"):
-            info = info["entries"][0]
-        if not info or not info.get("url"):
-            raise RuntimeError("no playable audio source found")
+    def _track_from_playable(playable: Playable, requester_id: int) -> Track:
+        """Map a provider-resolved Playable onto the playback Track type."""
         return Track(
-            title=info.get("title") or url,
-            url=info["url"],
-            webpage_url=info.get("webpage_url") or info.get("original_url") or url,
-            video_id=info.get("id") or "",
-            duration=info.get("duration"),
-            thumbnail=info.get("thumbnail") or "",
-            artist=info.get("artist") or info.get("channel") or info.get("uploader") or "",
-            headers=info.get("http_headers") or {},
+            title=playable.title,
+            url=playable.stream_url,
+            webpage_url=playable.webpage_url,
+            video_id=playable.video_id,
+            duration=playable.duration,
+            thumbnail=playable.thumbnail,
+            artist=playable.artist,
+            requester_id=requester_id,
+            headers=playable.headers,
         )
-
-    @staticmethod
-    def _failure_hint(exc: Exception) -> str | None:
-        """Map known YouTube failure modes to a human message (None → generic).
-
-        Keeps the user-facing hints in one place so both the search and the
-        stream-resolution steps surface the same explanations.
-        """
-        text = str(exc)
-        if _BOT_BLOCKED.search(text) or text == COOKIES_HINT:
-            return COOKIES_HINT
-        if _NO_FORMATS.search(text) or text == ACCOUNT_HINT:
-            return ACCOUNT_HINT
-        return None
-
-    @staticmethod
-    def _find_song_sync(query: str) -> Track:
-        """Resolve a query to a Track (blocking — run via to_thread).
-
-        Direct URLs go straight to yt-dlp and come back fully playable.
-        Anything else is searched through YTMusic, which is far more reliable
-        than yt-dlp's ``ytsearch`` (that is bot-detected); the result is a
-        metadata-only skeleton with an empty ``url`` so the caller can announce
-        "found" before the slow, often-flagged stream extraction starts.
-        """
-        if URL_RE.match(query):
-            return Music._extract_audio(query)
-        if YTMusic is None:
-            raise RuntimeError("ytmusicapi is not installed")
-        with _YT_MUSIC_LOCK:
-            results = _ytmusic().search(query, filter="songs", limit=1)
-        if not results:
-            raise RuntimeError(f"no YTMusic results for {query!r}")
-        result = results[0]
-        video_id = result.get("videoId")
-        if not video_id:
-            raise RuntimeError("YTMusic result has no videoId")
-        artists = ", ".join(a.get("name") for a in (result.get("artists") or [])
-                            if a.get("name"))
-        secs = result.get("duration_seconds")
-        thumbs = result.get("thumbnails") or []
-        return Track(
-            title=result.get("title") or query,
-            url="",
-            webpage_url=f"https://www.youtube.com/watch?v={video_id}",
-            video_id=video_id,
-            duration=int(secs) if secs else None,
-            thumbnail=thumbs[-1].get("url") if thumbs else "",
-            artist=artists,
-        )
-
-    @staticmethod
-    def _resolve_stream_sync(track: Track) -> Track:
-        """Fill in the playable stream URL + headers for a found track.
-
-        Called after ``_find_song_sync`` when the track is only metadata; the
-        YTMusic metadata is kept and the yt-dlp result supplies what's missing.
-        """
-        if track.url:
-            return track
-        resolved = Music._extract_audio(track.webpage_url)
-        track.url = resolved.url
-        track.headers = resolved.headers
-        track.video_id = resolved.video_id or track.video_id
-        if not track.thumbnail:
-            track.thumbnail = resolved.thumbnail
-        if not track.duration:
-            track.duration = resolved.duration
-        if not track.artist:
-            track.artist = resolved.artist
-        return track
-
-    @staticmethod
-    def _radio_seed_ids(video_id: str, limit: int) -> list[str]:
-        """Nearest-neighbour video IDs for a track's YouTube Music radio."""
-        if YTMusic is None:
-            raise RuntimeError("ytmusicapi is not installed")
-        with _YT_MUSIC_LOCK:
-            data = _ytmusic().get_watch_playlist(
-                videoId=video_id, radio=True, limit=limit)
-        seeds: list[str] = []
-        for entry in data.get("tracks") or []:
-            vid = entry.get("videoId")
-            if vid and vid not in seeds:
-                seeds.append(vid)
-            if len(seeds) >= limit:
-                break
-        return seeds
-
-    async def _find_song(self, query: str) -> Track:
-        return await asyncio.to_thread(self._find_song_sync, query)
-
-    async def _resolve_stream(self, track: Track) -> Track:
-        return await asyncio.to_thread(self._resolve_stream_sync, track)
-
-    async def _resolve_tracks(self, video_ids: list[str]) -> list[Track]:
-        """Stream-extract several videos in parallel (radio queue generation)."""
-        results = await asyncio.gather(
-            *(asyncio.to_thread(self._extract_audio,
-                                f"https://www.youtube.com/watch?v={vid}")
-              for vid in video_ids),
-            return_exceptions=True,
-        )
-        tracks: list[Track] = []
-        for vid, res in zip(video_ids, results):
-            if isinstance(res, Exception):
-                LOG.warning("Auto-queue: failed to resolve %s: %s", vid, res)
-                continue
-            res.video_id = vid
-            tracks.append(res)
-        return tracks
 
     async def _ensure_voice(self, ctx) -> MusicPlayer | None:
         if ctx.author.voice is None or ctx.author.voice.channel is None:
@@ -665,51 +481,31 @@ class Music(commands.Cog):
         player.now_playing_message = await ctx.send(embed=player.embed(), view=view)
 
     # ── commands ────────────────────────────────────────────────
-    @commands.hybrid_command(name="play", description="Play a song (YouTube search or URL).")
+    @commands.hybrid_command(name="play", description="Play a song (search or URL).")
     @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def play(self, ctx, *, query: str):
-        """Search the top YouTube result, or stream a direct audio URL."""
-        # Slash interactions expire after ~3s; joining voice and searching
-        # YouTube can easily take longer, so acknowledge before any awaits.
+        """Stream the first playable source for the query, in provider order."""
+        # Slash interactions expire after ~3s; joining voice and resolving a
+        # source can easily take longer, so acknowledge before any awaits.
         # On prefix invocations ctx.defer() is a no-op.
         await ctx.defer()
         player = await self._ensure_voice(ctx)
         if player is None:
             return
-        found_msg = None
         try:
-            track = await self._find_song(query)
-        except Exception as exc:
-            LOG.warning("Search failed for %r: %s", query, exc)
-            hint = Music._failure_hint(exc)
+            playable = await resolve_playable(query)
+        except AllSourcesFailed as exc:
+            LOG.warning("No source could play %r: %s", query, exc)
+            hint = exc.best_hint()
             await ctx.send(f"⚠️ {hint}" if hint
-                           else "⚠️ Couldn't find something playable for that query.")
+                           else "⚠️ Couldn't find anything playable for that query.")
             return
-        # Query results are metadata-only at this point — let the user see the
-        # match before the slow, flags-prone stream extraction kicks in.
-        if not track.url:
-            label = f"**{track.title}**"
-            if track.artist:
-                label += f" — {track.artist}"
-            found_msg = await ctx.send(f"🎵 Found {label} — getting the stream…")
-            try:
-                track = await self._resolve_stream(track)
-            except Exception as exc:
-                LOG.warning("Stream resolve failed for %r: %s", query, exc)
-                if found_msg:
-                    await found_msg.delete()
-                hint = Music._failure_hint(exc)
-                await ctx.send(f"⚠️ {hint}" if hint
-                               else "⚠️ Couldn't get a stream for that track.")
-                return
-        track.requester_id = ctx.author.id
+        track = Music._track_from_playable(playable, ctx.author.id)
         fresh = player.current is None and not player.queue
         started = await player.enqueue(track)
         if fresh:
             player.host_id = ctx.author.id
-        if found_msg:
-            await found_msg.delete()
         if started and player.now_playing_message is None:
             await self._send_panel(ctx, player)
         elif not started:
@@ -830,7 +626,7 @@ class Music(commands.Cog):
         current = player.current
         try:
             seed_ids = await asyncio.to_thread(
-                self._radio_seed_ids, current.video_id, size)
+                youtube_provider.radio_seed_ids, current.video_id, size)
         except Exception as exc:
             LOG.warning("Auto-queue seed failed for %r: %s", current.title, exc)
             await ctx.send("⚠️ Couldn't generate a radio for the current track.")
@@ -839,16 +635,16 @@ class Music(commands.Cog):
             await ctx.send("⚠️ No related tracks found for the current track.")
             return
         await ctx.send(f"📻 Building a radio queue from **{current.title}**…")
-        tracks = await self._resolve_tracks(seed_ids)
-        if not tracks:
+        playables = await youtube_provider.resolve_parallel(seed_ids)
+        if not playables:
             await ctx.send("⚠️ Couldn't resolve any of the radio tracks.")
             return
-        for track in tracks:
-            track.requester_id = ctx.author.id
-            await player.enqueue(track)
+        for playable in playables:
+            await player.enqueue(
+                Music._track_from_playable(playable, ctx.author.id))
         await player._update_panel()
         await ctx.send(
-            f"➕ **{len(tracks)}** songs from the radio of **{current.title}** "
+            f"➕ **{len(playables)}** songs from the radio of **{current.title}** "
             f"added to the queue.")
 
     @commands.hybrid_command(name="nowplaying", description="Show the current track.")
@@ -863,6 +659,30 @@ class Music(commands.Cog):
         else:
             await player._update_panel()
             await ctx.send(embed=player.embed())
+
+    @commands.hybrid_command(name="radio",
+                             description="Play a public internet radio station.")
+    @commands.guild_only()
+    async def radio(self, ctx, station: str = "groovesalad"):
+        """Stream a public radio station — no search involved."""
+        await ctx.defer()
+        player = await self._ensure_voice(ctx)
+        if player is None:
+            return
+        try:
+            playable = radio_provider.resolve(station)
+        except SourceUnavailable as exc:
+            await ctx.send(f"⚠️ {exc.message}")
+            return
+        track = Music._track_from_playable(playable, ctx.author.id)
+        fresh = player.current is None and not player.queue
+        started = await player.enqueue(track)
+        if fresh:
+            player.host_id = ctx.author.id
+        if started and player.now_playing_message is None:
+            await self._send_panel(ctx, player)
+        elif not started:
+            await ctx.send(f"➕ **{track.title}** added to the queue.")
 
     # ── lyrics (LRCLIB) ─────────────────────────────────────────
     async def _lyrics_for(self, title: str, artist: str):
