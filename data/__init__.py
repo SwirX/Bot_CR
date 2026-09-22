@@ -5,3 +5,5 @@ NOTE: ``from data import store`` yields the ``Store()`` singleton (not the
 need the module itself, use ``import data.store`` / ``from data.store import``.
 """
 from data.store import Store, StoreError, store
+
+__all__ = ["Store", "StoreError", "store"]

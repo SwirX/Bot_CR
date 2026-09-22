@@ -303,7 +303,7 @@ class Fun(commands.Cog):
         motor = "CALIBRATING" if random.random() < 0.12 else "ONLINE"
         lines = [
             "🤖 **ROBOT STATUS**",
-            f"CPU:        ONLINE",
+            "CPU:        ONLINE",
             f"Motors:     {motor}",
             f"Sensors:    {sensors}/4",
             f"Battery:    {battery}%",

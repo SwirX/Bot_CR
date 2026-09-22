@@ -22,7 +22,6 @@ from uuid import uuid4
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config  # noqa: E402 - loads .env (endpoint/key) before the store
 from data.levels import level_from_xp  # noqa: E402
 from data.store import StoreError, store  # noqa: E402
 

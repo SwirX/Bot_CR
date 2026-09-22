@@ -45,6 +45,12 @@ _PAIR_TTL_SECONDS = config.MC_PAIR_KEY_TTL
 _OTP_TTL_SECONDS = config.MC_LINK_CODE_TTL
 # Join-spam guard: at most one fresh OTP per Discord user per window (§5.2.6).
 _MINT_COOLDOWN_SECONDS = 60
+# Wall-clock budget for one mint cycle. bcrypt-12 costs ~300ms per row, so a
+# backlog must not be able to monopolise the event loop.
+_MINT_CYCLE_BUDGET_SECONDS = 4.0
+# How many cycles a pending row may go undeliverable (no resolvable owner)
+# before it is expired so it stops holding a slot in the queue.
+_MAX_UNDELIVERABLE = 20
 # Contract §5.1: Minecraft usernames are 3–16 chars of letters/digits/_.
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
 
@@ -59,6 +65,10 @@ class McLink(commands.Cog):
         self._watch_task: asyncio.Task | None = None
         # discord_id -> epoch seconds of the last OTP minted (join-spam guard).
         self._last_mint: dict[int, float] = {}
+        # otp row id -> consecutive cycles it could not be delivered, so an
+        # unresolvable row is eventually expired instead of holding a queue
+        # slot forever (which used to be able to starve everyone out entirely).
+        self._undeliverable: dict[str, int] = {}
 
     # ── lifecycle ─────────────────────────────────────────────
     def _configured(self) -> bool:
@@ -281,37 +291,91 @@ class McLink(commands.Cog):
         """Fill plugin-armed minecraft_otp rows the plugin left as pending
         mint (``otp_hash == ""``), inside the contract: bcrypt-12 hash, fresh
         TTL, per-user cooldown, never re-mint a row that already has a hash.
+
+        Three things this loop used to get wrong, all of which could silently
+        stop *everyone* from logging in:
+
+        * bcrypt-12 ran inline on the event loop (~300ms per row). With a
+          backlog that is tens of seconds of a fully frozen gateway. It is now
+          offloaded to a thread, and the cycle has a wall-clock budget.
+        * A row whose owner could not be resolved was skipped forever, so it
+          stayed pending and consumed a slot in the queue indefinitely. After
+          ``_MAX_UNDELIVERABLE`` cycles it is expired, which drains the queue.
+        * Every failure path was a bare ``continue``. A rotated Appwrite key or
+          a schema change meant *no player ever got a code* and the only signal
+          was a user complaining. Failures are now logged.
         """
         try:
             pending = await store.mc_list_pending_otps()
-        except StoreError:
+        except StoreError as exc:
+            LOG.warning("mc-link watcher: could not list pending OTPs: %s", exc)
             return
+        if not pending:
+            return
+
+        deadline = time.monotonic() + _MINT_CYCLE_BUDGET_SECONDS
         now_epoch = time.time()
         for row in pending:
+            if time.monotonic() > deadline:
+                LOG.debug("mc-link watcher: mint budget exhausted, %d row(s) "
+                          "deferred to the next cycle", len(pending))
+                break
             account_id = _rel_id(row.get("minecraft_account"))
             if not account_id:
                 continue
             try:
                 owner = await store.mc_account_otp_owner(account_id)
-            except StoreError:
+            except StoreError as exc:
+                LOG.warning("mc-link watcher: owner lookup failed for %s: %s",
+                            account_id, exc)
                 continue
             if not owner:
-                continue  # no stable active link → nobody to send it to
-            username, discord_id = owner
+                # No stable active link → nobody to send it to. Age it out
+                # rather than letting it hold a queue slot forever.
+                row_id = row["$id"]
+                seen = self._undeliverable.get(row_id, 0) + 1
+                self._undeliverable[row_id] = seen
+                if seen >= _MAX_UNDELIVERABLE:
+                    LOG.warning("mc-link watcher: expiring undeliverable OTP row "
+                                "%s (account %s) after %d cycles — no active link",
+                                row_id, account_id, seen)
+                    try:
+                        await store.mc_expire_otp(row_id)
+                    except StoreError as exc:
+                        LOG.warning("mc-link watcher: could not expire %s: %s",
+                                    row_id, exc)
+                    self._undeliverable.pop(row_id, None)
+                continue
+            self._undeliverable.pop(row["$id"], None)
+            try:
+                discord_id = int(owner[1] or 0)
+            except (TypeError, ValueError):
+                # _rel_id returns str; one non-numeric value used to raise out
+                # of here and abort the entire cycle for every other player.
+                LOG.warning("mc-link watcher: non-numeric discord id %r for %s",
+                            owner[1], account_id)
+                continue
+            if not discord_id:
+                continue
+            username, _ = owner
             last = self._last_mint.get(discord_id)
             if last is not None and now_epoch - last < _MINT_COOLDOWN_SECONDS:
                 continue  # join-spam guard (§5.2.6)
             code = new_link_code()
             now = datetime.now(timezone.utc)
             try:
+                # bcrypt-12 is CPU-bound and blocking: never on the event loop.
+                otp_hash = await asyncio.to_thread(hash_otp, code)
                 minted = await store.mc_mint_otp(
                     row["$id"],
-                    otp_hash=hash_otp(code),
+                    otp_hash=otp_hash,
                     otp_salt=secrets.token_hex(16),
                     challenge_at=now.isoformat(),
                     expires_at=(now + timedelta(seconds=_OTP_TTL_SECONDS)
                                 ).isoformat())
-            except StoreError:
+            except StoreError as exc:
+                LOG.warning("mc-link watcher: mint failed for %s: %s",
+                            row["$id"], exc)
                 continue
             if not minted:
                 continue  # already minted/consumed by a racing cycle

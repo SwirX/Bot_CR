@@ -150,17 +150,25 @@ def _norm_iso(text: str) -> str:
 
 
 def _parse_ts(value) -> datetime | None:
-    """Parse a hub timestamp (ISO-8601, may end in Z) into a tz-aware
-    datetime; None on any unparseable/empty input (never raises)."""
+    """Parse a hub timestamp (ISO-8601, may end in Z) into a **tz-aware**
+    datetime; None on any unparseable/empty input (never raises).
+
+    A string with no offset (``2026-09-22T00:12:10``) used to come back naive
+    even though the docstring promised aware, so comparing it with an aware
+    value raised ``TypeError`` — which is not a ``StoreError`` and therefore
+    escaped the watcher cycle, silently skipping OTP minting *and* pair expiry
+    for every other player. Assume UTC when the source omits an offset.
+    """
     text = str(value or "").strip()
     if not text:
         return None
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _event_date_in(text) -> str:
@@ -300,6 +308,13 @@ class Store:
     _rel_cache: dict[str, tuple[str, ...]] | None = None
 
     async def _rel_columns(self, table: str) -> tuple[str, ...]:
+        # A failed introspection must NOT be cached. `cache = {}` is not None,
+        # so the old code stored it and never retried: one transient 502/timeout
+        # during the first-ever _patch disabled relationship-column handling for
+        # the whole process, and every write on memberships / links / otp /
+        # meetings / tasks / polls then 400'd with relationship_value_invalid —
+        # permanently, with only a warning at boot. Leaving it None means the
+        # next call retries.
         if self._rel_cache is None:
             cache: dict[str, tuple[str, ...]] = {}
             try:
@@ -312,24 +327,37 @@ class Store:
                     if rels:
                         cache[d.get("$id")] = rels
             except AppwriteException as exc:
-                LOG.warning("could not inspect table relationships: %s", exc)
-                cache = {}
+                LOG.warning("could not inspect table relationships: %s — "
+                            "will retry on next use", exc)
+                return ()
             self._rel_cache = cache
         return self._rel_cache.get(table, ())
 
     async def _write(self, table: str, row_id: str, data: dict,
-                     *, defaults: dict | None = None) -> None:
+                     *, defaults: dict | None = None,
+                     create_only: bool = False) -> None:
         """Patch an existing row, or create it with ``defaults`` + data.
 
         Partial-update semantics everywhere instead of full-row upserts: hub
         columns are stricker than the legacy free-form docs, and every call
         site knows exactly which values it wants to touch.
+
+        ``create_only`` refuses to patch an existing row. The human-friendly id
+        generators (poll/task codes) are read-then-write, so a collision would
+        otherwise *silently overwrite* a live row — two members creating a poll
+        at the same moment both got ``P-7`` and the second clobbered the first
+        with its votes. Raising turns that into a loud, retryable failure.
         """
         existing = await self._get(table, row_id)
         if existing is None:
             payload = dict(defaults or {})
             payload.update({k: v for k, v in data.items()})
             await self._create(table, row_id, payload)
+        elif create_only:
+            raise StoreError(
+                f"{table}/{row_id} already exists and this write is "
+                "create-only (refusing to overwrite)"
+            )
         else:
             await self._patch(table, row_id, data)
 
@@ -1041,7 +1069,8 @@ class Store:
         return self._task_out(row, meta.get("cell") or "",
                               str(meta.get("status") or ""))
 
-    async def save_task(self, payload: dict) -> None:
+    async def save_task(self, payload: dict, *,
+                         create_only: bool = False) -> None:
         task_id = payload.get("task_id")
         if not task_id:
             raise StoreError("save_task requires a task_id")
@@ -1074,7 +1103,22 @@ class Store:
                           defaults={"title": data["title"],
                                     "status": data["status"],
                                     "priority": data["priority"],
-                                    "source": "bot"})
+                                    "source": "bot"},
+                          create_only=create_only)
+
+    async def create_task(self, payload: dict, *, attempts: int = 5) -> str:
+        """Create a task under the next free ``T-N`` code. Returns the id."""
+        for _ in range(attempts):
+            task_id = await self.next_task_code()
+            try:
+                await self.save_task({**payload, "task_id": task_id},
+                                      create_only=True)
+                return task_id
+            except StoreError as exc:
+                if "create-only" not in str(exc):
+                    raise
+                LOG.info("task code %s collided; retrying with the next", task_id)
+        raise StoreError("could not allocate a free task id")
 
     async def _ensure_members_row(self, member_id: str) -> str:
         """Lazily create the members stub a club-state FK points at."""
@@ -1090,9 +1134,14 @@ class Store:
         return member_id
 
     async def next_task_code(self) -> str:
-        """Next human-friendly task id, e.g. T-13 (skips existing codes)."""
-        rows = await self._listed(_T["tasks"], 100)
-        used = {str(r["$id"]) for r in rows}
+        """Next human-friendly task id, e.g. T-13 (skips existing codes).
+
+        Paged to exhaustion: the previous first-100-rows version derived the
+        number from a truncated id set, so past 100 tasks it could hand out a
+        code that already existed — and ``save_task`` patches on collision,
+        which would have silently overwritten a live task.
+        """
+        used = await self._existing_ids(_T["tasks"])
         n = len(used) + 1
         code = f"T-{n}"
         while code in used:
@@ -1296,7 +1345,8 @@ class Store:
             return None
         return self._poll_out(row)
 
-    async def save_poll(self, poll_id: str, payload: dict) -> None:
+    async def save_poll(self, poll_id: str, payload: dict, *,
+                         create_only: bool = False) -> None:
         created_by = str(payload.get("created_by") or "").strip()
         if created_by:
             await self._ensure_members_row(created_by)
@@ -1315,18 +1365,65 @@ class Store:
                           defaults={"question": data["question"],
                                     "hide_results": data["hide_results"],
                                     "closed": data["closed"],
-                                    "source": "bot"})
+                                    "source": "bot"},
+                          create_only=create_only)
+
+    async def create_poll(self, payload: dict, *, attempts: int = 5) -> str:
+        """Create a poll under the next free ``P-N`` code. Returns the id.
+
+        ``next_poll_code`` is read-then-write, so two concurrent creates can
+        pick the same code. Creating create-only turns that silent overwrite
+        (which destroyed the first poll *and* its votes) into a retry.
+        """
+        for _ in range(attempts):
+            poll_id = await self.next_poll_code()
+            try:
+                await self.save_poll(poll_id, payload, create_only=True)
+                return poll_id
+            except StoreError as exc:
+                if "create-only" not in str(exc):
+                    raise
+                LOG.info("poll code %s collided; retrying with the next", poll_id)
+        raise StoreError("could not allocate a free poll id")
 
     async def next_poll_code(self) -> str:
-        """Next human-friendly poll id, e.g. P-7 (skips existing ids)."""
-        rows = await self._listed(_T["polls"], 100)
-        used = {str(r["$id"]) for r in rows}
+        """Next human-friendly poll id, e.g. P-7 (skips existing ids).
+
+        Two bugs lived here. It paged only the first 100 rows, so with more
+        than 100 polls ``len(used) + 1`` derived the number from a truncated
+        set and could return an id that already existed off-page. And because
+        the caller then went through ``_write`` — which *patches* when the row
+        exists — two concurrent creates both landing on ``P-7`` silently
+        overwrote the first poll and all of its votes, with no error anywhere.
+        """
+        used = await self._existing_ids(_T["polls"])
         n = len(used) + 1
         code = f"P-{n}"
         while code in used:
             n += 1
             code = f"P-{n}"
         return code
+
+    async def _existing_ids(self, table: str, cap: int = 20_000) -> set[str]:
+        """Every row id in ``table`` (paged to exhaustion up to ``cap``).
+
+        Used by the human-friendly code generators. A truncated id set makes
+        them hand out codes that already exist, which ``_write`` then turns
+        into a silent data-destroying overwrite.
+        """
+        ids: set[str] = set()
+        offset = 0
+        page = 25
+        while len(ids) < cap:
+            rows = await self._list(
+                table, [Query.limit(page), Query.offset(offset)])
+            if not rows:
+                break
+            ids.update(str(r.get("$id")) for r in rows)
+            if len(rows) < page:
+                break
+            offset += page
+        return ids
 
     # ── Minecraft login (OTP-only) + links ───────────────────
     # OTP-only contract (mc-link plugin, MITIGATION-PLAN §5):
@@ -1439,10 +1536,19 @@ class Store:
     # ── OTP minting ──────────────────────────────────────────
     async def mc_list_pending_otps(self) -> list[dict]:
         """minecraft_otp rows the plugin armed but no code is minted for yet
-        (enabled with an empty otp_hash — the "pending mint" state)."""
+        (enabled with an empty otp_hash — the "pending mint" state).
+
+        FIFO by ``challenge_at`` so the queue actually drains, and paged far
+        past the old 100-row cap. That cap had no ordering and no drain path:
+        rows whose owner couldn't be resolved stayed pending forever, so once
+        100 accumulated the same arbitrary page came back every cycle and
+        **no new player could ever receive a login OTP** — a silent, total
+        Minecraft login lockout.
+        """
         rows = await self._listed(
-            _T["minecraft_otp"], 100,
-            queries=[Query.equal("enabled", True)])
+            _T["minecraft_otp"], 1000,
+            queries=[Query.equal("enabled", True),
+                     Query.order_asc("challenge_at")])
         return [r for r in rows if not str(r.get("otp_hash") or "")]
 
     async def mc_mint_otp(self, row_id: str, *, otp_hash: str, otp_salt: str,
@@ -1478,7 +1584,18 @@ class Store:
         Unlike ``mc_mint_otp`` this also revives rows the watcher expired
         (enabled=False) after its own DM failed, so a closed-DM player at the
         login screen can pull the code through ``/mcotp`` instead of being
-        stuck waiting for a DM that never arrives. False when the row is gone.
+        stuck waiting for a DM that never arrives. False when the row is gone
+        or when there is nothing to re-arm.
+
+        Two things it deliberately does NOT do any more:
+
+        * It refuses to replace a *live* code. The row was fetched but ignored,
+          so ``/mcotp`` overwrote whatever was there — including a consumed
+          credential slot — and let a user mint unbounded codes at 2/min,
+          bypassing the watcher's cooldown entirely.
+        * It no longer resets ``failed_attempts``. That column is the plugin's
+          brute-force lockout; zeroing it from a user-facing button made the
+          lockout trivially resettable.
         """
         if not row_id:
             return False
@@ -1490,13 +1607,20 @@ class Store:
             if is_missing(exc):
                 return False
             raise StoreError(f"rearm otp {row_id}: {exc}") from exc
+
+        # Refuse when there is already a live, unexpired, minted code.
+        data = self._row_data(row)
+        if data.get("enabled") and str(data.get("otp_hash") or ""):
+            expires = _parse_ts(data.get("expires_at"))
+            if expires is not None and expires > datetime.now(timezone.utc):
+                return False
+
         await self._patch(_T["minecraft_otp"], row_id, {
             "enabled": True,
             "otp_hash": otp_hash,
             "otp_salt": otp_salt,
             "challenge_at": challenge_at,
             "expires_at": expires_at,
-            "failed_attempts": 0,
         })
         return True
 

@@ -10,7 +10,7 @@ from discord.ext import commands, tasks
 import config
 from data.store import store
 from data.store import StoreError
-from data.levels import level_from_xp, xp_for_level, xp_progress
+from data.levels import level_from_xp, xp_progress
 from cogs._ui import PaginatorView
 from cogs._perms import mod_perms
 

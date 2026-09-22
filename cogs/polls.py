@@ -214,7 +214,7 @@ def _results_embed(poll: dict, ctx) -> discord.Embed:
     closed_at = _fmt_dt(poll.get("closed_at"))
     footer = (f"Created {created}" if created else "")
     if closed_at:
-        footer += (f" · " if footer else "") + f"Closed {closed_at}"
+        footer += (" · " if footer else "") + f"Closed {closed_at}"
     if footer:
         embed.set_footer(text=footer)
     return embed
@@ -319,7 +319,14 @@ class PollVoteView(discord.ui.View):
             return
         LOG.info("Poll %s: %s voted option %d via button (%s)",
                  self.poll_id, interaction.user, idx, mode)
+        # Update the shared embed first (this consumes the interaction
+        # response), then confirm privately. ``msg`` used to be built and
+        # dropped, so a voter got a silently-changed panel and no feedback.
         await interaction.response.edit_message(embed=_poll_embed(poll), view=self)
+        try:
+            await interaction.followup.send(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass  # the embed already reflects the vote; the hint is optional
 
 
 class Polls(commands.Cog):
