@@ -16,6 +16,9 @@ class Playable:
     duration: int | None = None
     thumbnail: str = ""
     headers: dict = field(default_factory=dict)
+    # Decrypted local audio file to feed ffmpeg directly (Deezer streams are
+    # BF-CBC striped; ffmpeg cannot decode the raw CDN file).
+    local_path: str = ""
 
 
 @dataclass(frozen=True)

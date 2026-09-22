@@ -6,6 +6,7 @@ Hermetic: providers are faked; nothing touches YouTube, Audius or Discord.
 
 import asyncio
 import dataclasses
+import hashlib
 import os
 import sys
 import unittest
@@ -120,6 +121,70 @@ class RadioTests(unittest.TestCase):
     def test_unknown_station_raises(self):
         with self.assertRaises(SourceUnavailable):
             radio.resolve("nope")
+
+
+class DeezerDrmTests(unittest.TestCase):
+    """Decryption mechanics, exercised without any network or ARL."""
+
+    def test_blowfish_key_matches_documented_derivation(self):
+        from cogs.music_sources.deezer_gw import _BF_SECRET, blowfish_key
+        digest = hashlib.md5(b"31337").hexdigest().encode("ascii")
+        expected = bytes(digest[i] ^ digest[i + 16] ^ _BF_SECRET[i]
+                         for i in range(16))
+        self.assertEqual(blowfish_key(31337), expected)
+
+    def test_decrypt_restores_striped_audio(self):
+        from Crypto.Cipher import Blowfish
+        from cogs.music_sources.deezer_gw import (
+            _BF_IV, CHUNK_BYTES, blowfish_key, decrypt_chunks,
+        )
+
+        async def _aiter(items):
+            for item in items:
+                yield item
+
+        track_id = 7
+        key = blowfish_key(track_id)
+        full_chunk = bytes(range(256)) * 8  # 256 * 8 == 2048
+        plain = [full_chunk for _ in range(7)]
+        striped = []
+        for index, chunk in enumerate(plain):
+            if index % 3 == 0:
+                cipher = Blowfish.new(key, Blowfish.MODE_CBC, _BF_IV)
+                striped.append(cipher.encrypt(chunk))
+            else:
+                striped.append(chunk)
+        striped.append(b"\x00trailing-partial-chunk")
+
+        async def _decrypt_all():
+            return [c async for c in decrypt_chunks(_aiter(striped), track_id)]
+
+        self.assertEqual(
+            b"".join(asyncio.run(_decrypt_all())),
+            b"".join(plain) + b"\x00trailing-partial-chunk")
+
+    def test_unknown_track_id_changes_key(self):
+        from cogs.music_sources.deezer_gw import blowfish_key
+        self.assertNotEqual(blowfish_key(1), blowfish_key(2))
+
+
+class DeezerGuardTests(unittest.TestCase):
+    def test_missing_arl_disables_provider_without_network(self):
+        from cogs.music_sources import deezer
+        saved = os.environ.get("DEEZER_ARL")
+        os.environ.pop("DEEZER_ARL", None)
+        try:
+            with self.assertRaises(SourceUnavailable) as ctx:
+                asyncio.run(deezer.resolve("ed sheeran"))
+            self.assertEqual(ctx.exception.reason_code, "no_config")
+        finally:
+            if saved is not None:
+                os.environ["DEEZER_ARL"] = saved
+
+    def test_registry_orders_youtube_deezer_audius(self):
+        from cogs.music_sources import audius, deezer, youtube
+        self.assertEqual(sources._PROVIDERS,
+                         (youtube.resolve, deezer.resolve, audius.resolve))
 
 
 if __name__ == "__main__":

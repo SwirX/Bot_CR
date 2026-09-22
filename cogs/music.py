@@ -82,6 +82,9 @@ class Track:
     requester_id: int | None = None
     headers: dict = field(default_factory=dict)
     votes: set = field(default_factory=set)
+    # Decrypted local audio file (Deezer); when set, playback reads this path
+    # instead of `url`.
+    local_path: str = ""
 
 
 class MusicPlayer:
@@ -177,6 +180,11 @@ class MusicPlayer:
         if self._audio_factory is not None:
             return self._audio_factory(track)
         before = FFMPEG_BEFORE
+        if track.local_path:
+            return discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(
+                    track.local_path, before_options=before, options="-vn"),
+                volume=self.volume)
         if track.headers:
             before = f"{before} {_header_option(track.headers)}"
         audio = discord.FFmpegPCMAudio(
@@ -449,6 +457,7 @@ class Music(commands.Cog):
             artist=playable.artist,
             requester_id=requester_id,
             headers=playable.headers,
+            local_path=playable.local_path,
         )
 
     async def _ensure_voice(self, ctx) -> MusicPlayer | None:

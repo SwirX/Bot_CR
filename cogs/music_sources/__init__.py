@@ -1,15 +1,15 @@
 """Source-agnostic music resolution: first provider to yield a stream wins.
 
-Ordered providers are tried per query (YouTube, then Audius). Failures are
-recorded rather than re-raised so a blocked source never kills the chain; when
-every provider fails, AllSourcesFailed carries the details so the caller can
-surface the most actionable hint.
+Ordered providers are tried per query (YouTube, then Deezer, then Audius).
+Failures are recorded rather than re-raised so a blocked source never kills
+the chain; when every provider fails, AllSourcesFailed carries the details so
+the caller can surface the most actionable hint.
 """
 
-from . import audius, youtube
+from . import audius, deezer, youtube
 from .model import AllSourcesFailed, Playable, SourceFailure, SourceUnavailable
 
-_PROVIDERS = (youtube.resolve, audius.resolve)
+_PROVIDERS = (youtube.resolve, deezer.resolve, audius.resolve)
 
 
 async def resolve_playable(query: str) -> Playable:
