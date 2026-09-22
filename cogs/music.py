@@ -119,6 +119,25 @@ def fmt_duration(seconds) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def progress_bar(elapsed: float | None, duration: int | None,
+                 slots: int = 15) -> str:
+    """A single-line playback bar for the now-playing embed.
+
+    The old embed showed only the total duration, so "where in the song is
+    it?" always meant guessing. A bar reads at a glance; it is plain block
+    glyphs because emoji progress bars render differently per client. An
+    unknown-length track (live radio) gets an open-ended bar with a pulsing
+    head rather than a fake 0%.
+    """
+    if duration and duration > 0 and elapsed is not None:
+        ratio = min(1.0, max(0.0, elapsed / duration))
+        filled = int(ratio * slots)
+        return "█" * filled + "░" * (slots - filled)
+    # No duration to measure against: show movement without pretending to know.
+    head = 0 if elapsed is None else (int(elapsed // 5) % slots)
+    return "░" * head + "█" + "░" * (slots - head - 1)
+
+
 class MusicPlayer:
     """Per-guild queue + playback state machine (voice injected for tests)."""
 
@@ -159,10 +178,49 @@ class MusicPlayer:
         self._intentional_leave = False
         # One open skip/remove motion at a time (new votes replace old ones).
         self._vote: _Vote | None = None
+        # Elapsed-time tracking for the live progress bar: a monotonic start
+        # stamp per track, plus elapsed seconds captured at pause time.
+        self._track_started_at: float | None = None
+        self._paused_elapsed: float | None = None
+        # One long-lived task per session that edits the panel message in
+        # place on a timer — the old delete+repost churn is gone.
+        self._panel_task: asyncio.Task | None = None
+
 
     def _touch(self):
         """Note recent activity so the idle watchdog doesn't disconnect."""
         self._last_active = time.monotonic()
+
+    # ── progress-bar clock ───────────────────────────────────
+    def track_elapsed(self) -> float | None:
+        """Seconds into the current track, None when nothing plays.
+
+        Pause freezes the clock (captured into ``_paused_elapsed``); resume
+        shifts the monotonic base forward so the bar continues, never jumps.
+        """
+        if self.current is None:
+            return None
+        if self._paused_elapsed is not None:
+            return self._paused_elapsed
+        if self._track_started_at is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._track_started_at)
+
+    def pause_voice(self) -> bool:
+        if self.voice is None or not self.voice.is_playing():
+            return False
+        self._paused_elapsed = self.track_elapsed()
+        self.voice.pause()
+        return True
+
+    def resume_voice(self) -> bool:
+        if self.voice is None or not self.voice.is_paused():
+            return False
+        held = self._paused_elapsed or 0.0
+        self._track_started_at = time.monotonic() - held
+        self._paused_elapsed = None
+        self.voice.resume()
+        return True
 
     # ── auto-radio ────────────────────────────────────────────
     @staticmethod
@@ -279,6 +337,39 @@ class MusicPlayer:
             self._watchdog_task.cancel()
             self._watchdog_task = None
 
+    # ── panel refresh clock ─────────────────────────────────────
+    def _start_panel_refresh(self):
+        if self._panel_task is not None:
+            self._panel_task.cancel()
+        self._panel_task = asyncio.create_task(self._panel_refresh())
+
+    async def _panel_refresh(self):
+        """Edit the panel's progress bar in place on a short timer.
+
+        The old panel only moved when a command touched it, so its timestamps
+        lied. This task re-renders the embed every few seconds; the message
+        itself is never reposted on the happy path, which is the anti-churn
+        half of it.
+        """
+        try:
+            while True:
+                await asyncio.sleep(5)
+                if self.current is None or self.text_channel is None:
+                    return
+                message = self.now_playing_message
+                if message is None:
+                    continue
+                try:
+                    await message.edit(embed=self.embed(),
+                                       view=self.now_playing_view)
+                except discord.NotFound:
+                    self.now_playing_message = None
+                    return  # the member deleted it; don't fight the delete
+                except discord.HTTPException:
+                    pass  # transient rate-limit/server hiccup — try next tick
+        except asyncio.CancelledError:
+            return
+
     # ── queue / playback ────────────────────────────────────────
     async def enqueue(self, track: Track):
         """Add a track; start playback only when nothing else is busy.
@@ -312,11 +403,13 @@ class MusicPlayer:
         self.current.votes.clear()
         if self.auto_radio:
             self.note_radio_play(track)
+        self._track_started_at = time.monotonic()
+        self._paused_elapsed = None
         source = self._make_source(track)
         self.voice.play(source, after=self._after_hook)
-        await self._announce_current()
         await self._update_panel()
         self._maybe_refill()
+        self._start_panel_refresh()
 
     def _make_source(self, track: Track):
         if self._audio_factory is not None:
@@ -345,6 +438,9 @@ class MusicPlayer:
         never double-post a message in a different style.
         """
         await self._cancel_watchdog()
+        if self._panel_task is not None:
+            self._panel_task.cancel()
+            self._panel_task = None
         self.cancel_vote()
         self.auto_radio = False
         self._radio_history.clear()
@@ -513,7 +609,6 @@ class MusicPlayer:
         embed.description = desc or None
         if track.thumbnail:
             embed.set_thumbnail(url=track.thumbnail)
-        embed.add_field(name="Duration", value=fmt_duration(track.duration), inline=True)
         embed.add_field(name="Loop", value="🔂 On" if self.loop else "Off", inline=True)
         if self._vote is not None:
             vote = self._vote
@@ -522,6 +617,18 @@ class MusicPlayer:
                 name="🗳️ Vote to skip" if vote.kind == "skip" else "🗳️ Vote to remove",
                 value=f"👍 {len(vote.yes)} · 👎 {len(vote.no)} · {seconds}s to decide",
                 inline=True)
+        elapsed = self.track_elapsed()
+        if elapsed is None:
+            total_line = fmt_duration(track.duration)
+        elif track.duration:
+            total_line = f"{fmt_duration(min(elapsed, track.duration))} / {fmt_duration(track.duration)}"
+        else:
+            total_line = f"{fmt_duration(elapsed)} elapsed"
+        status = "⏸️ Paused" if self._paused_elapsed is not None else "▶️ Playing"
+        embed.add_field(
+            name="Progress",
+            value=f"{progress_bar(elapsed, track.duration)}\n{status} · {total_line}",
+            inline=False)
         if self.queue:
             lines = "\n".join(
                 f"{i + 1}. **{t.title}**" for i, t in enumerate(list(self.queue)[:6]))
@@ -531,45 +638,53 @@ class MusicPlayer:
             embed.add_field(name="Up next", value="—", inline=False)
         return embed
 
-    async def _announce_current(self) -> None:
-        """One chat line announcing the track that just started."""
-        if self.text_channel is None or self.current is None:
-            return
-        try:
-            await self.text_channel.send(
-                content=f"🎵 Now playing: **{self.current.title}**")
-        except discord.HTTPException:
-            pass
-
     async def _update_panel(self, stopped: str = ""):
-        """(Re)post the now-playing panel so it stays the newest chat message.
+        """(Re)post the now-playing panel — editing in place on the happy path.
 
-        The old panel is deleted and a fresh copy — control view included —
-        is sent to the player's text channel: no buttons ever sit on a buried
-        message, and the panel is always one message the user can act on.
-        ``stopped`` posts a plain notice without controls instead.
+        The old implementation deleted the panel and reposted it on *every*
+        state change, which filled the music channel with a fresh embed for
+        each vote, button tap and queue update. Now the same message is
+        edited whenever it can be (stale after a manual deletion, or its
+        view hangs off an older generation: then it is reposted once).
+        ``stopped`` retires the controls and posts a single plain line.
         """
-        old = self.now_playing_message
-        self.now_playing_message = None
-        self.now_playing_view = None
-        if old is not None:
-            try:
-                await old.delete()
-            except (discord.HTTPException, discord.NotFound):
-                pass
+        if stopped:
+            old = self.now_playing_message
+            self.now_playing_message = None
+            self.now_playing_view = None
+            if old is not None:
+                try:
+                    await old.delete()
+                except (discord.HTTPException, discord.NotFound):
+                    pass
+            if self.text_channel is not None:
+                try:
+                    await self.text_channel.send(content=stopped)
+                except (discord.HTTPException, discord.NotFound):
+                    pass
+            return
         if self.text_channel is None:
             return
         view = None
-        if not stopped and self.now_playing_view_factory is not None:
+        if self.now_playing_view_factory is not None:
             view = self.now_playing_view_factory()
-        embed = self.embed(stopped=stopped)
+        embed = self.embed()
+        old = self.now_playing_message
+        if old is not None:
+            try:
+                await old.edit(embed=embed, view=view)
+                self.now_playing_view = view
+                return
+            except discord.NotFound:
+                self.now_playing_message = None  # deleted; post fresh below
+            except discord.HTTPException:
+                pass  # view reset? try a fresh message once
         try:
             message = await self.text_channel.send(embed=embed, view=view)
         except (discord.HTTPException, discord.NotFound):
             return
-        if not stopped:
-            self.now_playing_message = message
-            self.now_playing_view = view
+        self.now_playing_message = message
+        self.now_playing_view = view
 
 
 class SearchPickView(discord.ui.View):
@@ -670,10 +785,10 @@ class NowPlayingView(discord.ui.View):
                 ephemeral=True)
             return
         if player.voice.is_paused():
-            player.voice.resume()
+            player.resume_voice()
             feedback = "▶️ Resumed"
         elif player.voice.is_playing():
-            player.voice.pause()
+            player.pause_voice()
             feedback = "⏸️ Paused"
         else:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
@@ -780,6 +895,8 @@ class Music(commands.Cog):
             player._watchdog_task.cancel()
         if player._refill_task is not None:
             player._refill_task.cancel()
+        if player._panel_task is not None:
+            player._panel_task.cancel()
 
     def _can_control(self, member: discord.Member, player: MusicPlayer) -> bool:
         """Who may use destructive controls on this guild's shared player.
@@ -798,6 +915,8 @@ class Music(commands.Cog):
     async def cog_unload(self):
         for player in list(self.players.values()):
             player._intentional_leave = True
+            if player._panel_task is not None:
+                player._panel_task.cancel()
             if player.voice and player.voice.is_connected():
                 await player.voice.disconnect()
         if self._http is not None and not self._http.closed:
@@ -925,7 +1044,7 @@ class Music(commands.Cog):
             await ctx.send("🔒 Only the session host, the current requester, or staff "
                            "can control the player.")
             return
-        player.voice.pause()
+        player.pause_voice()
         await player._update_panel()
         await ctx.send("⏸️ Paused.", delete_after=8)
 
@@ -940,7 +1059,7 @@ class Music(commands.Cog):
             await ctx.send("🔒 Only the session host, the current requester, or staff "
                            "can control the player.")
             return
-        player.voice.resume()
+        player.resume_voice()
         await player._update_panel()
         await ctx.send("▶️ Resumed.", delete_after=8)
 
