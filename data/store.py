@@ -560,7 +560,8 @@ class Store:
 
         # Discord-side identity -> discord_users.
         du = {k: data[k] for k in
-              ("username", "display_name", "avatar_url", "joined_at") if k in data}
+              ("username", "display_name", "avatar_url", "joined_at",
+               "role_id") if k in data}
         if du:
             await self._write(_T["discord_users"], uid, du,
                               defaults={"username": du.get("username") or ""})

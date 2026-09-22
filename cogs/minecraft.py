@@ -26,7 +26,6 @@ import struct
 import time
 import uuid as uuidlib
 from datetime import datetime, timezone
-from typing import Literal
 
 import aiohttp
 import discord
@@ -35,7 +34,8 @@ from discord.ext import commands
 import config
 from data.store import store
 from cogs._scopes import scopes_for_author
-from cogs._ui import LoggedView, close_panel
+from cogs._perms import role_key
+from cogs._ui import LoggedView, OwnerView, close_panel
 from i18n.core import resolve_member_lang, t
 
 LOG = logging.getLogger("bot.minecraft")
@@ -255,11 +255,12 @@ class Minecraft(commands.Cog):
         """
         if member.id in config.MC_CONTROL_USER_IDS:
             return True
-        wanted = config.ROLE_ARCHON.strip().lower()
-        return any(
-            role.name.strip().lower() == wanted or "archon" in role.name.strip().lower()
-            for role in member.roles
-        )
+        # Exact (emoji-stripped) match only. The previous `"archon" in name`
+        # substring test let "Archon Intern" / "Co-Archon" / "Not Archon"
+        # start and stop the production server; every other role check in the
+        # codebase normalises through role_key and compares for equality.
+        wanted = role_key(config.ROLE_ARCHON)
+        return any(role_key(role.name) == wanted for role in member.roles)
 
     @staticmethod
     def _can_manage_link(user: discord.Member, member: discord.Member) -> bool:
@@ -540,37 +541,6 @@ class Minecraft(commands.Cog):
         hub = (record or {}).get("mc_hub_link")
         return hub if isinstance(hub, dict) and hub.get("username") else None
 
-    async def _save_mc_link(self, user_id: int, canonical: str, account_type: str,
-                            entries: list, linked_at: str) -> None:
-        """Persist the Discord ↔ Minecraft link as the structured identity slot.
-
-        ``links`` is read-modify-write so future platforms (e.g. ``robotics``)
-        survive alongside ``minecraft``; ``mc_username`` stays for back-compat.
-        The map is stored as JSON text (TablesDB keeps it in the member
-        sidecar; Appwrite has no object attribute type). The verified link is
-        also mirrored into the hub's discord_mc_links / minecraft_accounts
-        rows so the plugin's login layer sees the same truth.
-        """
-        record = await self._record_for(user_id)
-        links = Minecraft._links_of(record)
-        links["minecraft"] = {
-            "username": canonical,
-            "type": account_type,
-            "uuids": [e["uuid"] for e in entries],
-            "linked_at": linked_at,
-        }
-        await store.merge_member(user_id, {"links": json.dumps(links),
-                                           "mc_username": canonical})
-        try:
-            primary = entries[0]["uuid"] if entries else None
-            await store.mc_upsert_link(
-                user_id, canonical, verified_at=linked_at,
-                account_uuid=primary,
-                is_cracked=(account_type == "free"))
-        except Exception as exc:  # noqa: BLE001 - hub mirror is best-effort
-            LOG.warning("linkmc: could not mirror hub link for %s: %s",
-                        user_id, exc)
-
     async def _clear_mc_link(self, user_id: int) -> None:
         record = await self._record_for(user_id)
         links = Minecraft._links_of(record)
@@ -664,103 +634,15 @@ class Minecraft(commands.Cog):
             )
         return embed
 
-    # ── whitelist ─────────────────────────────────────────────
-    @commands.hybrid_command(name="linkmc",
-                             description="Whitelist a Minecraft username (free or paid account).")
-    @commands.guild_only()
-    @commands.cooldown(3, 60, commands.BucketType.user)
-    async def linkmc(self, ctx: commands.Context, username: str,
-                     account: Literal["free", "paid"]):
-        """Add <username> to Robotics CMC's whitelist (self-service).
-
-        account: \"paid\" if it's a bought Minecraft account (adds the real
-        UUID so the official launcher works too), \"free\" for offline/cracked
-        accounts (adds the offline UUID of the exact name as typed).
-        """
-        try:
-            await ctx.defer()
-        except discord.HTTPException:
-            pass
-        lang = await self._lang(ctx)
-        if not await self._require_configured(ctx, lang):
-            return
-        ok, text = await self._run_link(ctx.author, username, account, lang)
-        await ctx.send(text)
-
-    async def _run_link(self, member: discord.Member, username: str,
-                        account: str, lang: str) -> tuple[bool, str]:
-        """Prepare + apply a whitelist link (shared by /linkmc and the menu).
-
-        Returns (ok, message). On success also persists the structured
-        ``links.minecraft`` identity record for audit and the profile hub.
-        """
-        username = username.strip()
-        if not _USERNAME_RE.match(username):
-            return False, t("linkmc.not_username", lang)
-        if account == "paid":
-            # Paid account — whitelist the REAL uuid (official launcher) AND
-            # the offline uuid of the same exact name (offline launchers), so
-            # the member is covered whichever launcher they use.
-            profile = await mojang_profile(username)
-            if profile:
-                canonical = profile.get("name", username)
-                try:
-                    real_uuid = str(uuidlib.UUID(profile["id"]))
-                except (KeyError, TypeError, ValueError):
-                    real_uuid = _offline_uuid(canonical)  # never write junk
-                entries_to_add = [
-                    {"uuid": real_uuid, "name": canonical},
-                    {"uuid": _offline_uuid(canonical), "name": canonical},
-                ]
-                note = t("linkmc.note_paid", lang)
-            else:
-                # Claimed paid but Mojang doesn't know the name — don't write
-                # a fake real UUID; add the offline entry and tell the member.
-                canonical = username
-                entries_to_add = [
-                    {"uuid": _offline_uuid(canonical), "name": canonical},
-                ]
-                note = t("linkmc.note_paid_unknown", lang)
-        else:
-            # Free (cracked) account: whitelist the offline uuid of the EXACT
-            # name as typed. Mojang's capitalisation of the same letters is a
-            # different account ("hatim" !== "Hatim"), so it must never be
-            # reused here.
-            canonical = username
-            entries_to_add = [
-                {"uuid": _offline_uuid(canonical), "name": canonical},
-            ]
-            note = t("linkmc.note_free", lang)
-
-        try:
-            async with self._new_session() as session:
-                state = await server_state(session)
-                existing = await read_whitelist(session)
-                known = {str(e.get("uuid")) for e in existing}
-                fresh = [e for e in entries_to_add if e["uuid"] not in known]
-                if not fresh:
-                    return False, t("linkmc.already", lang, name=canonical)
-                existing.extend(fresh)
-                # Write the file directly and reload if running — uniform for
-                # both states, and the only way to get the real-UUID entry in
-                # (console \"whitelist add\" only derives the offline UUID on
-                # an offline-mode server).
-                await write_whitelist(session, existing)
-                if state == "running":
-                    await send_command(session, "whitelist reload")
-                    msg = t("linkmc.success_running", lang, name=canonical)
-                else:
-                    msg = t("linkmc.success_stopped", lang, name=canonical)
-        except Exception as exc:
-            LOG.warning("linkmc failed for %r: %s", canonical, exc)
-            return False, t("linkmc.failed", lang)
-        try:
-            await self._save_mc_link(member.id, canonical, account,
-                                     entries_to_add, _now_iso())
-        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
-            LOG.warning("linkmc: could not save link for %s: %s", member.id, exc)
-        await self._ensure_mc_role(member)
-        return True, msg + note + t("linkmc.linked_audit", lang)
+    # ── unlink ───────────────────────────────────────────────
+    # NOTE: there is deliberately no `/linkmc` self-service whitelist command.
+    # It self-asserted ownership of a Minecraft name (no in-game proof) and
+    # wrote an *active* discord_mc_links row, which is exactly what the OTP
+    # watcher treats as "this Discord user owns that account" — so anyone
+    # could claim an unlinked name and receive the victim's login code: a full
+    # account takeover. Linking now happens ONLY through `/mclink`, which
+    # creates a pending pair and requires the in-game `/mcverify <code>` to
+    # prove ownership before the link becomes active.
 
     async def _run_unlink(self, member: discord.Member, lang: str) -> tuple[bool, str]:
         """Remove the member's whitelist entries + identity record (menu flow)."""
@@ -791,17 +673,6 @@ class Minecraft(commands.Cog):
             LOG.warning("unlink: could not clear record for %s: %s", member.id, exc)
         await self._drop_mc_role(member)
         return True, t("mc.unlink.done", lang, name=name)
-
-    @linkmc.error
-    async def linkmc_error(self, ctx: commands.Context, error: commands.CommandError):
-        if isinstance(error, (commands.MissingRequiredArgument,
-                              commands.BadArgument)):
-            lang = await self._lang(ctx)
-            await ctx.send(
-                t("linkmc.usage_title", lang) + "\n" + t("linkmc.usage_body", lang)
-            )
-            return
-        raise error  # cooldown and friends keep the default handling
 
     # ── server power control (operator/Archon only) ──────────
     @commands.hybrid_command(name="mcstart",
@@ -1007,8 +878,8 @@ class MinecraftHubView(LoggedView, discord.ui.View):
     @discord.ui.button(emoji="🔗", style=discord.ButtonStyle.primary, row=0)
     async def link(self, interaction: discord.Interaction,
                    _button: discord.ui.Button):
-        view = LinkChoiceView(self.cog, self.lang, self.member,
-                              home_factory=self._home)
+        view = LinkInfoView(self.cog, self.lang, self.member,
+                            home_factory=self._home)
         await interaction.response.edit_message(embed=await view.embed(), view=view)
 
     @discord.ui.button(emoji="❌", style=discord.ButtonStyle.danger, row=0)
@@ -1032,75 +903,39 @@ class MinecraftHubView(LoggedView, discord.ui.View):
         await close_panel(interaction, text=t("mc.hub.closed", self.lang))
 
 
-class LinkChoiceView(discord.ui.View):
-    """Step 1 of the link flow: paid or free account (then a username modal)."""
+class LinkInfoView(LoggedView, discord.ui.View):
+    """Routing panel: linking now happens exclusively through ``/mclink``.
+
+    Replaces the old paid/free -> username-modal flow, which self-asserted
+    ownership of a Minecraft name. ``/mclink`` mints a pairing code the member
+    must prove in-game with ``/mcverify <code>``, so the link only becomes
+    active once the account holder actually logs in.
+    """
 
     def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
                  *, home_factory=None, timeout: float = 180.0):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member = cog, lang, member
         self.home_factory = home_factory
-        self.paid.label = t("mc.link.type_paid", lang)
-        self.free.label = t("mc.link.type_free", lang)
         self.back.label = t("mc.hub.back", lang)
 
     async def embed(self) -> discord.Embed:
         return discord.Embed(
             title=t("mc.link.ask_title", self.lang),
-            description=t("mc.link.ask_body", self.lang),
+            description=(
+                f"{t('mc.link.ask_body', self.lang)}\n\n"
+                f"**1.** Run `/mclink` — I'll DM you a pairing code.\n"
+                f"**2.** Join the server and run `/mcverify <code>` in-game.\n\n"
+                "Paid and free (cracked) accounts both work; you don't need to "
+                "pick up front."
+            ),
             color=discord.Color.blurple(),
         )
 
-    @discord.ui.button(emoji="💳", style=discord.ButtonStyle.primary, row=0)
-    async def paid(self, interaction: discord.Interaction,
-                   _button: discord.ui.Button):
-        await self._pick(interaction, "paid")
-
-    @discord.ui.button(emoji="🆓", style=discord.ButtonStyle.secondary, row=0)
-    async def free(self, interaction: discord.Interaction,
-                   _button: discord.ui.Button):
-        await self._pick(interaction, "free")
-
-    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
     async def back(self, interaction: discord.Interaction,
                    _button: discord.ui.Button):
         await _back_to_home(self, interaction)
-
-    async def _pick(self, interaction: discord.Interaction, account_type: str):
-        modal = LinkUsernameModal(self.cog, self.lang, self.member, account_type,
-                                  home_factory=self.home_factory)
-        await interaction.response.send_modal(modal)
-
-
-class LinkUsernameModal(discord.ui.Modal):
-    """Step 2 of the link flow: the exact Minecraft username to whitelist."""
-
-    def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
-                 account_type: str, *, home_factory=None):
-        super().__init__(title=t("mc.link.modal_title", lang))
-        self.cog, self.lang, self.member = cog, lang, member
-        self.account_type = account_type
-        self.home_factory = home_factory
-        self.username = discord.ui.TextInput(
-            label=t("mc.link.modal_username", lang),
-            placeholder="Steve_08", required=True, max_length=64,
-        )
-        self.add_item(self.username)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        if not Minecraft._can_manage_link(interaction.user, self.member):
-            view = ResultBackView(self.lang, self.home_factory)
-            await interaction.edit_original_response(
-                embed=_flow_embed(False, t("mc.link.deny_other", self.lang)),
-                view=view)
-            return
-        username = self.username.value.strip()
-        ok, text = await self.cog._run_link(self.member, username,
-                                            self.account_type, self.lang)
-        view = ResultBackView(self.lang, self.home_factory)
-        await interaction.edit_original_response(
-            embed=_flow_embed(ok, text), view=view)
 
 
 class UnlinkConfirmView(discord.ui.View):
@@ -1145,7 +980,7 @@ class UnlinkConfirmView(discord.ui.View):
         await _back_to_home(self, interaction)
 
 
-class ControlView(discord.ui.View):
+class ControlView(OwnerView, LoggedView, discord.ui.View):
     """Power control drill-down (operator/Archon only): start / stop / restart."""
 
     def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
@@ -1153,10 +988,21 @@ class ControlView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member = cog, lang, member
         self.home_factory = home_factory
+        # OwnerView: only the operator who opened the panel may press it.
+        self.user_id = member.id
         self.start.label = t("mc.ctrl.start", lang)
         self.stop.label = t("mc.ctrl.stop", lang)
         self.restart.label = t("mc.ctrl.restart", lang)
         self.back.label = t("mc.hub.back", lang)
+        # The /mc hub is posted publicly, so these buttons are visible to every
+        # member — the construction-time gate only hid them from non-operators
+        # *at that moment*. _run() re-checks at press time; this is cosmetic.
+        if not cog._is_mc_operator(member):
+            for item in (self.start, self.stop, self.restart):
+                self.remove_item(item)
+
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return t("mc.ctrl.deny", self.lang)
 
     async def embed(self) -> discord.Embed:
         return discord.Embed(
@@ -1186,9 +1032,17 @@ class ControlView(discord.ui.View):
         await _back_to_home(self, interaction)
 
     async def _run(self, interaction: discord.Interaction, signal: str):
+        # Re-check the *clicker*, not the member who opened the panel. Without
+        # this, any member could press ⏹ on an operator's public /mc panel and
+        # stop the Minecraft server on their behalf — the panel lives 180s and
+        # the power action is issued with the original invoker's authority.
+        if not Minecraft._is_mc_operator(interaction.user):
+            await interaction.response.send_message(
+                t("mc.ctrl.deny", self.lang), ephemeral=True)
+            return
         await interaction.response.edit_message(
             embed=_loading_embed(), view=None)
-        ok, text = await self.cog._power_core(self.member, self.lang, signal)
+        ok, text = await self.cog._power_core(interaction.user, self.lang, signal)
         view = ResultBackView(self.lang, self.home_factory)
         await interaction.message.edit(embed=_flow_embed(ok, text), view=view)
 

@@ -16,7 +16,6 @@ loop math is unit-testable without a real Discord voice connection.
 import asyncio
 import concurrent.futures
 import logging
-import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -28,7 +27,7 @@ from discord.ext import commands
 from cogs._perms import is_bot_admin
 from cogs.music_sources import deezer as deezer_provider
 from cogs.music_sources import radio as radio_provider
-from cogs.music_sources import resolve_playable, youtube as youtube_provider
+from cogs.music_sources import resolve_playable
 from cogs.music_sources.model import AllSourcesFailed, Playable, SourceUnavailable
 
 LOG = logging.getLogger("bot.music")
@@ -942,6 +941,10 @@ class Music(commands.Cog):
     @commands.hybrid_command(name="queue",
                              description="Show the queue — or pass `auto` to generate a radio queue.")
     @commands.guild_only()
+    # `auto` fans out a dozen encrypted-track downloads per call and the cache
+    # sweep only runs on the *next* Deezer call, so an unthrottled member could
+    # fill the service disk. Rate-limit the whole command.
+    @commands.cooldown(2, 60, commands.BucketType.user)
     async def queue(self, ctx, mode: str | None = None):
         """Show the queue, or generate a 📻 radio queue from the current track.
 
@@ -958,27 +961,18 @@ class Music(commands.Cog):
         await ctx.send(embed=player.embed())
 
     async def fetch_radio(self, seed: Track, size: int) -> list[Playable]:
-        """Radio playables around a seed: Deezer artist-radio first, YTMusic
-        as the fallback for YouTube-sourced seeds (they don't run from the
-        datacenter IP, so Deezer is the real feed while an ARL is set)."""
-        playables: list[Playable] = []
-        if os.environ.get("DEEZER_ARL"):
-            try:
-                playables = await deezer_provider.radio_tracks(seed.title, size)
-            except Exception as exc:
-                LOG.warning("Auto-radio Deezer feed failed for %r: %s",
-                            seed.title, exc)
-                playables = []
-        if not playables and seed.video_id:
-            try:
-                seed_ids = await asyncio.to_thread(
-                    youtube_provider.radio_seed_ids, seed.video_id, size)
-                if seed_ids:
-                    playables = await youtube_provider.resolve_parallel(seed_ids)
-            except Exception as exc:
-                LOG.warning("Auto-radio seed failed for %r: %s", seed.title, exc)
-                playables = []
-        return playables
+        """Radio playables around a seed, from the Deezer artist radio.
+
+        YouTube used to be a fallback here, but that provider is gone (see
+        cogs/music_sources/__init__.py): feeding yt-dlp arbitrary input was the
+        bot's SSRF hole, and the Deezer artist feed is the one that actually
+        works from this host anyway.
+        """
+        try:
+            return await deezer_provider.radio_tracks(seed.title, size)
+        except Exception as exc:
+            LOG.warning("Auto-radio Deezer feed failed for %r: %s", seed.title, exc)
+            return []
 
     async def _queue_auto(self, ctx, player: MusicPlayer):
         """Switch on continuous auto-radio and top the queue up immediately.

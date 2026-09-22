@@ -10,7 +10,7 @@ from data.store import store
 from data.store import StoreError
 from cogs.onboarding import cursive_nickname
 from cogs._ui import ConfirmView, PaginatorView
-from cogs._perms import mod_perms
+from cogs._perms import is_bot_admin, mod_perms
 
 LOG = logging.getLogger("bot.moderation")
 
@@ -191,6 +191,12 @@ class Moderation(commands.Cog):
     @commands.hybrid_command(name="warn", description="Warn a member (recorded in the modlog).")
     @mod_perms(moderate_members=True)
     async def warn(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
+        # A warning is a real, visible disciplinary record on the target's
+        # profile, so it gets the same hierarchy guard as kick/ban/timeout.
+        # Without this, anyone holding only `moderate_members` could yellow-card
+        # the owner or an Archon.
+        if not await self._can_target(ctx, member):
+            return
         if member.bot:
             await ctx.send("⚠️ I don't track warnings for bots.")
             return
@@ -256,12 +262,31 @@ class Moderation(commands.Cog):
 
     # ── role management ───────────────────────────────────────
     async def _check_role(self, ctx, role: discord.Role) -> bool:
-        """Shared guard for role edits: integration roles and hierarchy."""
+        """Shared guard for role edits: integration roles and hierarchy.
+
+        Three independent ceilings apply, and all three are needed:
+
+        1. ``role.managed`` — never touch a bot/integration role.
+        2. ``role >= guild.me.top_role`` — Discord refuses it anyway.
+        3. ``role >= ctx.author.top_role`` — the guard that was missing.
+           Discord constrains a *member* with Manage Roles to roles below their
+           own highest role, but that constraint does not apply to a bot: the
+           bot only has to sit above the role. So a user holding a plain
+           "Moderator" role with Manage Roles (no Administrator) could run
+           ``!addrole @Administrator @self`` and grant themselves a role
+           carrying ``administrator`` — something Discord's own UI forbids. The
+           bot was removing the platform's only hierarchy check for them.
+           Bot staff keep the bypass, matching ``mod_perms``.
+        """
         if role.managed:
             await ctx.send(f"⛔ `{role.name}` is an integration-managed role — I can't assign it.")
             return False
         if role >= ctx.guild.me.top_role:
             await ctx.send("⛔ My top role isn't high enough to manage `" + role.name + "`.")
+            return False
+        if not is_bot_admin(ctx.author) and role >= ctx.author.top_role:
+            await ctx.send(f"⛔ `{role.name}` is at or above your own highest role — "
+                           "ask an admin to grant it.")
             return False
         return True
 
@@ -272,9 +297,14 @@ class Moderation(commands.Cog):
         """Tag the role, then tag who gets it — `!addrole @role @a @b`."""
         if not await self._check_role(ctx, role):
             return
+        # Hierarchy applies to the *target* as well as the role: stripping or
+        # granting must not reach members ranked at or above the invoker.
         targets = [m for m in members if not m.bot and m != self.bot.user]
+        if ctx.author != ctx.guild.owner:
+            targets = [m for m in targets if m.top_role < ctx.author.top_role]
         if not targets:
-            await ctx.send("⚠️ Tag at least one member to receive the role.")
+            await ctx.send("⚠️ No eligible members — they must be ranked below you "
+                           "and not be bots.")
             return
         added = skipped = 0
         for member in targets:
@@ -299,8 +329,11 @@ class Moderation(commands.Cog):
         if not await self._check_role(ctx, role):
             return
         targets = [m for m in members if not m.bot and m != self.bot.user]
+        if ctx.author != ctx.guild.owner:
+            targets = [m for m in targets if m.top_role < ctx.author.top_role]
         if not targets:
-            await ctx.send("⚠️ Tag at least one member to strip the role from.")
+            await ctx.send("⚠️ No eligible members — they must be ranked below you "
+                           "and not be bots.")
             return
         removed = skipped = 0
         for member in targets:
@@ -336,13 +369,21 @@ class Moderation(commands.Cog):
         if not await self._check_role(ctx, role):
             return
         targets = [m for m in members if not m.bot and m != self.bot.user]
+        if ctx.author != ctx.guild.owner:
+            targets = [m for m in targets if m.top_role < ctx.author.top_role]
         target_ids = {m.id for m in targets}
         if not targets:
-            await ctx.send("⚠️ Tag at least one member as the new holder(s).")
+            await ctx.send("⚠️ No eligible members — they must be ranked below you "
+                           "and not be bots.")
             return
         revoked = []
         for member in ctx.guild.members:
             if member.bot or member.id in target_ids or role not in member.roles:
+                continue
+            # Don't strip the role from someone ranked at or above the invoker
+            # (the owner still sweeps everyone, matching Discord's own model).
+            if (ctx.author != ctx.guild.owner
+                    and member.top_role >= ctx.author.top_role):
                 continue
             revoked.append(member.display_name)
             try:
