@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cogs.music_sources as sources  # noqa: E402
 from cogs.music_sources import links, radio  # noqa: E402
+from cogs.music_sources.model import Candidate  # noqa: E402
 from cogs.music_sources.model import (  # noqa: E402
     AllSourcesFailed, Playable, SourceFailure, SourceUnavailable,
 )
