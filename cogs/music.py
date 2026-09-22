@@ -27,7 +27,8 @@ from discord.ext import commands
 from cogs._perms import is_bot_admin
 from cogs.music_sources import deezer as deezer_provider
 from cogs.music_sources import radio as radio_provider
-from cogs.music_sources import resolve_playable
+from cogs.music_sources import (describe, materialize, resolve_playable,
+                                search_candidates)
 from cogs.music_sources.model import AllSourcesFailed, Playable, SourceUnavailable
 
 LOG = logging.getLogger("bot.music")
@@ -51,7 +52,6 @@ class Track:
     requester_id: int | None = None
     headers: dict = field(default_factory=dict)
     provider: str = ""
-    votes: set = field(default_factory=set)
     # Decrypted local audio file (Deezer); when set, playback reads this path
     # instead of `url`.
     local_path: str = ""
@@ -91,20 +91,13 @@ RADIO_REFILL_AT = 6         # top the queue back up when fewer than this many so
 RADIO_REFILL_SIZE = 8       # songs to add per refill
 RADIO_REFILL_FETCH = 12     # fetch a little extra so history-dedup still finds fresh songs
 RADIO_REFILL_COOLDOWN = 30  # minimum seconds between refills
-VOTE_SECONDS = 20           # how long a skip/remove vote stays open
+LINK_NUDGE_AFTER = 3        # songs before the link-parsing tip lands
 
-
-@dataclass
-class _Vote:
-    """An open skip/remove motion: who wants it, who wants it kept."""
-
-    kind: str            # "skip" or "remove"
-    target_key: str      # dedup key of the queued track for remove motions
-    target_title: str    # human-readable name for messages
-    yes: set = field(default_factory=set)
-    no: set = field(default_factory=set)
-    deadline: float = 0.0
-    task: asyncio.Task | None = None
+_LINK_NUDGE = (
+    "💡 Psst {user} — head's up: you can paste a **YouTube or Deezer link** "
+    "straight into `/play` and I'll pull the title, artist and art from it and "
+    "play that song for you. Or use `/playsearch` to see the top matches and "
+    "pick one yourself before anything plays.")
 
 
 def fmt_duration(seconds) -> str:
@@ -116,6 +109,25 @@ def fmt_duration(seconds) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def progress_bar(elapsed: float | None, duration: int | None,
+                 slots: int = 15) -> str:
+    """A single-line playback bar for the now-playing embed.
+
+    The old embed showed only the total duration, so "where in the song is
+    it?" always meant guessing. A bar reads at a glance; it is plain block
+    glyphs because emoji progress bars render differently per client. An
+    unknown-length track (live radio) gets an open-ended bar with a pulsing
+    head rather than a fake 0%.
+    """
+    if duration and duration > 0 and elapsed is not None:
+        ratio = min(1.0, max(0.0, elapsed / duration))
+        filled = int(ratio * slots)
+        return "█" * filled + "░" * (slots - filled)
+    # No duration to measure against: show movement without pretending to know.
+    head = 0 if elapsed is None else (int(elapsed // 5) % slots)
+    return "░" * head + "█" + "░" * (slots - head - 1)
 
 
 class MusicPlayer:
@@ -156,12 +168,54 @@ class MusicPlayer:
         # True when the player chose to leave (stop / idle / shutdown) rather
         # than being removed by a moderator — suppresses the "kicked" notice.
         self._intentional_leave = False
-        # One open skip/remove motion at a time (new votes replace old ones).
-        self._vote: _Vote | None = None
+        # Elapsed-time tracking for the live progress bar: a monotonic start
+        # stamp per track, plus elapsed seconds captured at pause time.
+        self._track_started_at: float | None = None
+        self._paused_elapsed: float | None = None
+        # One long-lived task per session that edits the panel message in
+        # place on a timer — the old delete+repost churn is gone.
+        self._panel_task: asyncio.Task | None = None
+        # Link-parse nudge bookkeeping: how many tracks a member has played
+        # since joining, and who has already been told about link parsing.
+        self._play_counts: dict[int, int] = {}
+        self._nudged_members: set[int] = set()
+        self._last_counted_key: str | None = None
+
 
     def _touch(self):
         """Note recent activity so the idle watchdog doesn't disconnect."""
         self._last_active = time.monotonic()
+
+    # ── progress-bar clock ───────────────────────────────────
+    def track_elapsed(self) -> float | None:
+        """Seconds into the current track, None when nothing plays.
+
+        Pause freezes the clock (captured into ``_paused_elapsed``); resume
+        shifts the monotonic base forward so the bar continues, never jumps.
+        """
+        if self.current is None:
+            return None
+        if self._paused_elapsed is not None:
+            return self._paused_elapsed
+        if self._track_started_at is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._track_started_at)
+
+    def pause_voice(self) -> bool:
+        if self.voice is None or not self.voice.is_playing():
+            return False
+        self._paused_elapsed = self.track_elapsed()
+        self.voice.pause()
+        return True
+
+    def resume_voice(self) -> bool:
+        if self.voice is None or not self.voice.is_paused():
+            return False
+        held = self._paused_elapsed or 0.0
+        self._track_started_at = time.monotonic() - held
+        self._paused_elapsed = None
+        self.voice.resume()
+        return True
 
     # ── auto-radio ────────────────────────────────────────────
     @staticmethod
@@ -278,6 +332,67 @@ class MusicPlayer:
             self._watchdog_task.cancel()
             self._watchdog_task = None
 
+    # ── link-parsing nudge ───────────────────────────────────
+    async def _count_and_maybe_link_nudge(self, track: Track) -> None:
+        """Tell each member, once, after their third started track, that
+        YouTube/Deezer links work in /play — the feature they most likely
+        haven't found yet. Counts tracks that actually *start*, not requests
+        (a queue-add that never plays because the bot got pulled counts
+        nothing), and counts each track once even when loop replays it.
+        """
+        requester = track.requester_id
+        if not requester:
+            return
+        key = self._key_of(track)
+        if key in (self._last_counted_key, ""):
+            return  # loop replay of the same track — not a fresh play
+        self._last_counted_key = key
+        count = self._play_counts.get(requester, 0) + 1
+        self._play_counts[requester] = count
+        if count != LINK_NUDGE_AFTER or requester in self._nudged_members:
+            return
+        self._nudged_members.add(requester)
+        if self.text_channel is None:
+            return
+        try:
+            await self.text_channel.send(
+                content=_LINK_NUDGE.format(user=f"<@{requester}>"))
+        except (discord.HTTPException, discord.NotFound):
+            pass
+
+    # ── panel refresh clock ─────────────────────────────────────
+    def _start_panel_refresh(self):
+        if self._panel_task is not None:
+            self._panel_task.cancel()
+        self._panel_task = asyncio.create_task(self._panel_refresh())
+
+    async def _panel_refresh(self):
+        """Edit the panel's progress bar in place on a short timer.
+
+        The old panel only moved when a command touched it, so its timestamps
+        lied. This task re-renders the embed every few seconds; the message
+        itself is never reposted on the happy path, which is the anti-churn
+        half of it.
+        """
+        try:
+            while True:
+                await asyncio.sleep(5)
+                if self.current is None or self.text_channel is None:
+                    return
+                message = self.now_playing_message
+                if message is None:
+                    continue
+                try:
+                    await message.edit(embed=self.embed(),
+                                       view=self.now_playing_view)
+                except discord.NotFound:
+                    self.now_playing_message = None
+                    return  # the member deleted it; don't fight the delete
+                except discord.HTTPException:
+                    pass  # transient rate-limit/server hiccup — try next tick
+        except asyncio.CancelledError:
+            return
+
     # ── queue / playback ────────────────────────────────────────
     async def enqueue(self, track: Track):
         """Add a track; start playback only when nothing else is busy.
@@ -294,7 +409,6 @@ class MusicPlayer:
 
     async def play_next(self):
         """Start the next track — queue head, or loop the current one."""
-        self.cancel_vote()  # a new track invalidates any pending motions
         if self.voice is None or not self.voice.is_connected() or self.voice.is_playing():
             return
         if self.loop and self.current is not None:
@@ -308,14 +422,16 @@ class MusicPlayer:
             self._touch()  # count the idle window from when the last track ended
             return
         self.current = track
-        self.current.votes.clear()
         if self.auto_radio:
             self.note_radio_play(track)
+        self._track_started_at = time.monotonic()
+        self._paused_elapsed = None
         source = self._make_source(track)
         self.voice.play(source, after=self._after_hook)
-        await self._announce_current()
         await self._update_panel()
         self._maybe_refill()
+        self._start_panel_refresh()
+        await self._count_and_maybe_link_nudge(track)
 
     def _make_source(self, track: Track):
         if self._audio_factory is not None:
@@ -344,7 +460,9 @@ class MusicPlayer:
         never double-post a message in a different style.
         """
         await self._cancel_watchdog()
-        self.cancel_vote()
+        if self._panel_task is not None:
+            self._panel_task.cancel()
+            self._panel_task = None
         self.auto_radio = False
         self._radio_history.clear()
         if self._refill_task is not None:
@@ -380,95 +498,6 @@ class MusicPlayer:
         if self.voice is None or self.voice.channel is None:
             return 0
         return sum(1 for member in self.voice.channel.members if not member.bot)
-
-    def _motion_owner(self, kind: str, target_key: str) -> int | None:
-        """Who owns the thing a motion targets — their word is instant."""
-        if kind == "skip":
-            return self.current.requester_id if self.current else None
-        for track in self.queue:
-            if self._key_of(track) == target_key:
-                return track.requester_id
-        return None
-
-    def cancel_vote(self):
-        """Drop any open motion and its deadline task."""
-        if self._vote is not None:
-            if self._vote.task is not None:
-                self._vote.task.cancel()
-            self._vote = None
-
-    async def cast_vote(self, kind: str, author: discord.Member, *,
-                        want: bool = True, target_key: str = "",
-                        target_title: str = "") -> tuple[str, int, int]:
-        """Vote on a skip/remove motion. Returns (status, yes, no).
-
-        Status: "passed" — the motion fired; "vote" — recorded, still open;
-        "kept" — the owner vetoed so the motion is cancelled; "idle" — no
-        listeners, nothing to act on, or a "keep" with no open motion.
-
-        The requester of the thing being voted on, the session host and staff
-        act instantly. Everyone else votes: the motion passes right away once
-        the yes side outnumbers the no side and holds a majority of the
-        listeners present, and at the deadline unless a strict majority voted
-        no — so one troll can't stalemate the vote forever.
-        """
-        listeners = self._listeners()
-        if listeners <= 0:
-            return "idle", 0, 0
-        owner = self._motion_owner(kind, target_key)
-        if owner is not None and (author.id in (owner, self.host_id)
-                                  or is_bot_admin(author)):
-            if want:
-                await self._apply_motion(kind, target_key)
-                return "passed", 0, 0
-            self.cancel_vote()
-            return "kept", 0, 0
-        vote = self._vote
-        if vote is None or vote.kind != kind or vote.target_key != target_key:
-            if not want:
-                return "idle", 0, 0
-            self.cancel_vote()
-            vote = _Vote(kind=kind, target_key=target_key,
-                         target_title=target_title)
-            vote.deadline = time.monotonic() + VOTE_SECONDS
-            vote.task = asyncio.create_task(self._close_vote(vote))
-            self._vote = vote
-        if author.id in vote.yes or author.id in vote.no:
-            return "vote", len(vote.yes), len(vote.no)
-        (vote.yes if want else vote.no).add(author.id)
-        yes, no = len(vote.yes), len(vote.no)
-        if yes > no and (yes + no == listeners or yes * 2 > listeners):
-            await self._apply_motion(kind, target_key)
-            return "passed", yes, no
-        return "vote", yes, no
-
-    async def _close_vote(self, vote: _Vote):
-        """Resolve a vote when its window closes: ties and silence pass it."""
-        await asyncio.sleep(VOTE_SECONDS)
-        if self._vote is not vote:
-            return  # a newer motion replaced it, or the track ended
-        yes, no = len(vote.yes), len(vote.no)
-        if yes and no * 2 <= self._listeners():
-            await self._apply_motion(vote.kind, vote.target_key)
-            return
-        self._vote = None
-        await self._update_panel()  # clear the stale vote display
-        await self._announce_action(
-            f"🗳️ The vote didn't pass — **{vote.target_title or 'the song'}** stays.")
-
-    async def _apply_motion(self, kind: str, target_key: str):
-        """Carry out a passed motion and cancel the vote."""
-        self.cancel_vote()
-        if kind == "skip" and self.current is not None:
-            title = self.current.title
-            await self._skip_now()
-            await self._announce_action(f"⏭️ Skipped **{title}**.")
-        elif kind == "remove":
-            removed = self.remove_from_queue(target_key)
-            if removed is not None:
-                await self._update_panel()
-                await self._announce_action(
-                    f"➖ Removed **{removed.title}** from the queue.")
 
     def remove_from_queue(self, target_key: str) -> Track | None:
         """Drop the first queued track matching ``target_key``; the rest shift up."""
@@ -512,15 +541,19 @@ class MusicPlayer:
         embed.description = desc or None
         if track.thumbnail:
             embed.set_thumbnail(url=track.thumbnail)
-        embed.add_field(name="Duration", value=fmt_duration(track.duration), inline=True)
         embed.add_field(name="Loop", value="🔂 On" if self.loop else "Off", inline=True)
-        if self._vote is not None:
-            vote = self._vote
-            seconds = max(1, int(vote.deadline - time.monotonic()))
-            embed.add_field(
-                name="🗳️ Vote to skip" if vote.kind == "skip" else "🗳️ Vote to remove",
-                value=f"👍 {len(vote.yes)} · 👎 {len(vote.no)} · {seconds}s to decide",
-                inline=True)
+        elapsed = self.track_elapsed()
+        if elapsed is None:
+            total_line = fmt_duration(track.duration)
+        elif track.duration:
+            total_line = f"{fmt_duration(min(elapsed, track.duration))} / {fmt_duration(track.duration)}"
+        else:
+            total_line = f"{fmt_duration(elapsed)} elapsed"
+        status = "⏸️ Paused" if self._paused_elapsed is not None else "▶️ Playing"
+        embed.add_field(
+            name="Progress",
+            value=f"{progress_bar(elapsed, track.duration)}\n{status} · {total_line}",
+            inline=False)
         if self.queue:
             lines = "\n".join(
                 f"{i + 1}. **{t.title}**" for i, t in enumerate(list(self.queue)[:6]))
@@ -530,45 +563,126 @@ class MusicPlayer:
             embed.add_field(name="Up next", value="—", inline=False)
         return embed
 
-    async def _announce_current(self) -> None:
-        """One chat line announcing the track that just started."""
-        if self.text_channel is None or self.current is None:
-            return
-        try:
-            await self.text_channel.send(
-                content=f"🎵 Now playing: **{self.current.title}**")
-        except discord.HTTPException:
-            pass
-
     async def _update_panel(self, stopped: str = ""):
-        """(Re)post the now-playing panel so it stays the newest chat message.
+        """(Re)post the now-playing panel — editing in place on the happy path.
 
-        The old panel is deleted and a fresh copy — control view included —
-        is sent to the player's text channel: no buttons ever sit on a buried
-        message, and the panel is always one message the user can act on.
-        ``stopped`` posts a plain notice without controls instead.
+        The old implementation deleted the panel and reposted it on *every*
+        state change, which filled the music channel with a fresh embed for
+        each vote, button tap and queue update. Now the same message is
+        edited whenever it can be (stale after a manual deletion, or its
+        view hangs off an older generation: then it is reposted once).
+        ``stopped`` retires the controls and posts a single plain line.
         """
-        old = self.now_playing_message
-        self.now_playing_message = None
-        self.now_playing_view = None
-        if old is not None:
-            try:
-                await old.delete()
-            except (discord.HTTPException, discord.NotFound):
-                pass
+        if stopped:
+            old = self.now_playing_message
+            self.now_playing_message = None
+            self.now_playing_view = None
+            if old is not None:
+                try:
+                    await old.delete()
+                except (discord.HTTPException, discord.NotFound):
+                    pass
+            if self.text_channel is not None:
+                try:
+                    await self.text_channel.send(content=stopped)
+                except (discord.HTTPException, discord.NotFound):
+                    pass
+            return
         if self.text_channel is None:
             return
         view = None
-        if not stopped and self.now_playing_view_factory is not None:
+        if self.now_playing_view_factory is not None:
             view = self.now_playing_view_factory()
-        embed = self.embed(stopped=stopped)
+        embed = self.embed()
+        old = self.now_playing_message
+        if old is not None:
+            try:
+                await old.edit(embed=embed, view=view)
+                self.now_playing_view = view
+                return
+            except discord.NotFound:
+                self.now_playing_message = None  # deleted; post fresh below
+            except discord.HTTPException:
+                pass  # view reset? try a fresh message once
         try:
             message = await self.text_channel.send(embed=embed, view=view)
         except (discord.HTTPException, discord.NotFound):
             return
-        if not stopped:
-            self.now_playing_message = message
-            self.now_playing_view = view
+        self.now_playing_message = message
+        self.now_playing_view = view
+
+
+class SearchPickView(discord.ui.View):
+    """The /playsearch picker: one select, one pick, one song.
+
+    A select menu rather than buttons so titles can be long enough to be
+    recognisable ("Ed Sheeran – Shape of You (Official Music Video)"). Only the
+    member who ran the search can choose; everyone else gets a polite note.
+    """
+
+    def __init__(self, cog, ctx, candidates: list, player: MusicPlayer):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.ctx = ctx
+        self.candidates = candidates
+        self.player = player
+        self._message: discord.Message | None = None
+        select = discord.ui.Select(
+            placeholder="Pick the track to play…",
+            min_values=1, max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=f"{c.title} — {c.artist}"[:100],
+                    description=(f"{c.provider} · {fmt_duration(c.duration)}"
+                                 if c.duration else c.provider)[:100],
+                    value=str(i))
+                for i, c in enumerate(candidates)
+            ])
+        select.callback = self._pick
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                f"That's {self.ctx.author.mention}'s search — run /playsearch "
+                "yourself to pick.", ephemeral=True)
+            return False
+        return True
+
+    async def _pick(self, interaction: discord.Interaction) -> None:
+        candidate = self.candidates[int(interaction.data["values"][0])]
+        await interaction.response.defer()
+        try:
+            playable = await materialize(candidate)
+        except Exception as exc:
+            await interaction.followup.send(
+                f"⚠️ Couldn't fetch **{candidate.title}**: {exc}",
+                ephemeral=True)
+            return
+        track = Music._track_from_playable(playable, self.ctx.author.id)
+        started = await self.player.enqueue(track)
+        where = (f"#{len(self.player.queue)} in the queue"
+                 if not started else "now playing")
+        await self._finish(interaction, f"🎵 **{track.title}** — {where}.")
+        await self.player._update_panel()
+
+    async def _finish(self, interaction: discord.Interaction, text: str) -> None:
+        self.clear_items()
+        self.stop()
+        try:
+            await interaction.message.edit(content=text, view=self)
+        except (discord.HTTPException, discord.NotFound):
+            pass
+
+    async def on_timeout(self) -> None:
+        self.clear_items()
+        if self._message is not None:
+            try:
+                await self._message.edit(
+                    content="⌛ Search expired — run /playsearch again.",
+                    view=None)
+            except (discord.HTTPException, discord.NotFound):
+                pass
 
 
 class NowPlayingView(discord.ui.View):
@@ -596,10 +710,10 @@ class NowPlayingView(discord.ui.View):
                 ephemeral=True)
             return
         if player.voice.is_paused():
-            player.voice.resume()
+            player.resume_voice()
             feedback = "▶️ Resumed"
         elif player.voice.is_playing():
-            player.voice.pause()
+            player.pause_voice()
             feedback = "⏸️ Paused"
         else:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
@@ -611,19 +725,16 @@ class NowPlayingView(discord.ui.View):
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="music:skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = self.player
+        if player.current is None or player.voice is None:
+            await interaction.response.send_message("Nothing to skip.", ephemeral=True)
+            return
         await interaction.response.defer()
-        status, yes, no = await player.cast_vote("skip", interaction.user)
-        if status == "vote":
-            await player._update_panel()  # show the live vote on the panel
-            await interaction.followup.send(
-                f"🗳️ Skip vote — 👍 {yes} · 👎 {no}. Use `/keep` to vote against.",
-                ephemeral=True)
-        else:
-            # pass/kept/idle: the motion itself already posted its outcome
-            # (and the after-hook reposted the panel when it skipped).
-            word = "⏭️ Skipped by" if status == "passed" else "⏹️ No action"
-            await interaction.followup.send(
-                f"{word} {interaction.user.mention}.", ephemeral=True)
+        # Skip is instant for anyone in the voice channel — one public line,
+        # no motion to track: the action took, and the noun is who did it.
+        title = player.current.title
+        await player._skip_now()
+        await player._announce_action(f"⏭️ **{title}** skipped by {interaction.user.mention}.")
+        await interaction.followup.send("Skipped.", ephemeral=True)
 
     @discord.ui.button(emoji="🔂", style=discord.ButtonStyle.secondary, custom_id="music:loop")
     async def loop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -706,6 +817,8 @@ class Music(commands.Cog):
             player._watchdog_task.cancel()
         if player._refill_task is not None:
             player._refill_task.cancel()
+        if player._panel_task is not None:
+            player._panel_task.cancel()
 
     def _can_control(self, member: discord.Member, player: MusicPlayer) -> bool:
         """Who may use destructive controls on this guild's shared player.
@@ -724,6 +837,8 @@ class Music(commands.Cog):
     async def cog_unload(self):
         for player in list(self.players.values()):
             player._intentional_leave = True
+            if player._panel_task is not None:
+                player._panel_task.cancel()
             if player.voice and player.voice.is_connected():
                 await player.voice.disconnect()
         if self._http is not None and not self._http.closed:
@@ -788,6 +903,7 @@ class Music(commands.Cog):
         player = await self._ensure_voice(ctx)
         if player is None:
             return
+        described = await describe(query)
         try:
             playable = await resolve_playable(query)
         except AllSourcesFailed as exc:
@@ -796,6 +912,8 @@ class Music(commands.Cog):
             await ctx.send(f"⚠️ {hint}" if hint
                            else "⚠️ Couldn't find anything playable for that query.")
             return
+        if described and described != query:
+            await ctx.send(f"🔗 Link parsed as **{described}** — playing it.")
         track = Music._track_from_playable(playable, ctx.author.id)
         fresh = player.current is None and not player.queue
         started = await player.enqueue(track)
@@ -806,6 +924,36 @@ class Music(commands.Cog):
                 f"➕ **{track.title}** added to the queue (#{len(player.queue)}).")
         # Re-post the controls panel last so it stays the newest message.
         await player._update_panel()
+
+    @commands.hybrid_command(
+        name="playsearch",
+        description="Search and pick a song from the results — you choose which match plays.")
+    @commands.guild_only()
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def playsearch(self, ctx, *, query: str):
+        """Search providers and let the member pick the winning track.
+
+        ``/play`` keeps going straight to the top result — fast, and fine for
+        names you know. ``/playsearch`` is the fix for everything else: long
+        or ambiguous titles, covers, remixes — anything where the top hit
+        might not be the song you meant.
+        """
+        await ctx.defer()
+        player = await self._ensure_voice(ctx)
+        if player is None:
+            return
+        try:
+            candidates = await search_candidates(query, limit=5)
+        except Exception:
+            candidates = []  # provider failures are logged inside; treat as no hits
+        if not candidates:
+            await ctx.send(f"🔍 No matches for **{query}** — try a different query.")
+            return
+        view = SearchPickView(self, ctx, candidates, player)
+        view._message = await ctx.send(
+            content=(f"🔍 Top matches for **{query}** — pick one, "
+                     "or run `/play` next time to take the first hit:"),
+            view=view)
 
     @commands.hybrid_command(name="pause", description="Pause the current track.")
     @commands.guild_only()
@@ -818,7 +966,7 @@ class Music(commands.Cog):
             await ctx.send("🔒 Only the session host, the current requester, or staff "
                            "can control the player.")
             return
-        player.voice.pause()
+        player.pause_voice()
         await player._update_panel()
         await ctx.send("⏸️ Paused.", delete_after=8)
 
@@ -833,34 +981,41 @@ class Music(commands.Cog):
             await ctx.send("🔒 Only the session host, the current requester, or staff "
                            "can control the player.")
             return
-        player.voice.resume()
+        player.resume_voice()
         await player._update_panel()
         await ctx.send("▶️ Resumed.", delete_after=8)
 
     @commands.hybrid_command(name="skip",
-                             description="Skip the current track — instant if you requested it, else a vote.")
+                             description="Skip the current track — anyone in the voice channel can.")
     @commands.guild_only()
     async def skip(self, ctx):
-        """Requester/host/staff skip instantly; everyone else votes."""
+        """Instant for everyone present — no vote, one outcome line.
+
+        The vote made "/skip" behave differently for the requester than for
+        everyone else, needed a whole second command to vote against it, and
+        delayed the skip by up to 20 seconds for people just listening. Every
+        other music bot skips on request; the bot follows that contract.
+        """
         player = self._player(ctx.guild.id)
         if player.voice is None or player.current is None:
             await ctx.send("🎵 Nothing is playing to skip.")
             return
-        status, yes, no = await player.cast_vote("skip", ctx.author)
-        if status == "passed":
-            return  # the motion already announced the outcome in chat
-        if status == "vote":
-            await player._update_panel()  # show the live vote
-            await ctx.send(
-                f"🗳️ Skip vote — 👍 {yes} · 👎 {no}. Use `/keep` to vote against.")
-        else:
-            await ctx.send("🎵 Nothing to skip right now.")
+        title = player.current.title
+        await player._skip_now()
+        await ctx.send(f"⏭️ **{title}** skipped by {ctx.author.mention}.")
 
     @commands.hybrid_command(name="remove",
-                             description="Remove a queued song by number — instant if you added it, else a vote.")
+                             description="Remove a queued song by number — the requester, host, or staff.")
     @commands.guild_only()
     async def remove(self, ctx, position: int):
-        """Drop queue entry #position; its requester removes it instantly."""
+        """Drop queue entry #position — no vote, clear ownership.
+
+        Only the person who queued the track, the session host, or staff can
+        remove it. A vote clobbered the simple rule into a second wizard;
+        chaos-proofing in a club voice room is the host's and the
+        administrators' job, and anyone can still vote a track out the old way
+        by skipping it.
+        """
         player = self._player(ctx.guild.id)
         if not player.queue:
             await ctx.send("🎵 The queue is empty.")
@@ -870,40 +1025,20 @@ class Music(commands.Cog):
                            "`/queue` shows the numbers.")
             return
         target = player.queue[position - 1]
-        status, yes, no = await player.cast_vote(
-            "remove", ctx.author, target_key=MusicPlayer._key_of(target),
-            target_title=target.title)
-        if status == "passed":
-            return  # the motion already announced the removal in chat
-        if status == "vote":
-            await player._update_panel()  # show the live vote
-            await ctx.send(
-                f"🗳️ Vote to remove **{target.title}**: 👍 {yes} · 👎 {no} — "
-                "`/keep` to keep it.")
-        else:
-            await ctx.send("🗳️ Cannot vote on that right now.")
-
-    @commands.hybrid_command(name="keep",
-                             description="Vote to keep the song while a skip/remove vote is open.")
-    @commands.guild_only()
-    async def keep(self, ctx):
-        """Vote against an open skip/remove motion (the requester vetoes)."""
-        player = self._player(ctx.guild.id)
-        vote = player._vote
-        if vote is None:
-            await ctx.send("🗳️ No vote is open right now.")
+        if not (target.requester_id == ctx.author.id
+                or self._is_session_controller(ctx.author, player)):
+            await ctx.send("🔒 Only the person who queued that song, the session "
+                           "host, or staff can remove it.")
             return
-        status, yes, no = await player.cast_vote(
-            vote.kind, ctx.author, want=False,
-            target_key=vote.target_key, target_title=vote.target_title)
-        if status == "kept":
-            await player._update_panel()
-            await ctx.send("✋ Kept — you're the requester of this one.")
-        elif status == "vote":
-            await player._update_panel()  # show the live vote
-            await ctx.send(f"✋ Noted — 👍 {yes} · 👎 {no}.")
-        else:
-            await ctx.send("🗳️ Nothing to vote on right now.")
+        # delete by index, not value: two equally-valued Track dataclasses
+        # (same song re-queued by the same member) would otherwise remove the
+        # wrong one.
+        del player.queue[position - 1]
+        await player._update_panel()
+        await ctx.send(f"➖ Removed **{target.title}** from the queue.")
+
+    def _is_session_controller(self, member: discord.Member, player: MusicPlayer) -> bool:
+        return is_bot_admin(member) or member.id == player.host_id
 
     @commands.hybrid_command(name="stop", description="Stop playback and leave the channel.")
     @commands.guild_only()

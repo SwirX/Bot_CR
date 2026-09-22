@@ -52,23 +52,22 @@ command works as both `!prefix` and `/slash`.
   `/spacex`, `/github`, `/advice` and `/lyrics`, all keyless, selected from
   openpublicapis.com.
 - 🎵 **Music** — `/play <song>` streams into your voice channel from
-  Deezer → Audius in order (Deezer decrypts to a local file), plus `/pause`,
-  `/resume`, `/skip`, `/remove <n>`, `/keep`, `/stop`, `/loop`, `/volume`,
-  `/nowplaying` and `/radio <station>` (any live world radio station by name),
-  and an interactive panel with pause / vote-skip / loop / stop / lyrics
-  buttons. **Skip & remove voting** — the requester of a song, the session
-  host and staff act instantly; anyone else opens a 20-second yes/no vote
-  that passes as soon as the yes side holds a majority of the listeners
-  present, and resolves at its deadline (ties and silence pass unless a
-  strict majority voted no), so a lone troll can never deadlock the room;
-  `/keep` votes against the motion — and the requester's keep is an outright
-  veto. 📻 **Auto-radio** — `/queue auto` keeps the queue full around the
-  *last played* song: whenever it runs low it refills from that track's Deezer
-  radio (YTMusic as fallback), every refill is announced, and nothing heard
-  this session is ever re-served. While anything plays *or is paused*, an
-  extra `/play` only queues — playback is never interrupted. The controls
-  panel is always the newest chat message (deleted and re-posted on every
-  state change), and the bot auto-disconnects after a minute of idle with a
+  Deezer → Audius in order (Deezer decrypts to a local file); a YouTube
+  or Deezer link works too — the bot reads its title from the public
+  oEmbed endpoint and plays that song, never fetching the link itself.
+  `/playsearch` shows the top matches and lets you pick before anything
+  plays, plus `/pause`, `/resume`, `/skip`, `/remove <n>`, `/stop`,
+  `/loop`, `/volume`, `/nowplaying` and `/radio <station>` (any live
+  world radio station by name), and an interactive panel with pause /
+  skip / loop / stop / lyrics buttons that updates itself in place and
+  shows a live progress bar. **Skip is instant for anyone in the room**
+  — no `/keep` vote to babysit; **remove** is for the requester, the
+  session host, or staff. 📻 **Auto-radio** — `/queue auto` keeps the
+  queue full around the *last played* song: whenever it runs low it
+  refills from that track's Deezer radio, every refill is announced, and
+  nothing heard this session is ever re-served. While anything plays
+  *or is paused*, an extra `/play` only queues — playback is never
+  interrupted. The bot auto-disconnects after a minute of idle with a
   friendly goodbye.
 - 🔁 **JockieMusic migration nudge** — members who still type `m!` get a
   friendly pitch for `/play` and `/queue auto` (once per user, rarely per
@@ -176,12 +175,12 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `weather <city>`, `define <word>`, `meme` | everyone | Open-Meteo / dictionary / meme |
 | `crypto [coin]`, `spacex`, `github <user>`, `advice` | everyone | Live data APIs |
 | `lyrics [song]` | everyone | LRCLIB lyrics — omit the song to look up the current track |
-| `play <song>` | everyone | Stream music (joins your voice channel) |
+| `play <song>` | everyone | Stream music (joins your voice channel). YouTube/Deezer links work too |
+| `playsearch <song>` | everyone | Search and pick the top match before anything plays |
 | `queue [auto]` | everyone | Show the queue — `auto` keeps it full with 📻 radio from the last played song (nothing heard is re-served) |
 | `pause`, `resume` | everyone | Pause / resume music |
-| `skip` | everyone | Vote to skip (requester / host / staff skip instantly) |
-| `remove <n>` | everyone | Remove queue song #n — instant if you added it, else a vote |
-| `keep` | everyone | Vote against an open skip/remove vote (the requester's keep vetoes) |
+| `skip` | everyone | Skip the current track instantly |
+| `remove <n>` | requester / host / staff | Remove queue song #n |
 | `radio <station>` | everyone | Stream any live internet radio station by name |
 | `stop`, `loop`, `volume <1-100>`, `nowplaying` | everyone | Music control |
 | `meeting create [name]`, `meeting endroom` | everyone | Private VC room, with a dropdown to pick who gets in (aliases: `closeroom`) |

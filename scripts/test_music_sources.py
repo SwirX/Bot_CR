@@ -14,7 +14,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cogs.music_sources as sources  # noqa: E402
-from cogs.music_sources import radio  # noqa: E402
+from cogs.music_sources import links, radio  # noqa: E402
+from cogs.music_sources.model import Candidate  # noqa: E402
 from cogs.music_sources.model import (  # noqa: E402
     AllSourcesFailed, Playable, SourceFailure, SourceUnavailable,
 )
@@ -110,6 +111,173 @@ class RegistryTests(unittest.TestCase):
             asyncio.run(sources.resolve_playable("q"))
         self.assertEqual([f.provider for f in ctx.exception.failures],
                          ["first", "second"])
+
+
+class CandidateMergeTests(unittest.TestCase):
+    """The picker path: metadata-only, no eager stream downloads."""
+
+    def setUp(self):
+        self._saved = list(sources._CANDIDATE_PROVIDERS)
+
+    def tearDown(self):
+        sources._CANDIDATE_PROVIDERS = self._saved
+
+    def _provider(self, hits: list[Candidate]):
+        async def provide(query, limit):
+            return hits[:limit]
+        return provide
+
+    def test_hits_from_both_providers_are_merged_and_capped(self):
+        from cogs.music_sources.model import Candidate
+        deezer_hits = [Candidate("deezer", f"Song {i}", "Artist A") for i in range(4)]
+        audius_hits = [Candidate("audius", f"Track {i}", "Artist B") for i in range(4)]
+        sources._CANDIDATE_PROVIDERS = (self._provider(deezer_hits),
+                                        self._provider(audius_hits))
+        results = asyncio.run(sources.search_candidates("q", limit=5))
+        self.assertEqual(len(results), 5)
+        self.assertEqual({c.provider for c in results}, {"deezer", "audius"})
+
+    def test_same_artist_title_is_deduplicated(self):
+        from cogs.music_sources.model import Candidate
+        dup = Candidate("audius", "Shape of You", "Ed Sheeran")
+        first = Candidate("deezer", "shape of you", "ed sheeran")
+        sources._CANDIDATE_PROVIDERS = (self._provider([first]),
+                                        self._provider([dup]))
+        results = asyncio.run(sources.search_candidates("q"))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].provider, "deezer")
+
+    def test_a_dead_provider_shrinks_but_does_not_kill_results(self):
+        from cogs.music_sources.model import Candidate
+
+        async def boom(query, limit):
+            raise RuntimeError("deezer is down")
+
+        alive = [Candidate("audius", "Song", "Artist")]
+        sources._CANDIDATE_PROVIDERS = (boom, self._provider(alive))
+        results = asyncio.run(sources.search_candidates("q"))
+        self.assertEqual([c.provider for c in results], ["audius"])
+
+    def test_link_queries_return_no_candidates(self):
+        # A link names one track; offering a list of search hits would be wrong.
+        results = asyncio.run(
+            sources.search_candidates("https://youtu.be/dQw4w9WgXcQ"))
+        self.assertEqual(results, [])
+
+    def test_materialize_routes_by_provider(self):
+        from cogs.music_sources.model import Candidate
+
+        marker = {}
+
+        async def fake_materialize(candidate):
+            marker["provider"] = candidate.provider
+            return Playable(provider=candidate.provider, title="T", stream_url="u")
+
+        import cogs.music_sources.deezer as dz
+        import cogs.music_sources.audius as au
+        old_dz, old_au = dz.materialize, au.materialize
+        dz.materialize = fake_materialize
+        au.materialize = fake_materialize
+        try:
+            for provider in ("deezer", "audius"):
+                result = asyncio.run(
+                    sources.materialize(Candidate(provider, "T", payload={"SNG_ID": 1})))
+                self.assertEqual(marker["provider"], provider)
+                self.assertEqual(result.title, "T")
+            with self.assertRaises(SourceUnavailable):
+                asyncio.run(sources.materialize(Candidate("mystery", "T")))
+        finally:
+            dz.materialize = old_dz
+            au.materialize = old_au
+
+
+class LinkRoutingTests(unittest.TestCase):
+    """A pasted link must become an ordinary provider search, never a fetch."""
+
+    def setUp(self):
+        self._saved = list(sources._PROVIDERS)
+        self.seen: list[str] = []
+
+    def tearDown(self):
+        sources._PROVIDERS = self._saved
+
+    def _capture(self):
+        seen = self.seen
+
+        async def capture(query):
+            seen.append(query)
+            return Playable(provider="deezer", title="Shape of You",
+                            stream_url="u", artist="Ed Sheeran")
+
+        sources._PROVIDERS = (capture,)
+        return capture
+
+    def test_youtube_link_is_parsed_then_searched(self):
+        # Stub fetch_parsed: the live oEmbed call is exercised on the host, not here.
+        async def fake_parse(intent, session):
+            return links.ParsedTrack(
+                title="Shape of You (Official Video)",
+                artist="Ed Sheeran - Topic",
+                webpage_url=intent.webpage_url, provider="youtube")
+
+        original = links.fetch_parsed
+        links.fetch_parsed = fake_parse
+        try:
+            self._capture()
+            result = asyncio.run(
+                sources.resolve_playable("https://youtu.be/xTvyyoF_LZY"))
+        finally:
+            links.fetch_parsed = original
+        self.assertEqual(self.seen, ["Ed Sheeran Shape of You"])
+        self.assertEqual(result.title, "Shape of You")
+
+    def test_non_link_query_bypasses_the_link_parser_entirely(self):
+        async def boom(intent, session):
+            raise AssertionError("plain search text must not hit the link parser")
+
+        original = links.fetch_parsed
+        links.fetch_parsed = boom
+        try:
+            self._capture()
+            asyncio.run(sources.resolve_playable("shape of you ed sheeran"))
+        finally:
+            links.fetch_parsed = original
+        self.assertEqual(self.seen, ["shape of you ed sheeran"])
+
+    def test_unparseable_link_surfaces_a_useful_message(self):
+        async def fail(intent, session):
+            raise SourceUnavailable(intent.provider, "link_unreadable",
+                                    "Couldn't read that link — paste the title.")
+
+        original = links.fetch_parsed
+        links.fetch_parsed = fail
+        try:
+            self._capture()
+            with self.assertRaises(SourceUnavailable) as ctx:
+                asyncio.run(sources.resolve_playable("https://youtu.be/xTvyyoF_LZY"))
+        finally:
+            links.fetch_parsed = original
+        self.assertIn("paste the title", ctx.exception.message)
+
+    def test_playlist_link_is_refused_with_guidance(self):
+        with self.assertRaises(SourceUnavailable) as ctx:
+            asyncio.run(sources.resolve_playable(
+                "https://www.youtube.com/playlist?list=PL1234567890"))
+        self.assertEqual(ctx.exception.reason_code, "unsupported_link")
+
+    def test_ssrf_url_is_treated_as_plain_text_not_a_link(self):
+        # The core guarantee: an unrecognised host never reaches the parser.
+        async def boom(intent, session):
+            raise AssertionError("SSRF URL must not be parsed as a link")
+
+        original = links.fetch_parsed
+        links.fetch_parsed = boom
+        try:
+            self._capture()
+            asyncio.run(sources.resolve_playable("http://169.254.169.254/latest/"))
+        finally:
+            links.fetch_parsed = original
+        self.assertEqual(self.seen, ["http://169.254.169.254/latest/"])
 
 
 class RadioTests(unittest.TestCase):
