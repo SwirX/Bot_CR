@@ -292,6 +292,9 @@ class Apis(commands.Cog):
                                "`/lyrics imagine dragons believer`")
                 return
             track = player.current
+            if track.provider == "radio":
+                await ctx.send("📻 That's a live radio stream — it has no lyrics.")
+                return
             query = f"{track.artist} {track.title}".strip() or track.title
             label = track.title
         else:

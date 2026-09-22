@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [master, nightly]
+    branches: [master, main, nightly]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -24,10 +27,18 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install ruff
 
       - name: Byte-compile every module
         run: python -m compileall -q .
+
+      - name: Lint (ruff — real bug classes only)
+        # F = pyflakes: unused/undefined names, f-string gaps, shadowing.
+        # E/W style debt is deliberately not gated yet; F-classes are the ones
+        # that indicate an actual defect.
+        run: ruff check . --select F --exclude .venv-local
 
       - name: Cog load smoke test
         env:
@@ -39,5 +50,28 @@ jobs:
           PORT: "8080"
         run: python scripts/smoke_test.py
 
-      - name: mc-link crypto tests (hermetic)
-        run: python scripts/test_mclink.py
+      # Previously 21 of the 24 test files were never executed by CI, so the
+      # README's "CI runs the full suite" was fiction. These run for real now.
+      # The three excluded files call store.init() against the LIVE hub and
+      # need real credentials — they are integration tests, not unit tests.
+      - name: Unit test suite (hermetic)
+        env:
+          BOT_TOKEN: ci-placeholder-token
+          APPWRITE_ENDPOINT: https://appwrite.alibks.dev/v1
+          APPWRITE_PROJECT_ID: robotics-ops
+          APPWRITE_DATABASE_ID: robotics_hub
+          APPWRITE_API_KEY: ci-placeholder-key
+          PORT: "8080"
+        run: |
+          set -euo pipefail
+          for t in scripts/test_*.py; do
+            case "$(basename "$t")" in
+              test_meeting_store.py|test_mc_hub.py|test_memberlinks.py)
+                echo "— skipping integration test $t (needs live credentials)"
+                continue
+                ;;
+            esac
+            echo "::group::$t"
+            python "$t"
+            echo "::endgroup::"
+          done

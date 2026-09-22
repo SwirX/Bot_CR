@@ -23,6 +23,10 @@ Identity model
 * ``warnings`` rows (card_type="yellow" — the hub enum, used for warns) —
   one row per warning; ``get_member`` counts them so the flat record keeps
   its legacy ``warnings`` integer.
+* ``meetings`` rows — one per meeting session (voice channel + start/end), and
+  ``meeting_sessions`` rows — one per *join*, so leave-and-return is
+  reconstructable from the hub alone. The channel's pre-meeting permission
+  overwrites live in a ``bot_settings`` sidecar key ``meeting_side:{id}``.
 * freetext Discord-only mirrors that have no hub column (the ``links`` map,
   ``mc_username``, the raw cell label when no department row matches) live in
   a ``bot_settings`` sidecar key ``member_side:{uid}``.
@@ -38,6 +42,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from appwrite.exception import AppwriteException
@@ -50,6 +55,8 @@ from data.appwrite_client import (
     is_missing,
     seed_club_roles as _seed_roles_sync,
 )
+from data.levels import level_from_xp
+from data.names import best_match, normalize_name
 
 LOG = logging.getLogger("bot.store")
 
@@ -72,10 +79,15 @@ _T = {
     "polls": "polls",
     "modlog": "modlog",
     "bot_settings": "bot_settings",
+    "meetings": "meetings",
+    "meeting_sessions": "meeting_sessions",
 }
 
 # Defaults used when a discord_data row has to be bootstrapped (REQ columns).
-_DD_DEFAULTS = {"xp": 0, "messages": 0, "voice_seconds": 0, "verified": False}
+# ``level`` mirrors the derived level_from_xp curve, materialized on every XP
+# write so the dashboard/web never has to reimplement the bot's curve.
+_DD_DEFAULTS = {"xp": 0, "messages": 0, "voice_seconds": 0, "verified": False,
+                "level": 0}
 
 # Far-future sentinel for REQUIRED datetime columns (event/comp dates): keeps
 # the "no date = always upcoming" behaviour and round-trips back to "".
@@ -139,17 +151,25 @@ def _norm_iso(text: str) -> str:
 
 
 def _parse_ts(value) -> datetime | None:
-    """Parse a hub timestamp (ISO-8601, may end in Z) into a tz-aware
-    datetime; None on any unparseable/empty input (never raises)."""
+    """Parse a hub timestamp (ISO-8601, may end in Z) into a **tz-aware**
+    datetime; None on any unparseable/empty input (never raises).
+
+    A string with no offset (``2026-09-22T00:12:10``) used to come back naive
+    even though the docstring promised aware, so comparing it with an aware
+    value raised ``TypeError`` — which is not a ``StoreError`` and therefore
+    escaped the watcher cycle, silently skipping OTP minting *and* pair expiry
+    for every other player. Assume UTC when the source omits an offset.
+    """
     text = str(value or "").strip()
     if not text:
         return None
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _event_date_in(text) -> str:
@@ -289,6 +309,13 @@ class Store:
     _rel_cache: dict[str, tuple[str, ...]] | None = None
 
     async def _rel_columns(self, table: str) -> tuple[str, ...]:
+        # A failed introspection must NOT be cached. `cache = {}` is not None,
+        # so the old code stored it and never retried: one transient 502/timeout
+        # during the first-ever _patch disabled relationship-column handling for
+        # the whole process, and every write on memberships / links / otp /
+        # meetings / tasks / polls then 400'd with relationship_value_invalid —
+        # permanently, with only a warning at boot. Leaving it None means the
+        # next call retries.
         if self._rel_cache is None:
             cache: dict[str, tuple[str, ...]] = {}
             try:
@@ -301,24 +328,37 @@ class Store:
                     if rels:
                         cache[d.get("$id")] = rels
             except AppwriteException as exc:
-                LOG.warning("could not inspect table relationships: %s", exc)
-                cache = {}
+                LOG.warning("could not inspect table relationships: %s — "
+                            "will retry on next use", exc)
+                return ()
             self._rel_cache = cache
         return self._rel_cache.get(table, ())
 
     async def _write(self, table: str, row_id: str, data: dict,
-                     *, defaults: dict | None = None) -> None:
+                     *, defaults: dict | None = None,
+                     create_only: bool = False) -> None:
         """Patch an existing row, or create it with ``defaults`` + data.
 
         Partial-update semantics everywhere instead of full-row upserts: hub
         columns are stricker than the legacy free-form docs, and every call
         site knows exactly which values it wants to touch.
+
+        ``create_only`` refuses to patch an existing row. The human-friendly id
+        generators (poll/task codes) are read-then-write, so a collision would
+        otherwise *silently overwrite* a live row — two members creating a poll
+        at the same moment both got ``P-7`` and the second clobbered the first
+        with its votes. Raising turns that into a loud, retryable failure.
         """
         existing = await self._get(table, row_id)
         if existing is None:
             payload = dict(defaults or {})
             payload.update({k: v for k, v in data.items()})
             await self._create(table, row_id, payload)
+        elif create_only:
+            raise StoreError(
+                f"{table}/{row_id} already exists and this write is "
+                "create-only (refusing to overwrite)"
+            )
         else:
             await self._patch(table, row_id, data)
 
@@ -458,21 +498,66 @@ class Store:
     # ── members (flat legacy record shape) ────────────────────
     async def get_member(self, user_id: int) -> dict | None:
         uid = str(user_id)
-        duser = await self._get(_T["discord_users"], uid)
-        ddata = await self._get(_T["discord_data"], uid)
+        # The five independent reads below used to run strictly one after
+        # another — 7-9 sequential HTTP round trips for a single profile card.
+        # /cell add calls this once per tagged member, so ten tags meant ~150
+        # sequential requests: well past Discord's 3s interaction deadline, with
+        # the writes partly applied. They don't depend on each other, so gather.
+        duser, ddata, mship, mem, side, warnings, club_link = await asyncio.gather(
+            self._get(_T["discord_users"], uid),
+            self._get(_T["discord_data"], uid),
+            self._get(_T["memberships"], uid),
+            self._get(_T["members"], uid),
+            self._read_sidecar(uid),
+            self._count(_T["warnings"], [Query.equal("member", uid)]),
+            self._club_link(uid),
+        )
         if duser is None and ddata is None:
             return None  # never seen — same contract as the legacy collection
-        mship = await self._get(_T["memberships"], uid)
-        mem = await self._get(_T["members"], uid)
-        side = await self._read_sidecar(uid)
-        warnings = await self._count(
-            _T["warnings"], [Query.equal("member", uid)])
-        return await self._assemble(uid, duser, ddata, mship, mem, side, warnings)
+        club_member_id, club_member_name = club_link
+        return await self._assemble(
+            uid, duser, ddata, mship, mem, side, warnings,
+            club_member_id=club_member_id, club_member_name=club_member_name)
+
+    async def get_members(self, user_ids) -> list[dict]:
+        """Flat records for many Discord ids (batched $id queries).
+
+        Members with no identity row at all are omitted (same contract as
+        get_member returning None). Bulk path for sweeps/audits.
+        """
+        ids = [str(uid) for uid in user_ids if uid]
+        if not ids:
+            return []
+        ddata = await self._get_rows_batch(_T["discord_data"], ids)
+        dusers = await self._get_rows_batch(_T["discord_users"], ids)
+        mems = await self._get_rows_batch(_T["members"], ids)
+        mships = await self._get_rows_batch(_T["memberships"], ids)
+        sides = await self._sidecar_batch(ids)
+        out = []
+        for uid in ids:
+            if ddata.get(uid) is None and dusers.get(uid) is None:
+                continue
+            out.append(await self._assemble(
+                uid, dusers.get(uid), ddata.get(uid), mships.get(uid),
+                mems.get(uid), sides.get(uid)))
+        return out
+
+    async def _club_link(self, uid: str) -> tuple[str, str]:
+        """(club member id, club member name) via member_discord_links."""
+        link = await self.discord_member_link(uid)
+        member_id = _rel_id((link or {}).get("member")) if link else ""
+        if not member_id:
+            return "", ""
+        row = await self._get(_T["members"], member_id)
+        return member_id, (row or {}).get("name") or ""
 
     async def _assemble(self, uid: str, duser: dict | None, ddata: dict | None,
                         mship: dict | None, mem: dict | None,
-                        side: dict | None, warnings: int = 0) -> dict:
+                        side: dict | None, warnings: int = 0,
+                        club_member_id: str = "",
+                        club_member_name: str = "") -> dict:
         side = side or {}
+        xp = int((ddata or {}).get("xp") or 0)
         rec = {
             "$id": uid,
             "user_id": uid,
@@ -484,7 +569,8 @@ class Store:
             "birthday": (ddata or {}).get("birthday") or "",
             "birthday_full": (ddata or {}).get("birthday_full") or "",
             "verified": bool((ddata or {}).get("verified")),
-            "xp": int((ddata or {}).get("xp") or 0),
+            "xp": xp,
+            "level": level_from_xp(xp),
             "messages": int((ddata or {}).get("messages") or 0),
             "voice_seconds": int((ddata or {}).get("voice_seconds") or 0),
             "last_xp_at": _iso_text((ddata or {}).get("last_xp_at")),
@@ -495,6 +581,8 @@ class Store:
             "cell": await self._cell_display(mship, side.get("cell") or ""),
             "links": side.get("links"),
             "mc_username": side.get("mc_username") or "",
+            "club_member_id": club_member_id,
+            "club_member_name": club_member_name,
         }
         for key in _EMPTY_NOTIFY:
             value = (ddata or {}).get(key)
@@ -508,7 +596,8 @@ class Store:
 
         # Discord-side identity -> discord_users.
         du = {k: data[k] for k in
-              ("username", "display_name", "avatar_url", "joined_at") if k in data}
+              ("username", "display_name", "avatar_url", "joined_at",
+               "role_id") if k in data}
         if du:
             await self._write(_T["discord_users"], uid, du,
                               defaults={"username": du.get("username") or ""})
@@ -608,7 +697,10 @@ class Store:
             return
         cur = await self._get(_T["discord_data"], uid)
         value = int((cur or {}).get(field) or 0) + amount
-        await self._write(_T["discord_data"], uid, {field: value},
+        payload = {field: value}
+        if field == "xp":  # persist the derived level alongside the XP
+            payload["level"] = level_from_xp(value)
+        await self._write(_T["discord_data"], uid, payload,
                           defaults=_DD_DEFAULTS)
 
     async def flush_member_activity(self, activity: dict) -> None:
@@ -641,8 +733,10 @@ class Store:
                         payload[key] = int(payload.get(key) or 0) + int(amount)
                 except (TypeError, ValueError):
                     continue
-            await self._write(_T["discord_data"], uid,
-                              {k: payload[k] for k in fields},
+            out = {k: payload[k] for k in fields}
+            if "xp" in fields:  # persist the derived level alongside the XP
+                out["level"] = level_from_xp(payload["xp"])
+            await self._write(_T["discord_data"], uid, out,
                               defaults=_DD_DEFAULTS)
 
     async def list_members(self, *, limit: int = 100,
@@ -662,17 +756,173 @@ class Store:
         mems = await self._get_rows_batch(_T["members"], uids)
         mships = await self._get_rows_batch(_T["memberships"], uids)
         sides = await self._sidecar_batch(uids)
+        links = await self._member_link_index()
+        # Club member names for whatever the links point at (usually few).
+        member_ids = {_rel_id(l.get("member")) for l in links.values() if l}
+        club_rows = await self._get_rows_batch(_T["members"], member_ids)
         out = []
         for row in rows:
             uid = row["$id"]
+            link = links.get(uid)
+            club_member_id = _rel_id((link or {}).get("member")) if link else ""
             out.append(await self._assemble(
                 uid, dusers.get(uid), row, mships.get(uid), mems.get(uid),
-                sides.get(uid)))
+                sides.get(uid),
+                club_member_id=club_member_id,
+                club_member_name=(club_rows.get(club_member_id) or {})
+                .get("name") or ""))
         return out
 
+    # ── Club member ↔ Discord links (member_discord_links) ─────────
+    # The web "Members" page joins the club registry (members, UUID rows) with
+    # Discord identities through member_discord_links (1:1 both sides). The bot
+    # writes these rows via /linkmember (staff, always verified) and via
+    # auto-linking when a Discord real name uniquely matches a club member.
+
+    async def list_club_members(self, *, limit: int = 500) -> list[dict]:
+        """The club registry: members rows, as {"$id", "name"}."""
+        rows = await self._listed(_T["members"], limit)
+        return [{"$id": r["$id"], "name": str(r.get("name") or "")}
+                for r in rows]
+
+    async def _member_link_index(self) -> dict[str, dict]:
+        """discord uid -> {"member": club member id, "is_verified": bool}."""
+        rows = await self._listed(_T["member_discord_links"], 2000)
+        out: dict[str, dict] = {}
+        for row in rows:
+            duser = _rel_id(row.get("discord_user"))
+            if duser:
+                out[duser] = {
+                    "member": _rel_id(row.get("member")),
+                    "is_verified": bool(row.get("is_verified")),
+                }
+        return out
+
+    async def discord_member_link(self, discord_id) -> dict | None:
+        """The member_discord_links row for a Discord user (orphans cleaned)."""
+        uid = str(discord_id)
+        rows = await self._listed(
+            _T["member_discord_links"], 25,
+            queries=[Query.equal("discord_user", uid)])
+        return rows[0] if rows else None
+
+    async def member_discord_link(self, member_id: str) -> dict | None:
+        """The member_discord_links row for a club member."""
+        rows = await self._listed(
+            _T["member_discord_links"], 25,
+            queries=[Query.equal("member", str(member_id))])
+        return rows[0] if rows else None
+
+    async def link_member_discord(self, member_id: str, discord_id,
+                                  *, verified: bool = True) -> str:
+        """Write/repair a member_discord_links row (1:1 both sides).
+
+        Creates the link, or re-points the row already held by either side
+        (oneToOne uniqueness would otherwise 409). Both related rows must
+        exist — TablesDB silently drops FKs whose related doc is missing.
+        """
+        uid = str(discord_id)
+        member_id = str(member_id)
+        await self._ensure_discord_identity(uid)
+        if await self._get(_T["members"], member_id) is None:
+            raise StoreError(f"club member {member_id!r} not found")
+        existing = await self.discord_member_link(uid) \
+            or await self.member_discord_link(member_id)
+        now = _now_iso()
+        if existing:
+            await self._patch(_T["member_discord_links"], existing["$id"], {
+                "member": member_id,
+                "discord_user": uid,
+                "is_verified": bool(verified),
+                "linked_at": now,
+            })
+            return existing["$id"]
+        try:
+            return await self._create(_T["member_discord_links"], ID.unique(), {
+                "is_verified": bool(verified),
+                "linked_at": now,
+                "member": member_id,
+                "discord_user": uid,
+            })
+        except StoreError:
+            # 409 race — someone else just linked this side; re-point instead.
+            existing = await self.discord_member_link(uid) \
+                or await self.member_discord_link(member_id)
+            if existing:
+                await self._patch(_T["member_discord_links"],
+                                  existing["$id"], {
+                                      "member": member_id,
+                                      "discord_user": uid,
+                                      "is_verified": bool(verified),
+                                      "linked_at": now,
+                                  })
+                return existing["$id"]
+            raise
+
+    async def unlink_member_discord(self, discord_id) -> int:
+        """Drop the Discord side's member_discord_links row(s); return count."""
+        uid = str(discord_id)
+        rows = await self._listed(
+            _T["member_discord_links"], 25,
+            queries=[Query.equal("discord_user", uid)])
+        removed = 0
+        tdb, db_id = self._raw()
+        for row in rows:
+            try:
+                await asyncio.to_thread(
+                    tdb.delete_row, db_id, _T["member_discord_links"],
+                    row["$id"])
+                removed += 1
+            except AppwriteException as exc:
+                if not is_missing(exc):
+                    raise StoreError(f"unlink {row['$id']}: {exc}") from exc
+        return removed
+
+    async def maybe_auto_link_club_member(self, discord_id,
+                                          real_name: str) -> str | None:
+        """Auto-link a Discord user to their club member row by name.
+
+        Runs when a real name is set (onboarding / /fixname). Never clobbers
+        an existing link; only fires on a confident, unambiguous match (best
+        score ≥ AUTO_LINK_THRESHOLD, no tie). Exact matches are verified, fuzzy
+        ones land as unverified pending a staff check.
+        """
+        name = normalize_name(real_name)
+        if not name:
+            return None
+        uid = str(discord_id)
+        if await self.discord_member_link(uid):
+            return None  # already linked — staff links win, nothing to do
+        if await self._get(_T["discord_users"], uid) is None:
+            return None  # never seen on Discord — don't invent identities
+        members = await self.list_club_members()
+        match = best_match(real_name, [(m["$id"], m["name"])
+                                       for m in members])
+        if not match:
+            return None
+        member_id, member_name, score = match
+        return await self.link_member_discord(
+            member_id, uid, verified=(score >= 0.99))
+
     # ── global counters (derived) ─────────────────────────────
+    # get_counters() sums the whole discord_data table. The dashboard called it
+    # twice a minute (once directly, once via stats.view_total_voice_seconds),
+    # so this is the single hottest read path in the bot: 2 x ceil(N/25)
+    # sequential HTTP round trips per refresh, all through asyncio.to_thread and
+    # therefore competing with every other store call for the default executor.
+    # A short TTL cache collapses a burst of dashboard refreshes into one scan;
+    # the numbers only move on a flush, so a 60s window is imperceptible.
+    _counters_cache: tuple[float, dict] | None = None
+    _COUNTERS_TTL_SECONDS = 60.0
+
     async def get_counters(self) -> dict:
         """Global totals derived by summing discord_data + settings stamps."""
+        cached = self.__dict__.get("_counters_cache")
+        if cached is not None:
+            stamp, payload = cached
+            if (time.monotonic() - stamp) < self._COUNTERS_TTL_SECONDS:
+                return dict(payload)
+
         boot = (await self.get_setting("boot_at")) or ""
         last = (await self.get_setting("last_flush_at")) or ""
         total_messages = 0
@@ -687,16 +937,20 @@ class Store:
             if len(page) < 25:
                 break
             offset += 25
-        return {
+        payload = {
             "total_messages": total_messages,
             "total_voice_seconds": total_voice,
             "boot_at": boot,
             "last_flush_at": last,
         }
+        self.__dict__["_counters_cache"] = (time.monotonic(), payload)
+        return dict(payload)
 
     async def bump_counters(self, *, messages: int = 0,
                             voice_seconds: float = 0.0) -> None:
         """Stamp the flush marker (totals are derived, not stored)."""
+        # The derived totals just changed underneath the TTL cache.
+        self.__dict__.pop("_counters_cache", None)
         now = _now_iso()
         if (await self.get_setting("boot_at")) is None:
             await self.set_setting("boot_at", now)
@@ -826,7 +1080,7 @@ class Store:
         return side if isinstance(side, dict) else {}
 
     async def list_tasks(self) -> list[dict]:
-        rows = await self._listed(_T["tasks"], 100)
+        rows = await self._listed(_T["tasks"], 1000)
         side = await self._batch_settings([f"task_cell.{r['$id']}" for r in rows])
         out = []
         for r in rows:
@@ -843,7 +1097,8 @@ class Store:
         return self._task_out(row, meta.get("cell") or "",
                               str(meta.get("status") or ""))
 
-    async def save_task(self, payload: dict) -> None:
+    async def save_task(self, payload: dict, *,
+                         create_only: bool = False) -> None:
         task_id = payload.get("task_id")
         if not task_id:
             raise StoreError("save_task requires a task_id")
@@ -876,7 +1131,22 @@ class Store:
                           defaults={"title": data["title"],
                                     "status": data["status"],
                                     "priority": data["priority"],
-                                    "source": "bot"})
+                                    "source": "bot"},
+                          create_only=create_only)
+
+    async def create_task(self, payload: dict, *, attempts: int = 5) -> str:
+        """Create a task under the next free ``T-N`` code. Returns the id."""
+        for _ in range(attempts):
+            task_id = await self.next_task_code()
+            try:
+                await self.save_task({**payload, "task_id": task_id},
+                                      create_only=True)
+                return task_id
+            except StoreError as exc:
+                if "create-only" not in str(exc):
+                    raise
+                LOG.info("task code %s collided; retrying with the next", task_id)
+        raise StoreError("could not allocate a free task id")
 
     async def _ensure_members_row(self, member_id: str) -> str:
         """Lazily create the members stub a club-state FK points at."""
@@ -892,9 +1162,14 @@ class Store:
         return member_id
 
     async def next_task_code(self) -> str:
-        """Next human-friendly task id, e.g. T-13 (skips existing codes)."""
-        rows = await self._listed(_T["tasks"], 100)
-        used = {str(r["$id"]) for r in rows}
+        """Next human-friendly task id, e.g. T-13 (skips existing codes).
+
+        Paged to exhaustion: the previous first-100-rows version derived the
+        number from a truncated id set, so past 100 tasks it could hand out a
+        code that already existed — and ``save_task`` patches on collision,
+        which would have silently overwritten a live task.
+        """
+        used = await self._existing_ids(_T["tasks"])
         n = len(used) + 1
         code = f"T-{n}"
         while code in used:
@@ -918,7 +1193,7 @@ class Store:
         }
 
     async def list_competitions(self) -> list[dict]:
-        rows = await self._listed(_T["competitions"], 100)
+        rows = await self._listed(_T["competitions"], 1000)
         return [self._competition_out(r) for r in rows]
 
     async def get_competition(self, slug: str) -> dict | None:
@@ -998,7 +1273,7 @@ class Store:
         }
 
     async def list_events(self) -> list[dict]:
-        rows = await self._listed(_T["events"], 100)
+        rows = await self._listed(_T["events"], 1000)
         return [self._event_out(r) for r in rows]
 
     async def get_event(self, slug: str) -> dict | None:
@@ -1098,7 +1373,8 @@ class Store:
             return None
         return self._poll_out(row)
 
-    async def save_poll(self, poll_id: str, payload: dict) -> None:
+    async def save_poll(self, poll_id: str, payload: dict, *,
+                         create_only: bool = False) -> None:
         created_by = str(payload.get("created_by") or "").strip()
         if created_by:
             await self._ensure_members_row(created_by)
@@ -1117,18 +1393,65 @@ class Store:
                           defaults={"question": data["question"],
                                     "hide_results": data["hide_results"],
                                     "closed": data["closed"],
-                                    "source": "bot"})
+                                    "source": "bot"},
+                          create_only=create_only)
+
+    async def create_poll(self, payload: dict, *, attempts: int = 5) -> str:
+        """Create a poll under the next free ``P-N`` code. Returns the id.
+
+        ``next_poll_code`` is read-then-write, so two concurrent creates can
+        pick the same code. Creating create-only turns that silent overwrite
+        (which destroyed the first poll *and* its votes) into a retry.
+        """
+        for _ in range(attempts):
+            poll_id = await self.next_poll_code()
+            try:
+                await self.save_poll(poll_id, payload, create_only=True)
+                return poll_id
+            except StoreError as exc:
+                if "create-only" not in str(exc):
+                    raise
+                LOG.info("poll code %s collided; retrying with the next", poll_id)
+        raise StoreError("could not allocate a free poll id")
 
     async def next_poll_code(self) -> str:
-        """Next human-friendly poll id, e.g. P-7 (skips existing ids)."""
-        rows = await self._listed(_T["polls"], 100)
-        used = {str(r["$id"]) for r in rows}
+        """Next human-friendly poll id, e.g. P-7 (skips existing ids).
+
+        Two bugs lived here. It paged only the first 100 rows, so with more
+        than 100 polls ``len(used) + 1`` derived the number from a truncated
+        set and could return an id that already existed off-page. And because
+        the caller then went through ``_write`` — which *patches* when the row
+        exists — two concurrent creates both landing on ``P-7`` silently
+        overwrote the first poll and all of its votes, with no error anywhere.
+        """
+        used = await self._existing_ids(_T["polls"])
         n = len(used) + 1
         code = f"P-{n}"
         while code in used:
             n += 1
             code = f"P-{n}"
         return code
+
+    async def _existing_ids(self, table: str, cap: int = 20_000) -> set[str]:
+        """Every row id in ``table`` (paged to exhaustion up to ``cap``).
+
+        Used by the human-friendly code generators. A truncated id set makes
+        them hand out codes that already exist, which ``_write`` then turns
+        into a silent data-destroying overwrite.
+        """
+        ids: set[str] = set()
+        offset = 0
+        page = 25
+        while len(ids) < cap:
+            rows = await self._list(
+                table, [Query.limit(page), Query.offset(offset)])
+            if not rows:
+                break
+            ids.update(str(r.get("$id")) for r in rows)
+            if len(rows) < page:
+                break
+            offset += page
+        return ids
 
     # ── Minecraft login (OTP-only) + links ───────────────────
     # OTP-only contract (mc-link plugin, MITIGATION-PLAN §5):
@@ -1229,7 +1552,7 @@ class Store:
     async def mc_stale_pairs(self, older_than: datetime) -> list[dict]:
         """Unclaimed (is_active=False) pair rows created before ``older_than``."""
         rows = await self._listed(
-            _T["discord_mc_links"], 100,
+            _T["discord_mc_links"], 1000,
             queries=[Query.equal("is_active", False)])
         out = []
         for row in rows:
@@ -1241,10 +1564,19 @@ class Store:
     # ── OTP minting ──────────────────────────────────────────
     async def mc_list_pending_otps(self) -> list[dict]:
         """minecraft_otp rows the plugin armed but no code is minted for yet
-        (enabled with an empty otp_hash — the "pending mint" state)."""
+        (enabled with an empty otp_hash — the "pending mint" state).
+
+        FIFO by ``challenge_at`` so the queue actually drains, and paged far
+        past the old 100-row cap. That cap had no ordering and no drain path:
+        rows whose owner couldn't be resolved stayed pending forever, so once
+        100 accumulated the same arbitrary page came back every cycle and
+        **no new player could ever receive a login OTP** — a silent, total
+        Minecraft login lockout.
+        """
         rows = await self._listed(
-            _T["minecraft_otp"], 100,
-            queries=[Query.equal("enabled", True)])
+            _T["minecraft_otp"], 1000,
+            queries=[Query.equal("enabled", True),
+                     Query.order_asc("challenge_at")])
         return [r for r in rows if not str(r.get("otp_hash") or "")]
 
     async def mc_mint_otp(self, row_id: str, *, otp_hash: str, otp_salt: str,
@@ -1271,6 +1603,81 @@ class Store:
             "failed_attempts": 0,
         })
         return True
+
+    async def mc_rearm_otp(self, row_id: str, *, otp_hash: str, otp_salt: str,
+                           challenge_at: str, expires_at: str) -> bool:
+        """Force-enable an OTP row with a freshly minted hash — the /mcotp
+        resend path.
+
+        Unlike ``mc_mint_otp`` this also revives rows the watcher expired
+        (enabled=False) after its own DM failed, so a closed-DM player at the
+        login screen can pull the code through ``/mcotp`` instead of being
+        stuck waiting for a DM that never arrives. False when the row is gone
+        or when there is nothing to re-arm.
+
+        Two things it deliberately does NOT do any more:
+
+        * It refuses to replace a *live* code. The row was fetched but ignored,
+          so ``/mcotp`` overwrote whatever was there — including a consumed
+          credential slot — and let a user mint unbounded codes at 2/min,
+          bypassing the watcher's cooldown entirely.
+        * It no longer resets ``failed_attempts``. That column is the plugin's
+          brute-force lockout; zeroing it from a user-facing button made the
+          lockout trivially resettable.
+        """
+        if not row_id:
+            return False
+        tdb, db_id = self._raw()
+        try:
+            row = await asyncio.to_thread(
+                tdb.get_row, db_id, _T["minecraft_otp"], row_id)
+        except AppwriteException as exc:
+            if is_missing(exc):
+                return False
+            raise StoreError(f"rearm otp {row_id}: {exc}") from exc
+
+        # Refuse when there is already a live, unexpired, minted code.
+        data = self._row_data(row)
+        if data.get("enabled") and str(data.get("otp_hash") or ""):
+            expires = _parse_ts(data.get("expires_at"))
+            if expires is not None and expires > datetime.now(timezone.utc):
+                return False
+
+        await self._patch(_T["minecraft_otp"], row_id, {
+            "enabled": True,
+            "otp_hash": otp_hash,
+            "otp_salt": otp_salt,
+            "challenge_at": challenge_at,
+            "expires_at": expires_at,
+        })
+        return True
+
+    async def mc_otp_row_for_user(self, discord_id: int
+                                   ) -> tuple[str, dict] | None:
+        """(username, most recent minecraft_otp row) for the member's active
+        link — the row the plugin armed for their current join — or None.
+
+        The row may be pending-mint, already minted, or expired by the
+        watcher's failed DM; ``mc_rearm_otp`` makes any of those usable.
+        """
+        uid = str(discord_id)
+        links = await self._listed(
+            _T["discord_mc_links"], 25,
+            queries=[Query.equal("discord_user", uid),
+                     Query.equal("is_active", True)])
+        for link in links:
+            account_id = _rel_id(link.get("minecraft_account"))
+            if not account_id:
+                continue
+            account = await self.mc_resolve_account(account_id)
+            if account is None:
+                continue
+            rows = await self._listed(
+                _T["minecraft_otp"], 1, order_by="$createdAt",
+                queries=[Query.equal("minecraft_account", account_id)])
+            if rows:
+                return account.get("username") or "", rows[0]
+        return None
 
     async def mc_account_otp_owner(self, account_id: str
                                    ) -> tuple[str, int] | None:
@@ -1301,6 +1708,36 @@ class Store:
             _T["discord_mc_links"], 100,
             queries=[Query.equal("is_active", True)])
 
+    async def mc_active_link_for_user(self, discord_id) -> dict | None:
+        """The member's verified link straight from the hub, or None.
+
+        The hub tables are the source of truth; the member sidecar slot the
+        profile/hub cards used to read is only refreshed by the claim watcher
+        for links that activated *after* ``mc_link.last_claim``, so links that
+        predated the marker never displayed. Returns a dict shaped like the
+        legacy ``links.minecraft`` slot: username/type/uuids/linked_at.
+        """
+        uid = str(discord_id)
+        rows = await self._listed(
+            _T["discord_mc_links"], 50,
+            queries=[Query.equal("discord_user", uid),
+                     Query.equal("is_active", True)])
+        for row in rows:
+            account_id = _rel_id(row.get("minecraft_account"))
+            if not account_id:
+                continue
+            account = await self.mc_resolve_account(account_id)
+            if account is None:
+                continue
+            return {
+                "username": (account.get("username") or account_id),
+                "type": "free" if bool(account.get("is_cracked")) else "paid",
+                "uuids": [str(u) for u in [account.get("uuid")] if u],
+                "linked_at": (row.get("verified_at")
+                              or row.get("$createdAt") or ""),
+            }
+        return None
+
     async def mc_deactivate_link(self, discord_id: int,
                                  username: str | None = None) -> None:
         """Flip the member's link row(s) back to inactive (unlink flow).
@@ -1316,7 +1753,7 @@ class Store:
             if not account:
                 return  # nothing to deactivate — account never existed
             queries.append(Query.equal("minecraft_account", account["$id"]))
-        rows = await self._listed(_T["discord_mc_links"], 100, queries=queries)
+        rows = await self._listed(_T["discord_mc_links"], 1000, queries=queries)
         for row in rows:
             await self._patch(_T["discord_mc_links"], row["$id"],
                               {"is_active": False})
@@ -1366,6 +1803,247 @@ class Store:
                  "discord_user": uid,
                  "minecraft_account": username},
                 defaults={"pair_key": username, "is_active": True})
+
+    # ── Meetings ──────────────────────────────────────────────────────────
+    # A ``meetings`` row is the meeting *session* (one voice channel, one start,
+    # one end). ``meeting_sessions`` rows are the attendance log: **one row per
+    # join**, so a member who leaves and comes back gets two rows with their own
+    # joined_at / left_at pair. Attendance is therefore append-only and the CSV
+    # export is a straight projection of the session rows — no aggregation
+    # state to lose if the bot restarts mid-meeting.
+    #
+    # The channel's pre-meeting permission overwrites are *not* a hub column:
+    # they are a Discord snapshot written to a ``bot_settings`` sidecar key
+    # ``meeting_side.{id}`` (same trick as ``task_cell.{id}``), because the
+    # overwrite list is Discord-shaped and only the bot reads it back.
+    @staticmethod
+    def _meeting_out(row: dict) -> dict:
+        """Hub meeting row -> flat dict the cog works with."""
+        started = _norm_iso(_iso_text(row.get("started_at")))
+        ended = _norm_iso(_iso_text(row.get("ended_at")))
+        return {
+            "id": row["$id"],
+            "title": row.get("title") or "",
+            "channel_id": str(row.get("channel_id") or ""),
+            "channel_name": row.get("channel_name") or "",
+            "scope": str(row.get("scope") or "bureau"),
+            "started_at": started,
+            "planned_minutes": int(row.get("planned_minutes") or 0),
+            "ended_at": ended,
+            "live": bool(row.get("live", ended == "")),
+            "locked": bool(row.get("locked")),
+            # ``expected`` is the audience snapshot taken at /meeting start —
+            # resolved then, not recomputed later, so the absent list still
+            # means something after a member leaves the club.
+            "expected": _from_json(row.get("expected"), []) or [],
+            "visitors": _from_json(row.get("visitors"), []) or [],
+            "granted": _from_json(row.get("granted"), []) or [],
+            "created_by": _rel_id(row.get("created_by")),
+        }
+
+    async def create_meeting(self, payload: dict) -> str:
+        """Create a meeting session row and return its id.
+
+        ``payload`` keys: title, channel_id, channel_name, scope,
+        started_at, planned_minutes, expected, visitors, created_by.
+        """
+        meeting_id = payload.get("id") or ID.unique()
+        started = _to_iso_datetime(payload.get("started_at")) or _now_iso()
+        data = {
+            "title": str(payload.get("title") or "Meeting")[:256],
+            "channel_id": str(payload.get("channel_id") or "")[:36],
+            "channel_name": str(payload.get("channel_name") or "")[:128],
+            "scope": str(payload.get("scope") or "bureau")[:16],
+            "started_at": started,
+            "planned_minutes": int(payload.get("planned_minutes") or 0),
+            "locked": bool(payload.get("locked")),
+            "live": True,
+            "expected": _as_json(payload.get("expected") or []),
+            "visitors": _as_json(payload.get("visitors") or []),
+            "granted": _as_json(payload.get("granted") or []),
+            "source": "bot",
+        }
+        # created_by is an FK to members, which may not exist for an admin who
+        # never touched their club profile — create the stub first or TablesDB
+        # NULLs the FK on insert.
+        if payload.get("created_by"):
+            await self._ensure_members_row(str(payload["created_by"]))
+            data["created_by"] = str(payload["created_by"])
+        await self._create(_T["meetings"], meeting_id, data)
+        return meeting_id
+
+    async def get_meeting(self, meeting_id: str) -> dict | None:
+        row = await self._get(_T["meetings"], str(meeting_id))
+        return self._meeting_out(row) if row else None
+
+    async def list_meetings(self, limit: int = 25, *,
+                            live: bool | None = None) -> list[dict]:
+        """Meetings newest-first, optionally filtered to live/finished ones."""
+        queries = [Query.order_desc("started_at")]
+        if live is not None:
+            queries.insert(0, Query.equal("live", bool(live)))
+        rows = await self._listed(_T["meetings"], max(1, limit), queries=queries)
+        return [self._meeting_out(r) for r in rows]
+
+    async def get_live_meeting(self) -> dict | None:
+        """The single in-progress meeting, or None.
+
+        Ties are broken by ``started_at`` desc (applied inside ``_listed``) so
+        two accidental starts still resolve to the newest one.
+        """
+        live = await self.list_meetings(1, live=True)
+        return live[0] if live else None
+
+    async def get_live_meeting_for_channel(self, channel_id: int) -> dict | None:
+        """The live meeting running in ``channel_id``, or None.
+
+        The voice-state listener hits this on *every* transition in the guild,
+        so the filter is pushed down to the hub rather than listing all
+        meetings and filtering in Python.
+        """
+        rows = await self._listed(
+            _T["meetings"], 1,
+            queries=[Query.equal("live", True),
+                     Query.equal("channel_id", str(channel_id))])
+        return self._meeting_out(rows[0]) if rows else None
+
+    async def latest_meeting(self) -> dict | None:
+        """Newest meeting of any kind — backs ``/meeting last``."""
+        rows = await self.list_meetings(1)
+        return rows[0] if rows else None
+
+    async def update_meeting(self, meeting_id: str, data: dict) -> None:
+        """Patch the whitelisted, bot-owned columns of a meeting row."""
+        allowed = {"title", "planned_minutes", "locked", "live", "ended_at",
+                   "expected", "visitors", "granted"}
+        patch = {k: v for k, v in (data or {}).items() if k in allowed}
+        if "ended_at" in patch:
+            patch["ended_at"] = _to_iso_datetime(patch["ended_at"]) or _now_iso()
+        for key in ("expected", "visitors", "granted"):
+            if key in patch:
+                patch[key] = _as_json(patch[key])
+        if not patch:
+            return
+        await self._patch(_T["meetings"], str(meeting_id), patch)
+
+    async def end_meeting(self, meeting_id: str, *, at=None) -> None:
+        """Stamp ``ended_at`` and flip ``live`` off in one patch."""
+        await self.update_meeting(meeting_id, {
+            "ended_at": _iso_text(at) or _now_iso(), "live": False,
+        })
+
+    async def set_meeting_locked(self, meeting_id: str, locked: bool) -> None:
+        await self.update_meeting(meeting_id, {"locked": bool(locked)})
+
+    async def grant_meeting_reentry(self, meeting_id: str, discord_id: int) -> None:
+        """Record that an admin let ``discord_id`` back into a locked meeting."""
+        meeting = await self.get_meeting(meeting_id)
+        if meeting is None:
+            raise StoreError(f"unknown meeting {meeting_id}")
+        granted = [str(g) for g in meeting["granted"]]
+        uid = str(discord_id)
+        if uid not in granted:
+            granted.append(uid)
+        await self.update_meeting(meeting_id, {"granted": granted})
+
+    # ── Meeting attendance ────────────────────────────────────────────────
+    @staticmethod
+    def _session_out(row: dict) -> dict:
+        return {
+            "id": row["$id"],
+            "meeting": _rel_id(row.get("meeting")),
+            "discord_user": str(row.get("discord_user") or ""),
+            "display_name": row.get("display_name") or "",
+            # How the attendee qualified for this meeting: bureau / cells / all /
+            # visitor (explicitly tagged) — drives the per-group rollup.
+            "scope_note": str(row.get("scope_note") or ""),
+            "joined_at": _norm_iso(_iso_text(row.get("joined_at"))),
+            "left_at": _norm_iso(_iso_text(row.get("left_at"))),
+            "open": bool(row.get("open", not row.get("left_at"))),
+        }
+
+    async def record_meeting_join(self, meeting_id: str, discord_id: int,
+                                  display_name: str = "", *,
+                                  scope_note: str = "",
+                                  admitted_by: int | None = None) -> str:
+        """Open an attendance row for a join; returns the new row id.
+
+        Append-only on purpose: one row per join is what makes "left, then came
+        back 20 minutes later" reconstructable without any in-memory state.
+        """
+        data = {
+            "discord_user": str(discord_id)[:36],
+            "display_name": str(display_name or "")[:128],
+            "scope_note": str(scope_note or "")[:16],
+            "joined_at": _now_iso(),
+            "open": True,
+            "meeting": str(meeting_id),
+        }
+        if admitted_by:
+            await self._ensure_members_row(str(admitted_by))
+            data["admitted_by"] = str(admitted_by)
+        # Best-effort club FK: an unlinked Discord account has no members row,
+        # and ``member`` is nullable, so a miss is fine.
+        try:
+            link = await self.discord_member_link(discord_id)
+        except StoreError:
+            link = None
+        if link and link.get("member"):
+            data["member"] = _rel_id(link.get("member"))
+        row_id = await self._create(_T["meeting_sessions"], ID.unique(), data)
+        return row_id
+
+    async def close_meeting_session(self, meeting_id: str, discord_id: int,
+                                    *, at=None) -> bool:
+        """Stamp ``left_at`` on the attendee's open row; True if one was open.
+
+        Guarded on ``open=True`` so a duplicate voice event can't close an
+        already-closed row and shorten someone's recorded attendance.
+        """
+        rows = await self._listed(
+            _T["meeting_sessions"], 1,
+            queries=[Query.equal("meeting", str(meeting_id)),
+                     Query.equal("discord_user", str(discord_id)),
+                     Query.equal("open", True)])
+        if not rows:
+            return False
+        await self._patch(_T["meeting_sessions"], rows[0]["$id"], {
+            "left_at": _to_iso_datetime(at) or _now_iso(), "open": False,
+        })
+        return True
+
+    async def list_meeting_sessions(self, meeting_id: str, *,
+                                    open_only: bool = False) -> list[dict]:
+        """Attendance rows for one meeting, oldest join first.
+
+        Paged to 5000, not 500: the CSV export, the report, ``absentee_ids``,
+        ``lock_targets`` and /meeting end's close loop all read through here, so
+        a club-wide meeting where people leave and return produced more than 500
+        rows and the overflow vanished with no warning — the CSV silently
+        under-reported and /meeting end left the tail unclosed.
+        """
+        queries = [Query.equal("meeting", str(meeting_id)),
+                   Query.order_asc("joined_at")]
+        if open_only:
+            queries.append(Query.equal("open", True))
+        rows = await self._listed(_T["meeting_sessions"], 5000, queries=queries)
+        return [self._session_out(r) for r in rows]
+
+    # ── Meeting channel-permission snapshot (bot_settings sidecar) ────────
+    async def save_meeting_channel_state(self, meeting_id: str,
+                                         snapshot: dict) -> None:
+        """Persist the channel's pre-meeting overwrites for ``/meeting end``."""
+        await self.set_setting(f"meeting_side.{meeting_id}",
+                               _as_json(snapshot or {}))
+
+    async def meeting_channel_state(self, meeting_id: str) -> dict:
+        """The pre-meeting overwrite snapshot, or ``{}`` when unavailable."""
+        try:
+            raw = await self.get_setting(f"meeting_side.{meeting_id}")
+        except StoreError:
+            return {}
+        side = _from_json(raw, {})
+        return side if isinstance(side, dict) else {}
 
 
 store = Store()

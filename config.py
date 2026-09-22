@@ -89,11 +89,108 @@ ROLE_LEAD = _env("ROLE_LEAD", "Lead")
 LEADER_ROLES = [s.strip() for s in _env(
     "LEADER_ROLES", "Lead,Vice President,President").split(",") if s.strip()]
 
+# ── Meeting admin / audience roles ─────────────────────────────────────
+# /meeting start, /meeting end, /meeting lock, /meeting unlock and the per-member
+# half of /meeting list and /meeting last are gated on MEETING_ADMIN_ROLES plus
+# MEETING_ADMIN_USER_IDS. These are EXACT Discord role display names (emoji
+# prefixes included) — the bot matches role names literally, so a stale name here
+# silently drops an admin. Matched through _perms.role_key, which strips emoji
+# and brackets, so "👨‍💻" and "👨💻" compare equal and a glyph mismatch cannot
+# quietly exclude the developer.
+#
+# The Bot Developer is here because the reports name individuals and carry a
+# button that writes to their profile: keeping someone with the technical
+# details out of the room where that is decided is how it gets misused. The
+# *other* bot-staff roles (server admins, the Server Developer) stay out — the
+# audience's organisers are still not the whole staff team. An individual can be
+# added to MEETING_ADMIN_USER_IDS instead of widening this list.
+#
+# The bot operator is covered through MEETING_ADMIN_USER_IDS so a role reshuffle
+# can't lock the club out of its own meeting log.
+ROLE_MANAGER = _env("ROLE_MANAGER", "「👸」Manager")
+MEETING_ADMIN_ROLES = frozenset(
+    r.strip() for r in _env(
+        "MEETING_ADMIN_ROLES",
+        f"{ROLE_ARCHON},{ROLE_PRESIDENT},{ROLE_VICE_PRESIDENT},"
+        f"{ROLE_MANAGER},{ROLE_BOT_DEVELOPER}",
+    ).split(",") if r.strip()
+)
+# Discord user ids that may always run the /meeting admin commands, whether or
+# not they hold any of the roles above. Set this explicitly rather than relying
+# on the BOT_ADMIN_USER_IDS fallback when a named person needs an override that
+# survives losing (or never having) the Archon role.
+MEETING_ADMIN_USER_IDS = frozenset(
+    int(i) for i in _env("MEETING_ADMIN_USER_IDS", _env("BOT_ADMIN_USER_IDS", ""))
+    .split(",") if i.strip().isdigit()
+)
+
+# Audience resolution for /meeting start. Roles are matched by an
+# emoji-stripped, case-insensitive *keyword* so a club that renames
+# "「🦾」Head of Project Unit" to "「🦾」Head of Projects Unit" still resolves,
+# while @everyone and the level/bio/pings roles can never leak into a meeting.
+BUREAU_OFFICE_KEYWORDS = ("archon", "president", "vice president", "manager")
+UNIT_HEAD_KEYWORDS = ("head", "chief", "lead")
+UNIT_MEMBER_KEYWORDS = ("member of",)
+# A role is only "a club member" if it also names a unit/cell, except for the
+# two catch-all membership tiers the club grants to everyone it counts.
+CATCHALL_MEMBER_KEYWORDS = ("new member", "old member")
+UNIT_KEYWORDS = ("unit", "cell", "club")
+
+# Roles that should never be treated as meeting audience, whatever their name.
+MEETING_EXCLUDED_ROLE_KEYWORDS = ("bot", "jockie", "easypoll", "minecraft ping")
+
+# How many extra tagged members /meeting start may add on top of the resolved
+# audience, and how many absentees the report page lists per page.
+MEETING_MAX_EXTRA_MEMBERS = _env("MEETING_MAX_EXTRA_MEMBERS", 25, cast=int)
+MEETING_ABSENTEE_PAGE_SIZE = _env("MEETING_ABSENTEE_PAGE_SIZE", 10, cast=int)
+# Members per page in the interactive member picker. Discord caps a select menu
+# at 25 options, so raising this past 25 does nothing but confuse.
+MEMBER_PICKER_PAGE_SIZE = max(1, min(25, _env("MEMBER_PICKER_PAGE_SIZE", 25,
+                                             cast=int)))
+# Cap on per-member "you already left" deny-overwrites a lock may create.
+# Discord allows 100 overwrites per channel, so the bot stays well clear of it.
+MEETING_MAX_LOCKED_OUT = _env("MEETING_MAX_LOCKED_OUT", 60, cast=int)
+# How many meetings the /meeting list dropdown offers. Discord rejects an app
+# command with more than 25 options, so this stays at or below that.
+MEETING_MAX_PICKER_OPTIONS = _env("MEETING_MAX_PICKER_OPTIONS", 25, cast=int)
+
 # ── Behaviour ──────────────────────────────────────────────────────────
 DASHBOARD_REFRESH_SECONDS = _env("DASHBOARD_REFRESH_SECONDS", 60, cast=int)
+# How often the reminder scheduler wakes up to deliver due DMs (seconds).
+REMINDER_POLL_SECONDS = _env("REMINDER_POLL_SECONDS", 30, cast=int)
 XP_COOLDOWN_SECONDS = _env("XP_COOLDOWN_SECONDS", 60, cast=int)
 XP_MIN = _env("XP_MIN", 4, cast=int)
 XP_MAX = _env("XP_MAX", 12, cast=int)
+
+# Level-up role rewards: comma-separated "level:role_id" pairs, granted
+# automatically when a member reaches (or passes) the level. E.g.
+# LEVEL_ROLE_REWARDS="5:111111111111111,10:222222222222222"
+def _level_roles(raw: str | None) -> dict[int, int]:
+    out: dict[int, int] = {}
+    for part in (raw or "").split(","):
+        pair = part.strip()
+        if not pair or ":" not in pair:
+            continue
+        level_text, _, role_text = pair.partition(":")
+        if level_text.strip().isdigit() and role_text.strip().isdigit():
+            out[int(level_text.strip())] = int(role_text.strip())
+    return out
+
+
+LEVEL_ROLE_REWARDS = _level_roles(_env("LEVEL_ROLE_REWARDS", ""))
+
+# Content-driven XP bonuses stacked on top of the base roll — still one
+# credit per message under the shared cooldown, so they can't be farmed.
+XP_BONUS_IMAGE = _env("XP_BONUS_IMAGE", 5, cast=int)
+XP_BONUS_LINK = _env("XP_BONUS_LINK", 2, cast=int)
+XP_BONUS_LONG_MSG = _env("XP_BONUS_LONG_MSG", 3, cast=int)
+XP_LONG_MSG_WORDS = _env("XP_LONG_MSG_WORDS", 50, cast=int)
+XP_BONUS_VOICE_NOTE = _env("XP_BONUS_VOICE_NOTE", 5, cast=int)
+# Voice-channel XP: continuous accrual while connected to a voice channel,
+# independent of the message cooldown; capped per day so AFK parking can't
+# dominate the leaderboard.
+VOICE_XP_PER_MINUTE = _env("VOICE_XP_PER_MINUTE", 2, cast=int)
+VOICE_XP_DAILY_CAP = _env("VOICE_XP_DAILY_CAP", 120, cast=int)
 
 # ── Club website ───────────────────────────────────────────────────────
 WEBSITE_URL = _env("WEBSITE_URL", "https://robotics.ma")

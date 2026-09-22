@@ -5,6 +5,19 @@ from datetime import date, timedelta
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _IN_RE = re.compile(r"^in (\d+) ?d(ays?)?$")
+_SPAN_FULL_RE = re.compile(r"(?:\d+\s*[smhdw]\s*)+", re.I)
+_SPAN_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_span(text: str) -> int:
+    """Seconds for a human duration: '45m', '2h', '1d', '1h30m' or '90s'."""
+    text = (text or "").strip()
+    if not _SPAN_FULL_RE.fullmatch(text):
+        raise ValueError(f"Can't parse duration: {text!r}")
+    total = 0
+    for amount, unit in re.findall(r"(\d+)\s*([smhdw])", text, re.I):
+        total += int(amount) * _SPAN_UNITS[unit.lower()]
+    return total
 
 
 def parse_due(text: str) -> str:

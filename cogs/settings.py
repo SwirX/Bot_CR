@@ -19,7 +19,7 @@ from discord.ext import commands
 
 from data.store import store
 from i18n.core import LANGUAGES, resolve_member_lang, t
-from cogs._ui import OwnerView, LoggedView, close_panel
+from cogs._ui import OwnerView, LoggedView, close_panel, select_value
 
 LOG = logging.getLogger("bot.settings")
 
@@ -109,7 +109,7 @@ class LanguageView(LoggedView, OwnerView, discord.ui.View):
         """A language was chosen from the dropdown — never for a stranger."""
         if not await self._owned(interaction):
             return
-        await self._apply(interaction, interaction.values[0])
+        await self._apply(interaction, select_value(interaction))
 
     async def _apply(self, interaction: discord.Interaction, code: str):
         # Never let a stranger rewrite your stored preference by tapping your

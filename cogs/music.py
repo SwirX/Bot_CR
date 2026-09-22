@@ -1,10 +1,12 @@
-"""Music streaming for Bot_CR (YTMusic search + yt-dlp + ffmpeg).
+"""Music streaming for Bot_CR (multi-source: YouTube, Audius, internet radio).
 
-Joins the author's voice channel and streams the best audio source from YouTube
-(queries are searched via YTMusic, URLs are used directly), with a queue, a
-``/queue auto`` YTMusic-radio generator, majority vote-skip, per-track loop,
-volume control and an interactive now-playing panel that also looks up lyrics
-on LRCLIB. The bot auto-disconnects after being idle for a bit.
+Joins the author's voice channel and streams the first playable source for a
+query (YouTube via yt-dlp first, Audius as the automatic keyless fallback,
+public radio stations on request), with a queue, a ``/queue auto`` radio feed
+that refills itself around the last played song and keeps sessions going,
+majority vote-skip with a deadline tie-break, per-track loop, volume control
+and an interactive now-playing panel that also looks up lyrics on LRCLIB.
+The bot auto-disconnects after being idle for a bit.
 
 The playback state machine lives in :class:`MusicPlayer` and is deliberately
 voice-independent where possible (``voice`` is injected), so the queue / vote /
@@ -14,9 +16,6 @@ loop math is unit-testable without a real Discord voice connection.
 import asyncio
 import concurrent.futures
 import logging
-import os
-import re
-import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -25,91 +24,17 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-try:
-    import yt_dlp
-except ImportError:  # pragma: no cover - exercised at deploy time
-    yt_dlp = None
-
-try:
-    from ytmusicapi import YTMusic
-except ImportError:  # pragma: no cover - exercised at deploy time
-    YTMusic = None
-
 from cogs._perms import is_bot_admin
+from cogs.music_sources import deezer as deezer_provider
+from cogs.music_sources import radio as radio_provider
+from cogs.music_sources import resolve_playable
+from cogs.music_sources.model import AllSourcesFailed, Playable, SourceUnavailable
 
 LOG = logging.getLogger("bot.music")
 
 USER_AGENT = "Bot_CR/1.0 (robotics-club Discord bot; contact: server staff)"
 
-URL_RE = re.compile(r"^https?://", re.I)
-
-# YouTube's "Sign in to confirm you're not a bot" block on datacenter IPs.
-_BOT_BLOCKED = re.compile(r"sign in to confirm you.*not a bot", re.I)
-COOKIES_HINT = ("YouTube is bot-flagging this server's network, so it needs "
-                "login cookies before it will stream. Add a cookies.txt for "
-                "youtube.com and set `YT_COOKIES_FILE` — see README for how.")
-
-# Authenticated-but-frameless: the account serving cookies is too new/trust-less
-# for YouTube to hand out stream formats yet.
-_NO_FORMATS = re.compile(r"requested format is not available", re.I)
-ACCOUNT_HINT = ("YouTube let us in but offered no stream for that video. This "
-                "usually means the YouTube account behind the cookies isn't "
-                "trusted yet — watch a few videos while logged in as it, then "
-                "re-export cookies.txt and restart the bot.")
-
-# ytmusicapi is not thread-safe, and its calls run via asyncio.to_thread.
-_YT_MUSIC: "YTMusic | None" = None
-_YT_MUSIC_LOCK = threading.Lock()
-
-
-def _ytmusic() -> "YTMusic":
-    global _YT_MUSIC
-    if _YT_MUSIC is None:
-        _YT_MUSIC = YTMusic()
-    return _YT_MUSIC
-
-YTDL_OPTS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "extract_flat": False,
-}
-
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-
-
-def _header_option(headers: dict) -> str:
-    """Render yt-dlp's ``http_headers`` as an ffmpeg ``-headers`` argument.
-
-    ffmpeg wants CRLF-terminated ``Name: value`` pairs in a single argument.
-    discord.py shlex-splits ``before_options``, so the surrounding quotes keep
-    the pairs together and the embedded newlines reach ffmpeg intact. Passing
-    the same headers yt-dlp used avoids googlevideo 403s mid-stream.
-    """
-    pairs = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
-    return f'-headers "{pairs}"'
-
-IDLE_LEAVE_SECONDS = 60
-IDLE_CHECK_SECONDS = 10
-
-
-def skip_threshold(listener_count: int) -> int:
-    """Votes required to skip: a majority, at least 2 — or 1 when alone."""
-    if listener_count <= 1:
-        return 1
-    return max(2, listener_count // 2 + 1)
-
-
-def fmt_duration(seconds) -> str:
-    if not seconds:
-        return "∞"
-    seconds = int(seconds)
-    hours, rem = divmod(seconds, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours:
-        return f"{hours}:{minutes:02d}:{secs:02d}"
-    return f"{minutes}:{secs:02d}"
 
 
 @dataclass
@@ -125,13 +50,79 @@ class Track:
     artist: str = ""
     requester_id: int | None = None
     headers: dict = field(default_factory=dict)
+    provider: str = ""
     votes: set = field(default_factory=set)
+    # Decrypted local audio file (Deezer); when set, playback reads this path
+    # instead of `url`.
+    local_path: str = ""
+
+
+def _ffmpeg_kwargs(track: Track) -> dict:
+    """The ffmpeg options for a track: HTTP knobs only for streamed URLs.
+
+    The ``-reconnect`` family belongs to ffmpeg's HTTP input layer. Pointing
+    them at a local file makes ffmpeg abort with "Option reconnect not found"
+    (exit 8) — exactly the "resolved but nothing plays" bug, because Deezer's
+    decrypted files used to get the same before-options as a URL. A local file
+    needs no before-options at all.
+    """
+    if track.local_path:
+        return {"options": "-vn"}
+    before = FFMPEG_BEFORE
+    if track.headers:
+        before = f"{before} {_header_option(track.headers)}"
+    return {"before_options": before, "options": "-vn"}
+
+
+def _header_option(headers: dict) -> str:
+    """Render yt-dlp's ``http_headers`` as an ffmpeg ``-headers`` argument.
+
+    ffmpeg wants CRLF-terminated ``Name: value`` pairs in a single argument.
+    discord.py shlex-splits ``before_options``, so the surrounding quotes keep
+    the pairs together and the embedded newlines reach ffmpeg intact. Passing
+    the same headers yt-dlp used avoids googlevideo 403s mid-stream.
+    """
+    pairs = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+    return f'-headers "{pairs}"'
+
+IDLE_LEAVE_SECONDS = 60
+IDLE_CHECK_SECONDS = 10
+RADIO_REFILL_AT = 6         # top the queue back up when fewer than this many songs wait
+RADIO_REFILL_SIZE = 8       # songs to add per refill
+RADIO_REFILL_FETCH = 12     # fetch a little extra so history-dedup still finds fresh songs
+RADIO_REFILL_COOLDOWN = 30  # minimum seconds between refills
+VOTE_SECONDS = 20           # how long a skip/remove vote stays open
+
+
+@dataclass
+class _Vote:
+    """An open skip/remove motion: who wants it, who wants it kept."""
+
+    kind: str            # "skip" or "remove"
+    target_key: str      # dedup key of the queued track for remove motions
+    target_title: str    # human-readable name for messages
+    yes: set = field(default_factory=set)
+    no: set = field(default_factory=set)
+    deadline: float = 0.0
+    task: asyncio.Task | None = None
+
+
+def fmt_duration(seconds) -> str:
+    if not seconds:
+        return "∞"
+    seconds = int(seconds)
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 
 class MusicPlayer:
     """Per-guild queue + playback state machine (voice injected for tests)."""
 
-    def __init__(self, bot, guild_id, text_channel=None, *, audio_factory=None):
+    def __init__(self, bot, guild_id, text_channel=None, *,
+                 audio_factory=None, radio_fetcher=None, track_factory=None):
         self.bot = bot
         self.guild_id = guild_id
         self.text_channel = text_channel
@@ -146,13 +137,103 @@ class MusicPlayer:
         self.host_id: int | None = None
         self.now_playing_message = None
         self.now_playing_view = None
+        # Set by the owning cog; used to rebuild the control view each time
+        # the panel is (re)posted so buttons never go stale on an old message.
+        self.now_playing_view_factory = None
         self._audio_factory = audio_factory
+        # Auto-radio feed wiring injected by the owning cog: how to fetch
+        # related playables for a seed, and how to map one onto a Track.
+        self.radio_fetcher = radio_fetcher
+        self.track_factory = track_factory
+        # Continuous radio mode: `/queue auto` turns it on and the player
+        # keeps topping the queue up from the last played song.
+        self.auto_radio = False
+        self._radio_history: deque[str] = deque(maxlen=400)
+        self._refill_task: asyncio.Task | None = None
+        self._last_refill_at = 0.0
         self._watchdog_task: asyncio.Task | None = None
         self._last_active = time.monotonic()
+        # True when the player chose to leave (stop / idle / shutdown) rather
+        # than being removed by a moderator — suppresses the "kicked" notice.
+        self._intentional_leave = False
+        # One open skip/remove motion at a time (new votes replace old ones).
+        self._vote: _Vote | None = None
 
     def _touch(self):
         """Note recent activity so the idle watchdog doesn't disconnect."""
         self._last_active = time.monotonic()
+
+    # ── auto-radio ────────────────────────────────────────────
+    @staticmethod
+    def _key_of(track: Track) -> str:
+        """Stable identity for radio dedup (Deezer track URL >> yt id >> stream)."""
+        return track.webpage_url or track.video_id or track.url or ""
+
+    def note_radio_play(self, track: Track) -> None:
+        """Remember a radio-fed track so auto-refills never replay it."""
+        key = self._key_of(track)
+        if key:
+            self._radio_history.append(key)
+
+    def _queue_keys(self) -> set[str]:
+        keys = {self._key_of(self.current)} if self.current is not None else set()
+        keys.update(self._key_of(t) for t in self.queue)
+        return keys
+
+    def _maybe_refill(self):
+        """Start a radio refill when the queue is running low — one at a time."""
+        if not self.auto_radio or self.current is None:
+            return
+        if self._refill_task is not None and not self._refill_task.done():
+            return
+        if len(self.queue) >= RADIO_REFILL_AT:
+            return
+        if time.monotonic() - self._last_refill_at < RADIO_REFILL_COOLDOWN:
+            return
+        self._refill_task = asyncio.create_task(self.refill_radio())
+
+    async def refill_radio(self) -> int:
+        """Pull a fresh radio batch around the last played song and announce it.
+
+        Returns how many songs were added. A radio feed is a small fixed pool,
+        so anything this session already heard — plus the current queue — is
+        filtered out before enqueueing; otherwise refills would just replay.
+        """
+        seed = self.current
+        self._last_refill_at = time.monotonic()
+        if self.radio_fetcher is None or seed is None:
+            return 0
+        try:
+            playables = await self.radio_fetcher(seed, RADIO_REFILL_FETCH)
+        except Exception as exc:
+            LOG.warning("Auto-radio refill failed for %r: %s", seed.title, exc)
+            playables = []
+        heard = set(self._radio_history) | self._queue_keys()
+        fresh = [p for p in playables
+                 if (p.webpage_url or p.video_id or p.stream_url or "") not in heard]
+        fresh = fresh[:RADIO_REFILL_SIZE]
+        requester = seed.requester_id or 0
+        for playable in fresh:
+            self.queue.append(self.track_factory(playable, requester))
+        self._touch()
+        await self._announce_refill(seed, len(fresh))
+        return len(fresh)
+
+    async def _announce_refill(self, seed: Track, added: int) -> None:
+        if self.text_channel is None:
+            return
+        if added:
+            text = (f"📻 +{added} songs from the radio of **{seed.title}** — "
+                    "auto-radio keeps the queue topped up.")
+        elif not self.queue and self.current is seed:
+            text = (f"📻 The radio of **{seed.title}** is out of fresh songs and "
+                    "the queue is empty — try `/play` for something specific.")
+        else:
+            return  # nothing changed, nothing to say
+        try:
+            await self.text_channel.send(content=text)
+        except (discord.HTTPException, discord.NotFound):
+            pass
 
     def start_watchdog(self):
         """Ensure the idle-leave watchdog is running for this voice session."""
@@ -175,9 +256,13 @@ class MusicPlayer:
                 if self.queue or self.current is not None:
                     continue  # something is waiting; don't interrupt it
                 if time.monotonic() - self._last_active >= IDLE_LEAVE_SECONDS:
+                    place = (self.voice.channel.name if self.voice.channel
+                             else "the voice channel")
+                    self._intentional_leave = True
                     await self.voice.disconnect()
-                    await self._update_panel(
-                        stopped="Left the voice channel after being idle.")
+                    await self._update_panel(stopped=(
+                        f"😴 Quiet for a minute, so I dipped out of **{place}**. "
+                        "/play and I'll be right back!"))
                     return
         except asyncio.CancelledError:
             return
@@ -189,16 +274,21 @@ class MusicPlayer:
 
     # ── queue / playback ────────────────────────────────────────
     async def enqueue(self, track: Track):
-        """Add a track; start playback immediately if nothing is playing."""
+        """Add a track; start playback only when nothing else is busy.
+
+        A paused track counts as busy — auto-starting over it would silently
+        drop what the user paused.
+        """
         self.queue.append(track)
         self._touch()
-        if self.voice and self.voice.is_playing():
+        if self.voice and (self.voice.is_playing() or self.voice.is_paused()):
             return False
         await self.play_next()
         return True
 
     async def play_next(self):
         """Start the next track — queue head, or loop the current one."""
+        self.cancel_vote()  # a new track invalidates any pending motions
         if self.voice is None or not self.voice.is_connected() or self.voice.is_playing():
             return
         if self.loop and self.current is not None:
@@ -213,21 +303,20 @@ class MusicPlayer:
             return
         self.current = track
         self.current.votes.clear()
+        if self.auto_radio:
+            self.note_radio_play(track)
         source = self._make_source(track)
         self.voice.play(source, after=self._after_hook)
+        await self._announce_current()
         await self._update_panel()
+        self._maybe_refill()
 
     def _make_source(self, track: Track):
         if self._audio_factory is not None:
             return self._audio_factory(track)
-        before = FFMPEG_BEFORE
-        if track.headers:
-            before = f"{before} {_header_option(track.headers)}"
+        kwargs = _ffmpeg_kwargs(track)
         audio = discord.FFmpegPCMAudio(
-            track.url,
-            before_options=before,
-            options="-vn",
-        )
+            track.local_path or track.url, **kwargs)
         return discord.PCMVolumeTransformer(audio, volume=self.volume)
 
     def _after_hook(self, error):
@@ -242,15 +331,33 @@ class MusicPlayer:
             LOG.exception("after-hook crashed")
 
     # ── control ─────────────────────────────────────────────────
-    async def stop(self, label: str = "⏹️ Stopped."):
+    async def stop(self):
+        """Stop playback, empty the queue, leave — and remove the panel.
+
+        Callers send their own confirmation, so /stop and the panel button
+        never double-post a message in a different style.
+        """
         await self._cancel_watchdog()
+        self.cancel_vote()
+        self.auto_radio = False
+        self._radio_history.clear()
+        if self._refill_task is not None:
+            self._refill_task.cancel()
         self.queue.clear()
         self.current = None
         if self.voice and self.voice.is_playing():
             self.voice.stop()
         if self.voice and self.voice.is_connected():
+            self._intentional_leave = True
             await self.voice.disconnect()
-        await self._update_panel(stopped=label)
+        old = self.now_playing_message
+        self.now_playing_message = None
+        self.now_playing_view = None
+        if old is not None:
+            try:
+                await old.delete()
+            except (discord.HTTPException, discord.NotFound):
+                pass
 
     async def toggle_loop(self):
         self.loop = not self.loop
@@ -268,24 +375,111 @@ class MusicPlayer:
             return 0
         return sum(1 for member in self.voice.channel.members if not member.bot)
 
-    async def vote_skip(self, author: discord.Member) -> tuple[bool, int, int]:
-        """Request a skip. Returns (skipped_now, needed, votes_now).
+    def _motion_owner(self, kind: str, target_key: str) -> int | None:
+        """Who owns the thing a motion targets — their word is instant."""
+        if kind == "skip":
+            return self.current.requester_id if self.current else None
+        for track in self.queue:
+            if self._key_of(track) == target_key:
+                return track.requester_id
+        return None
 
-        The requester and bot staff skip instantly; otherwise the track skips
-        once a majority (>=2, or 1 when alone) of listeners votes.
+    def cancel_vote(self):
+        """Drop any open motion and its deadline task."""
+        if self._vote is not None:
+            if self._vote.task is not None:
+                self._vote.task.cancel()
+            self._vote = None
+
+    async def cast_vote(self, kind: str, author: discord.Member, *,
+                        want: bool = True, target_key: str = "",
+                        target_title: str = "") -> tuple[str, int, int]:
+        """Vote on a skip/remove motion. Returns (status, yes, no).
+
+        Status: "passed" — the motion fired; "vote" — recorded, still open;
+        "kept" — the owner vetoed so the motion is cancelled; "idle" — no
+        listeners, nothing to act on, or a "keep" with no open motion.
+
+        The requester of the thing being voted on, the session host and staff
+        act instantly. Everyone else votes: the motion passes right away once
+        the yes side outnumbers the no side and holds a majority of the
+        listeners present, and at the deadline unless a strict majority voted
+        no — so one troll can't stalemate the vote forever.
         """
-        if self.current is None:
-            return False, 0, 0
-        needed = skip_threshold(self._listeners())
-        if author.id == self.current.requester_id or is_bot_admin(author):
+        listeners = self._listeners()
+        if listeners <= 0:
+            return "idle", 0, 0
+        owner = self._motion_owner(kind, target_key)
+        if owner is not None and (author.id in (owner, self.host_id)
+                                  or is_bot_admin(author)):
+            if want:
+                await self._apply_motion(kind, target_key)
+                return "passed", 0, 0
+            self.cancel_vote()
+            return "kept", 0, 0
+        vote = self._vote
+        if vote is None or vote.kind != kind or vote.target_key != target_key:
+            if not want:
+                return "idle", 0, 0
+            self.cancel_vote()
+            vote = _Vote(kind=kind, target_key=target_key,
+                         target_title=target_title)
+            vote.deadline = time.monotonic() + VOTE_SECONDS
+            vote.task = asyncio.create_task(self._close_vote(vote))
+            self._vote = vote
+        if author.id in vote.yes or author.id in vote.no:
+            return "vote", len(vote.yes), len(vote.no)
+        (vote.yes if want else vote.no).add(author.id)
+        yes, no = len(vote.yes), len(vote.no)
+        if yes > no and (yes + no == listeners or yes * 2 > listeners):
+            await self._apply_motion(kind, target_key)
+            return "passed", yes, no
+        return "vote", yes, no
+
+    async def _close_vote(self, vote: _Vote):
+        """Resolve a vote when its window closes: ties and silence pass it."""
+        await asyncio.sleep(VOTE_SECONDS)
+        if self._vote is not vote:
+            return  # a newer motion replaced it, or the track ended
+        yes, no = len(vote.yes), len(vote.no)
+        if yes and no * 2 <= self._listeners():
+            await self._apply_motion(vote.kind, vote.target_key)
+            return
+        self._vote = None
+        await self._update_panel()  # clear the stale vote display
+        await self._announce_action(
+            f"🗳️ The vote didn't pass — **{vote.target_title or 'the song'}** stays.")
+
+    async def _apply_motion(self, kind: str, target_key: str):
+        """Carry out a passed motion and cancel the vote."""
+        self.cancel_vote()
+        if kind == "skip" and self.current is not None:
+            title = self.current.title
             await self._skip_now()
-            return True, needed, needed
-        self.current.votes.add(author.id)
-        votes = len(self.current.votes)
-        if votes >= needed:
-            await self._skip_now()
-            return True, needed, votes
-        return False, needed, votes
+            await self._announce_action(f"⏭️ Skipped **{title}**.")
+        elif kind == "remove":
+            removed = self.remove_from_queue(target_key)
+            if removed is not None:
+                await self._update_panel()
+                await self._announce_action(
+                    f"➖ Removed **{removed.title}** from the queue.")
+
+    def remove_from_queue(self, target_key: str) -> Track | None:
+        """Drop the first queued track matching ``target_key``; the rest shift up."""
+        for index, track in enumerate(self.queue):
+            if self._key_of(track) == target_key:
+                del self.queue[index]
+                return track
+        return None
+
+    async def _announce_action(self, text: str) -> None:
+        """One public line in the music channel (outcome messages only)."""
+        if self.text_channel is None:
+            return
+        try:
+            await self.text_channel.send(content=text)
+        except (discord.HTTPException, discord.NotFound):
+            pass
 
     async def _skip_now(self):
         if self.voice and self.voice.is_playing():
@@ -314,43 +508,75 @@ class MusicPlayer:
             embed.set_thumbnail(url=track.thumbnail)
         embed.add_field(name="Duration", value=fmt_duration(track.duration), inline=True)
         embed.add_field(name="Loop", value="🔂 On" if self.loop else "Off", inline=True)
-        if self.current and self.current.votes:
-            votes = len(self.current.votes)
-            embed.add_field(name="Skip votes",
-                            value=f"{votes}/{skip_threshold(self._listeners())}", inline=True)
+        if self._vote is not None:
+            vote = self._vote
+            seconds = max(1, int(vote.deadline - time.monotonic()))
+            embed.add_field(
+                name="🗳️ Vote to skip" if vote.kind == "skip" else "🗳️ Vote to remove",
+                value=f"👍 {len(vote.yes)} · 👎 {len(vote.no)} · {seconds}s to decide",
+                inline=True)
         if self.queue:
             lines = "\n".join(
-                f"{i + 1}. **{t.title}**" for i, t in list(self.queue)[:6])
+                f"{i + 1}. **{t.title}**" for i, t in enumerate(list(self.queue)[:6]))
             more = f"\n*+{len(self.queue) - 6} more*" if len(self.queue) > 6 else ""
             embed.add_field(name=f"Up next ({len(self.queue)})", value=lines + more, inline=False)
         else:
             embed.add_field(name="Up next", value="—", inline=False)
         return embed
 
-    async def _update_panel(self, stopped: str = ""):
-        message = self.now_playing_message
-        if message is None:
+    async def _announce_current(self) -> None:
+        """One chat line announcing the track that just started."""
+        if self.text_channel is None or self.current is None:
             return
-        view = self.now_playing_view
+        try:
+            await self.text_channel.send(
+                content=f"🎵 Now playing: **{self.current.title}**")
+        except discord.HTTPException:
+            pass
+
+    async def _update_panel(self, stopped: str = ""):
+        """(Re)post the now-playing panel so it stays the newest chat message.
+
+        The old panel is deleted and a fresh copy — control view included —
+        is sent to the player's text channel: no buttons ever sit on a buried
+        message, and the panel is always one message the user can act on.
+        ``stopped`` posts a plain notice without controls instead.
+        """
+        old = self.now_playing_message
+        self.now_playing_message = None
+        self.now_playing_view = None
+        if old is not None:
+            try:
+                await old.delete()
+            except (discord.HTTPException, discord.NotFound):
+                pass
+        if self.text_channel is None:
+            return
+        view = None
+        if not stopped and self.now_playing_view_factory is not None:
+            view = self.now_playing_view_factory()
         embed = self.embed(stopped=stopped)
         try:
-            await message.edit(embed=embed, view=view if not stopped else None)
-        except discord.NotFound:
-            self.now_playing_message = None
-            self.now_playing_view = None
+            message = await self.text_channel.send(embed=embed, view=view)
+        except (discord.HTTPException, discord.NotFound):
+            return
+        if not stopped:
+            self.now_playing_message = message
+            self.now_playing_view = view
 
 
 class NowPlayingView(discord.ui.View):
-    """Interactive panel: pause/resume, vote-skip, loop, stop, lyrics."""
+    """Interactive panel: pause/resume, vote-skip, loop, stop, lyrics.
+
+    Every action defers immediately, lets the player (re)post the panel as
+    the newest message, then answers the user privately — the controls never
+    edit a message that may have just been replaced.
+    """
 
     def __init__(self, cog, player: MusicPlayer):
         super().__init__(timeout=None)
         self.cog = cog
         self.player = player
-
-    async def _reaction(self, interaction: discord.Interaction, feedback: str):
-        await interaction.response.edit_message(
-            embed=self.player.embed(), view=self.player.now_playing_view or self)
 
     @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.secondary, custom_id="music:pause")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -372,20 +598,26 @@ class NowPlayingView(discord.ui.View):
         else:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
             return
-        await self._reaction(interaction, feedback)
+        await interaction.response.defer()
+        await player._update_panel()
         await interaction.followup.send(feedback, ephemeral=True)
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="music:skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = self.player
-        skipped, needed, votes = await player.vote_skip(interaction.user)
-        await self._reaction(interaction, "")
-        if skipped:
+        await interaction.response.defer()
+        status, yes, no = await player.cast_vote("skip", interaction.user)
+        if status == "vote":
+            await player._update_panel()  # show the live vote on the panel
             await interaction.followup.send(
-                f"⏭️ Skipped by {interaction.user.mention}.", ephemeral=True)
+                f"🗳️ Skip vote — 👍 {yes} · 👎 {no}. Use `/keep` to vote against.",
+                ephemeral=True)
         else:
+            # pass/kept/idle: the motion itself already posted its outcome
+            # (and the after-hook reposted the panel when it skipped).
+            word = "⏭️ Skipped by" if status == "passed" else "⏹️ No action"
             await interaction.followup.send(
-                f"⏭️ Skip vote {votes}/{needed}.", ephemeral=True)
+                f"{word} {interaction.user.mention}.", ephemeral=True)
 
     @discord.ui.button(emoji="🔂", style=discord.ButtonStyle.secondary, custom_id="music:loop")
     async def loop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -394,8 +626,8 @@ class NowPlayingView(discord.ui.View):
                 "🔒 Only the session host, the requester, or staff can toggle loop.",
                 ephemeral=True)
             return
-        state = await self.player.toggle_loop()
-        await self._reaction(interaction, "")
+        await interaction.response.defer()
+        state = await self.player.toggle_loop()  # reposts the panel itself
         await interaction.followup.send(
             f"🔂 Loop {'on' if state else 'off'}.", ephemeral=True)
 
@@ -406,18 +638,21 @@ class NowPlayingView(discord.ui.View):
                 "🔒 Only the session host, the requester, or staff can stop the player.",
                 ephemeral=True)
             return
+        await interaction.response.defer()
         await self.player.stop()
-        try:
-            await interaction.response.edit_message(
-                embed=self.player.embed("⏹️ Stopped."), view=None)
-        except discord.NotFound:
-            await interaction.response.send_message("⏹️ Stopped.", ephemeral=True)
+        # Public line in the music channel — not an ephemeral reply tied to a
+        # panel message that is about to be deleted.
+        await self.player._announce_action("⏹️ Stopped and left the channel.")
 
     @discord.ui.button(emoji="🎤", style=discord.ButtonStyle.success, custom_id="music:lyrics")
     async def lyrics(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = self.player
         if player.current is None:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+            return
+        if player.current.provider == "radio":
+            await interaction.response.send_message(
+                "📻 This is a live radio stream — it has no lyrics.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         result = await self.cog._lyrics_for(
@@ -437,7 +672,7 @@ class NowPlayingView(discord.ui.View):
 
 
 class Music(commands.Cog):
-    """Queue music from YouTube — /play, /queue auto, /skip, /loop and more."""
+    """Queue music from any source — /play, /queue auto, /radio, /skip and more."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -447,7 +682,11 @@ class Music(commands.Cog):
     def _player(self, guild_id: int, text_channel=None) -> MusicPlayer:
         player = self.players.get(guild_id)
         if player is None:
-            player = MusicPlayer(self.bot, guild_id, text_channel)
+            player = MusicPlayer(
+                self.bot, guild_id, text_channel,
+                radio_fetcher=self.fetch_radio,
+                track_factory=Music._track_from_playable)
+            player.now_playing_view_factory = lambda: NowPlayingView(self, player)
             self.players[guild_id] = player
         elif text_channel is not None:
             player.text_channel = text_channel
@@ -455,8 +694,12 @@ class Music(commands.Cog):
 
     def _cleanup(self, guild_id: int):
         player = self.players.pop(guild_id, None)
-        if player is not None and player._watchdog_task is not None:
+        if player is None:
+            return
+        if player._watchdog_task is not None:
             player._watchdog_task.cancel()
+        if player._refill_task is not None:
+            player._refill_task.cancel()
 
     def _can_control(self, member: discord.Member, player: MusicPlayer) -> bool:
         """Who may use destructive controls on this guild's shared player.
@@ -474,166 +717,29 @@ class Music(commands.Cog):
 
     async def cog_unload(self):
         for player in list(self.players.values()):
+            player._intentional_leave = True
             if player.voice and player.voice.is_connected():
                 await player.voice.disconnect()
         if self._http is not None and not self._http.closed:
             await self._http.close()
 
-    # ── lookup helpers ──────────────────────────────────────────
+    # ── source wiring ────────────────────────────────────────────
     @staticmethod
-    def _ytdl_opts() -> dict:
-        """Base yt-dlp options (+ cookiefile from ``YT_COOKIES_FILE``).
-
-        Env is read lazily so setting ``YT_COOKIES_FILE`` in ``.env`` works
-        without restarting at import time.
-        """
-        opts = dict(YTDL_OPTS)
-        cookies = os.environ.get("YT_COOKIES_FILE")
-        if cookies:
-            opts["cookiefile"] = cookies
-        return opts
-
-    @staticmethod
-    def _extract_audio(url: str) -> Track:
-        """Blocking yt-dlp stream extraction for a video URL (to_thread)."""
-        if yt_dlp is None:
-            raise RuntimeError("yt-dlp is not installed")
-        if not URL_RE.match(url):
-            raise RuntimeError(f"not a resolvable URL: {url!r}")
-        try:
-            with yt_dlp.YoutubeDL(Music._ytdl_opts()) as ydl:
-                info = ydl.extract_info(url, download=False)
-        except Exception as exc:
-            if _BOT_BLOCKED.search(str(exc)):
-                raise RuntimeError(COOKIES_HINT) from exc
-            if _NO_FORMATS.search(str(exc)):
-                raise RuntimeError(ACCOUNT_HINT) from exc
-            raise
-        if info.get("entries"):
-            info = info["entries"][0]
-        if not info or not info.get("url"):
-            raise RuntimeError("no playable audio source found")
+    def _track_from_playable(playable: Playable, requester_id: int) -> Track:
+        """Map a provider-resolved Playable onto the playback Track type."""
         return Track(
-            title=info.get("title") or url,
-            url=info["url"],
-            webpage_url=info.get("webpage_url") or info.get("original_url") or url,
-            video_id=info.get("id") or "",
-            duration=info.get("duration"),
-            thumbnail=info.get("thumbnail") or "",
-            artist=info.get("artist") or info.get("channel") or info.get("uploader") or "",
-            headers=info.get("http_headers") or {},
+            title=playable.title,
+            url=playable.stream_url,
+            webpage_url=playable.webpage_url,
+            video_id=playable.video_id,
+            duration=playable.duration,
+            thumbnail=playable.thumbnail,
+            artist=playable.artist,
+            requester_id=requester_id,
+            headers=playable.headers,
+            provider=playable.provider,
+            local_path=playable.local_path,
         )
-
-    @staticmethod
-    def _failure_hint(exc: Exception) -> str | None:
-        """Map known YouTube failure modes to a human message (None → generic).
-
-        Keeps the user-facing hints in one place so both the search and the
-        stream-resolution steps surface the same explanations.
-        """
-        text = str(exc)
-        if _BOT_BLOCKED.search(text) or text == COOKIES_HINT:
-            return COOKIES_HINT
-        if _NO_FORMATS.search(text) or text == ACCOUNT_HINT:
-            return ACCOUNT_HINT
-        return None
-
-    @staticmethod
-    def _find_song_sync(query: str) -> Track:
-        """Resolve a query to a Track (blocking — run via to_thread).
-
-        Direct URLs go straight to yt-dlp and come back fully playable.
-        Anything else is searched through YTMusic, which is far more reliable
-        than yt-dlp's ``ytsearch`` (that is bot-detected); the result is a
-        metadata-only skeleton with an empty ``url`` so the caller can announce
-        "found" before the slow, often-flagged stream extraction starts.
-        """
-        if URL_RE.match(query):
-            return Music._extract_audio(query)
-        if YTMusic is None:
-            raise RuntimeError("ytmusicapi is not installed")
-        with _YT_MUSIC_LOCK:
-            results = _ytmusic().search(query, filter="songs", limit=1)
-        if not results:
-            raise RuntimeError(f"no YTMusic results for {query!r}")
-        result = results[0]
-        video_id = result.get("videoId")
-        if not video_id:
-            raise RuntimeError("YTMusic result has no videoId")
-        artists = ", ".join(a.get("name") for a in (result.get("artists") or [])
-                            if a.get("name"))
-        secs = result.get("duration_seconds")
-        thumbs = result.get("thumbnails") or []
-        return Track(
-            title=result.get("title") or query,
-            url="",
-            webpage_url=f"https://www.youtube.com/watch?v={video_id}",
-            video_id=video_id,
-            duration=int(secs) if secs else None,
-            thumbnail=thumbs[-1].get("url") if thumbs else "",
-            artist=artists,
-        )
-
-    @staticmethod
-    def _resolve_stream_sync(track: Track) -> Track:
-        """Fill in the playable stream URL + headers for a found track.
-
-        Called after ``_find_song_sync`` when the track is only metadata; the
-        YTMusic metadata is kept and the yt-dlp result supplies what's missing.
-        """
-        if track.url:
-            return track
-        resolved = Music._extract_audio(track.webpage_url)
-        track.url = resolved.url
-        track.headers = resolved.headers
-        track.video_id = resolved.video_id or track.video_id
-        if not track.thumbnail:
-            track.thumbnail = resolved.thumbnail
-        if not track.duration:
-            track.duration = resolved.duration
-        if not track.artist:
-            track.artist = resolved.artist
-        return track
-
-    @staticmethod
-    def _radio_seed_ids(video_id: str, limit: int) -> list[str]:
-        """Nearest-neighbour video IDs for a track's YouTube Music radio."""
-        if YTMusic is None:
-            raise RuntimeError("ytmusicapi is not installed")
-        with _YT_MUSIC_LOCK:
-            data = _ytmusic().get_watch_playlist(
-                videoId=video_id, radio=True, limit=limit)
-        seeds: list[str] = []
-        for entry in data.get("tracks") or []:
-            vid = entry.get("videoId")
-            if vid and vid not in seeds:
-                seeds.append(vid)
-            if len(seeds) >= limit:
-                break
-        return seeds
-
-    async def _find_song(self, query: str) -> Track:
-        return await asyncio.to_thread(self._find_song_sync, query)
-
-    async def _resolve_stream(self, track: Track) -> Track:
-        return await asyncio.to_thread(self._resolve_stream_sync, track)
-
-    async def _resolve_tracks(self, video_ids: list[str]) -> list[Track]:
-        """Stream-extract several videos in parallel (radio queue generation)."""
-        results = await asyncio.gather(
-            *(asyncio.to_thread(self._extract_audio,
-                                f"https://www.youtube.com/watch?v={vid}")
-              for vid in video_ids),
-            return_exceptions=True,
-        )
-        tracks: list[Track] = []
-        for vid, res in zip(video_ids, results):
-            if isinstance(res, Exception):
-                LOG.warning("Auto-queue: failed to resolve %s: %s", vid, res)
-                continue
-            res.video_id = vid
-            tracks.append(res)
-        return tracks
 
     async def _ensure_voice(self, ctx) -> MusicPlayer | None:
         if ctx.author.voice is None or ctx.author.voice.channel is None:
@@ -659,61 +765,41 @@ class Music(commands.Cog):
         player._touch()
         return player
 
-    async def _send_panel(self, ctx, player: MusicPlayer):
-        view = NowPlayingView(self, player)
-        player.now_playing_view = view
-        player.now_playing_message = await ctx.send(embed=player.embed(), view=view)
-
     # ── commands ────────────────────────────────────────────────
-    @commands.hybrid_command(name="play", description="Play a song (YouTube search or URL).")
+    @commands.hybrid_command(name="play", description="Play a song (search or URL).")
     @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def play(self, ctx, *, query: str):
-        """Search the top YouTube result, or stream a direct audio URL."""
-        # Slash interactions expire after ~3s; joining voice and searching
-        # YouTube can easily take longer, so acknowledge before any awaits.
+        """Stream the first playable source for the query, in provider order.
+
+        While anything is busy (playing *or* paused) the song is only queued —
+        playback is never interrupted by an extra `/play`.
+        """
+        # Slash interactions expire after ~3s; joining voice and resolving a
+        # source can easily take longer, so acknowledge before any awaits.
         # On prefix invocations ctx.defer() is a no-op.
         await ctx.defer()
         player = await self._ensure_voice(ctx)
         if player is None:
             return
-        found_msg = None
         try:
-            track = await self._find_song(query)
-        except Exception as exc:
-            LOG.warning("Search failed for %r: %s", query, exc)
-            hint = Music._failure_hint(exc)
+            playable = await resolve_playable(query)
+        except AllSourcesFailed as exc:
+            LOG.warning("No source could play %r: %s", query, exc)
+            hint = exc.best_hint()
             await ctx.send(f"⚠️ {hint}" if hint
-                           else "⚠️ Couldn't find something playable for that query.")
+                           else "⚠️ Couldn't find anything playable for that query.")
             return
-        # Query results are metadata-only at this point — let the user see the
-        # match before the slow, flags-prone stream extraction kicks in.
-        if not track.url:
-            label = f"**{track.title}**"
-            if track.artist:
-                label += f" — {track.artist}"
-            found_msg = await ctx.send(f"🎵 Found {label} — getting the stream…")
-            try:
-                track = await self._resolve_stream(track)
-            except Exception as exc:
-                LOG.warning("Stream resolve failed for %r: %s", query, exc)
-                if found_msg:
-                    await found_msg.delete()
-                hint = Music._failure_hint(exc)
-                await ctx.send(f"⚠️ {hint}" if hint
-                               else "⚠️ Couldn't get a stream for that track.")
-                return
-        track.requester_id = ctx.author.id
+        track = Music._track_from_playable(playable, ctx.author.id)
         fresh = player.current is None and not player.queue
         started = await player.enqueue(track)
         if fresh:
             player.host_id = ctx.author.id
-        if found_msg:
-            await found_msg.delete()
-        if started and player.now_playing_message is None:
-            await self._send_panel(ctx, player)
-        elif not started:
-            await ctx.send(f"➕ **{track.title}** added to the queue (#{len(player.queue)}).")
+        if not started:
+            await ctx.send(
+                f"➕ **{track.title}** added to the queue (#{len(player.queue)}).")
+        # Re-post the controls panel last so it stays the newest message.
+        await player._update_panel()
 
     @commands.hybrid_command(name="pause", description="Pause the current track.")
     @commands.guild_only()
@@ -745,20 +831,73 @@ class Music(commands.Cog):
         await player._update_panel()
         await ctx.send("▶️ Resumed.", delete_after=8)
 
-    @commands.hybrid_command(name="skip", description="Vote to skip the current track.")
+    @commands.hybrid_command(name="skip",
+                             description="Skip the current track — instant if you requested it, else a vote.")
     @commands.guild_only()
     async def skip(self, ctx):
-        """Requester/staff skip instantly; everyone else needs a majority vote."""
+        """Requester/host/staff skip instantly; everyone else votes."""
         player = self._player(ctx.guild.id)
         if player.voice is None or player.current is None:
             await ctx.send("🎵 Nothing is playing to skip.")
             return
-        skipped, needed, votes = await player.vote_skip(ctx.author)
-        await player._update_panel()
-        if skipped:
-            await ctx.send("⏭️ Skipped.")
+        status, yes, no = await player.cast_vote("skip", ctx.author)
+        if status == "passed":
+            return  # the motion already announced the outcome in chat
+        if status == "vote":
+            await player._update_panel()  # show the live vote
+            await ctx.send(
+                f"🗳️ Skip vote — 👍 {yes} · 👎 {no}. Use `/keep` to vote against.")
         else:
-            await ctx.send(f"⏭️ Skip vote {votes}/{needed}.")
+            await ctx.send("🎵 Nothing to skip right now.")
+
+    @commands.hybrid_command(name="remove",
+                             description="Remove a queued song by number — instant if you added it, else a vote.")
+    @commands.guild_only()
+    async def remove(self, ctx, position: int):
+        """Drop queue entry #position; its requester removes it instantly."""
+        player = self._player(ctx.guild.id)
+        if not player.queue:
+            await ctx.send("🎵 The queue is empty.")
+            return
+        if not 1 <= position <= len(player.queue):
+            await ctx.send(f"🎵 #**{position}** isn't in the queue — "
+                           "`/queue` shows the numbers.")
+            return
+        target = player.queue[position - 1]
+        status, yes, no = await player.cast_vote(
+            "remove", ctx.author, target_key=MusicPlayer._key_of(target),
+            target_title=target.title)
+        if status == "passed":
+            return  # the motion already announced the removal in chat
+        if status == "vote":
+            await player._update_panel()  # show the live vote
+            await ctx.send(
+                f"🗳️ Vote to remove **{target.title}**: 👍 {yes} · 👎 {no} — "
+                "`/keep` to keep it.")
+        else:
+            await ctx.send("🗳️ Cannot vote on that right now.")
+
+    @commands.hybrid_command(name="keep",
+                             description="Vote to keep the song while a skip/remove vote is open.")
+    @commands.guild_only()
+    async def keep(self, ctx):
+        """Vote against an open skip/remove motion (the requester vetoes)."""
+        player = self._player(ctx.guild.id)
+        vote = player._vote
+        if vote is None:
+            await ctx.send("🗳️ No vote is open right now.")
+            return
+        status, yes, no = await player.cast_vote(
+            vote.kind, ctx.author, want=False,
+            target_key=vote.target_key, target_title=vote.target_title)
+        if status == "kept":
+            await player._update_panel()
+            await ctx.send("✋ Kept — you're the requester of this one.")
+        elif status == "vote":
+            await player._update_panel()  # show the live vote
+            await ctx.send(f"✋ Noted — 👍 {yes} · 👎 {no}.")
+        else:
+            await ctx.send("🗳️ Nothing to vote on right now.")
 
     @commands.hybrid_command(name="stop", description="Stop playback and leave the channel.")
     @commands.guild_only()
@@ -802,14 +941,18 @@ class Music(commands.Cog):
     @commands.hybrid_command(name="queue",
                              description="Show the queue — or pass `auto` to generate a radio queue.")
     @commands.guild_only()
+    # `auto` fans out a dozen encrypted-track downloads per call and the cache
+    # sweep only runs on the *next* Deezer call, so an unthrottled member could
+    # fill the service disk. Rate-limit the whole command.
+    @commands.cooldown(2, 60, commands.BucketType.user)
     async def queue(self, ctx, mode: str | None = None):
         """Show the queue, or generate a 📻 radio queue from the current track.
 
-        `!queue auto` (or `/queue auto`) pulls a related-tracks radio for the
-        song that's currently playing and adds it to the queue.
+        `!queue auto` (or `/queue auto`) turns the 📻 auto-radio on: the queue
+        is topped up from the last played song's radio whenever it runs low.
         """
         if mode is not None and mode.strip().lower() in ("auto", "radio", "seed"):
-            await self._queue_auto(ctx, self._player(ctx.guild.id))
+            await self._queue_auto(ctx, self._player(ctx.guild.id, ctx.channel))
             return
         player = self._player(ctx.guild.id)
         if player.current is None and not player.queue:
@@ -817,52 +960,74 @@ class Music(commands.Cog):
             return
         await ctx.send(embed=player.embed())
 
-    async def _queue_auto(self, ctx, player: MusicPlayer, size: int = 8):
-        """Generate a radio queue from the currently playing track."""
+    async def fetch_radio(self, seed: Track, size: int) -> list[Playable]:
+        """Radio playables around a seed, from the Deezer artist radio.
+
+        YouTube used to be a fallback here, but that provider is gone (see
+        cogs/music_sources/__init__.py): feeding yt-dlp arbitrary input was the
+        bot's SSRF hole, and the Deezer artist feed is the one that actually
+        works from this host anyway.
+        """
+        try:
+            return await deezer_provider.radio_tracks(seed.title, size)
+        except Exception as exc:
+            LOG.warning("Auto-radio Deezer feed failed for %r: %s", seed.title, exc)
+            return []
+
+    async def _queue_auto(self, ctx, player: MusicPlayer):
+        """Switch on continuous auto-radio and top the queue up immediately.
+
+        One-shot batches die after a few songs. With auto-radio on, the queue
+        is refilled around the *last played* song whenever it runs low, every
+        refill is announced, and tracks this session already heard are never
+        re-served.
+        """
         if player.voice is None or not player.voice.is_connected():
             await ctx.send("🎧 I need to be in a voice channel first — use `/play`.")
             return
-        if player.current is None or not player.current.video_id:
+        if player.current is None:
             await ctx.send("🎵 Play something first, then run `/queue auto` "
                            "to generate a 📻 radio queue.")
             return
         await ctx.defer()
-        current = player.current
-        try:
-            seed_ids = await asyncio.to_thread(
-                self._radio_seed_ids, current.video_id, size)
-        except Exception as exc:
-            LOG.warning("Auto-queue seed failed for %r: %s", current.title, exc)
-            await ctx.send("⚠️ Couldn't generate a radio for the current track.")
-            return
-        if not seed_ids:
-            await ctx.send("⚠️ No related tracks found for the current track.")
-            return
-        await ctx.send(f"📻 Building a radio queue from **{current.title}**…")
-        tracks = await self._resolve_tracks(seed_ids)
-        if not tracks:
-            await ctx.send("⚠️ Couldn't resolve any of the radio tracks.")
-            return
-        for track in tracks:
-            track.requester_id = ctx.author.id
-            await player.enqueue(track)
-        await player._update_panel()
-        await ctx.send(
-            f"➕ **{len(tracks)}** songs from the radio of **{current.title}** "
-            f"added to the queue.")
+        player.auto_radio = True
+        player.start_watchdog()
+        added = await player.refill_radio()
+        if added == 0 and player.queue:
+            await ctx.send("📻 Couldn't add fresh radio songs right now — "
+                           "the queue keeps what it has.")
 
     @commands.hybrid_command(name="nowplaying", description="Show the current track.")
     @commands.guild_only()
     async def nowplaying(self, ctx):
-        player = self._player(ctx.guild.id)
+        player = self._player(ctx.guild.id, ctx.channel)
         if player.current is None:
             await ctx.send("🎵 Nothing is playing.")
             return
-        if player.now_playing_message is None:
-            await self._send_panel(ctx, player)
-        else:
-            await player._update_panel()
-            await ctx.send(embed=player.embed())
+        await player._update_panel()
+
+    @commands.hybrid_command(name="radio",
+                             description="Search and play any live internet radio station by name.")
+    @commands.guild_only()
+    async def radio(self, ctx, station: str = "groovesalad"):
+        """Search the world radio directory by name and start streaming."""
+        await ctx.defer()
+        player = await self._ensure_voice(ctx)
+        if player is None:
+            return
+        try:
+            playable = await radio_provider.resolve_station(station)
+        except SourceUnavailable as exc:
+            await ctx.send(f"⚠️ {exc.message}")
+            return
+        track = Music._track_from_playable(playable, ctx.author.id)
+        fresh = player.current is None and not player.queue
+        started = await player.enqueue(track)
+        if fresh:
+            player.host_id = ctx.author.id
+        if not started:
+            await ctx.send(f"➕ **{track.title}** added to the queue.")
+        await player._update_panel()  # keep the controls panel as the newest message
 
     # ── lyrics (LRCLIB) ─────────────────────────────────────────
     async def _lyrics_for(self, title: str, artist: str):
@@ -893,8 +1058,23 @@ class Music(commands.Cog):
     async def on_voice_state_update(self, member, before, after):
         if member.id != self.bot.user.id:
             return
-        if after.channel is None:
+        if after.channel is None and before.channel is not None:
+            player = self.players.get(member.guild.id)
+            if player is not None and not player._intentional_leave:
+                await self._report_forced_leave(player, before.channel)
             self._cleanup(member.guild.id)
+
+    async def _report_forced_leave(self, player: MusicPlayer, channel) -> None:
+        """One honest line in the music channel when the bot is removed from
+        voice against its will (kicked / yanked out of the channel)."""
+        if player.text_channel is None:
+            return
+        try:
+            await player.text_channel.send(
+                content=f"👢 I was yanked out of **{channel.name}** — /play and "
+                        "I'll be right back!")
+        except (discord.HTTPException, discord.NotFound):
+            pass
 
 
 async def setup(bot):

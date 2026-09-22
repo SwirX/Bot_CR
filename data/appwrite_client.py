@@ -53,6 +53,8 @@ HUB_TABLES: tuple[str, ...] = (
     "bot_settings",
     "modlog",
     "discord_data",
+    "meetings",
+    "meeting_sessions",
 )
 
 # club_roles seed rows. ``$id`` == the legacy hierarchy key used across

@@ -8,6 +8,7 @@ the permission-scope resolver in cogs/_scopes.py.
 
 import logging
 import re
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -15,11 +16,15 @@ from discord.ext import commands
 
 from data.store import store
 from data.store import StoreError
+from data.levels import level_from_xp
+from data.names import LINK_SEARCH_THRESHOLD, best_match, top_matches
 from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
                           scopes_for_author, require_scope)
 from cogs._dates import days_until, fmt_date
-from cogs._ui import OwnerView, PaginatorView, LoggedView, close_panel
-from cogs.minecraft import LinkChoiceView, UnlinkConfirmView, mc_link_card_embed
+from cogs._ui import OwnerView, PaginatorView, LoggedView, close_panel, select_value
+from cogs.birthday_tracker import announce_birthday, parse_birthday
+from cogs.minecraft import LinkInfoView, UnlinkConfirmView, mc_link_card_embed
+from cogs.onboarding import cursive_nickname
 from i18n.core import resolve_member_lang, t
 
 
@@ -84,15 +89,6 @@ HIERARCHY_CHART = (
     "   CELL MEMBERS      CORE MEMBERS\n"
     "```"
 )
-
-
-def level_from_xp(xp: int) -> int:
-    """Level for cumulative XP using the club curve 100·L²."""
-    xp = max(0, int(xp or 0))
-    level = 0
-    while 100 * (level + 1) * (level + 1) <= xp:
-        level += 1
-    return level
 
 
 class NotifView(discord.ui.View):
@@ -202,6 +198,7 @@ class ProfileHubView(LoggedView, OwnerView, discord.ui.View):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member = cog, lang, member
         self.user_id = user.id if user is not None else member.id
+        self._viewer = user if user is not None else member
         self.close.label = t("settings.close", lang)
         tabs = discord.ui.Select(
             placeholder=t("profile.tab.pick", lang), row=0,
@@ -224,7 +221,7 @@ class ProfileHubView(LoggedView, OwnerView, discord.ui.View):
     async def _tab_select(self, interaction: discord.Interaction):
         if not await self._owned(interaction):
             return
-        tab = interaction.values[0]
+        tab = select_value(interaction)
         if tab == "overview":
             await _render_with_spinner(
                 interaction, lang=self.lang,
@@ -235,7 +232,7 @@ class ProfileHubView(LoggedView, OwnerView, discord.ui.View):
             await self._go_robotics(interaction)
 
     async def _build_overview(self) -> tuple[discord.Embed, "ProfileHubView"]:
-        embed = await self.cog._profile_embed(self.member)
+        embed = await self.cog._profile_embed(self.member, viewer=self._viewer)
         return embed, self
 
     async def _build_robotics(self) -> tuple[discord.Embed, "ProfileHubView"]:
@@ -333,7 +330,7 @@ class ProfileMinecraftTabView(LoggedView, OwnerView, discord.ui.View):
             return
         await _render_with_spinner(
             interaction, lang=self.lang,
-            build=lambda: self._build_link(LinkChoiceView))
+            build=lambda: self._build_link(LinkInfoView))
 
     async def _build_link(self, cls) -> tuple[discord.Embed, discord.ui.View]:
         view = cls(self.mc_cog, self.lang, self.member, home_factory=self._home)
@@ -359,7 +356,7 @@ class ProfileMinecraftTabView(LoggedView, OwnerView, discord.ui.View):
             build=lambda: self._back_to_hub(hub))
 
     async def _back_to_hub(self, hub) -> tuple[discord.Embed, "ProfileHubView"]:
-        embed = await self.cog._profile_embed(self.member)
+        embed = await self.cog._profile_embed(self.member, viewer=self.viewer)
         return embed, hub
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
@@ -387,11 +384,23 @@ class Members(commands.Cog):
         key = str(record.get("club_role") or "").lower()
         return CLUB_ROLE_LABELS.get(key, "Core Member" if not key else key)
 
-    async def _profile_embed(self, member: discord.Member) -> discord.Embed:
+    async def _profile_embed(self, member: discord.Member, *,
+                               viewer: discord.Member | None = None) -> discord.Embed:
+        """Build a member's profile card.
+
+        ``viewer`` is whoever is looking. The internal fields (warning count) were
+        gated on ``scopes_for`` of the **subject**, so any member running
+        ``/profile @VicePresident`` read that person's yellow-card count, real
+        name and club id — data the ``members.read`` / ``internal.read`` scopes
+        exist to protect. Authorisation is always the viewer's.
+        """
         record = await self._record(member.id)
         name = record.get("real_name") or member.display_name
-        scopes = scopes_for(str(record.get("club_role") or "").lower(),
-                            is_member=member)
+        who = viewer if viewer is not None else member
+        viewer_scopes = scopes_for(str((await self._record(who.id)).get("club_role")
+                                       or "").lower(), is_member=who) \
+            if who.id != member.id else scopes_for(
+                str(record.get("club_role") or "").lower(), is_member=member)
         embed = discord.Embed(
             title=f"👤 {name}",
             color=discord.Color.teal(),
@@ -410,7 +419,7 @@ class Members(commands.Cog):
         embed.add_field(name="Voice time",
                         value=f"{int(voice // 3600)}h {int((voice % 3600) // 60)}m"
                               if voice else "0s", inline=True)
-        if "internal.read" in scopes:
+        if "internal.read" in viewer_scopes:
             embed.add_field(name="⚠️ Warnings",
                             value=str(record.get("warnings") or 0), inline=True)
         else:
@@ -520,17 +529,157 @@ class Members(commands.Cog):
             return
         await ctx.send("🔓 Unlinked your club account.")
 
-    @commands.hybrid_command(name="profile", description="Show a member's club profile.")
+    @commands.hybrid_command(name="linkmember",
+                             description="Link a club member to a Discord user "
+                                         "(writes member_discord_links).")
+    @commands.guild_only()
+    @require_scope("members.manage")
+    async def linkmember(self, ctx, member: discord.Member, club: str):
+        """Staff: attach a Discord user to their club-registry row by name/id.
+
+        Writes the ``member_discord_links`` join row the members list reads;
+        the name matcher de-cursives and fuzzy-matches like the auto-linker.
+        """
+        if member == self.bot.user:
+            await ctx.send("Nice try. I manage my own account. 🤖")
+            return
+        club = (club or "").strip()
+        if not club:
+            await ctx.send("⚠️ Pass the club member by name or id, e.g. "
+                           "`!linkmember @user \"Fatima Bouzarbia\"`.")
+            return
+        try:
+            registry = await store.list_club_members()
+        except StoreError as exc:
+            await ctx.send(f"⚠️ Couldn't load the club registry: {exc}")
+            return
+        low = club.lower()
+        target = next((m for m in registry
+                       if m["$id"] == club or m["name"].lower() == low), None)
+        if target is None:
+            match = best_match(
+                club, [(m["$id"], m["name"]) for m in registry],
+                threshold=LINK_SEARCH_THRESHOLD)
+            if match is None:
+                top = top_matches(
+                    club, [(m["$id"], m["name"]) for m in registry])
+                lines = ", ".join(f"**{name}**" for _, name, _ in top)
+                await ctx.send(f"⚠️ Couldn't pin down “{club}” against the "
+                               "club registry."
+                               + (f"\nClosest: {lines}" if lines else ""))
+                return
+            target = {"$id": match[0], "name": match[1]}
+        try:
+            await store.link_member_discord(target["$id"], member.id,
+                                            verified=True)
+        except StoreError as exc:
+            await ctx.send(f"⚠️ Couldn't link: {exc}")
+            return
+        await ctx.send(f"✅ Linked **{member.display_name}** → club member "
+                       f"**{target['name']}** (verified).\n"
+                       "The members list now shows them joined.")
+
+    @commands.hybrid_command(name="unlinkmember",
+                             description="Remove a Discord user's "
+                                         "club-member link.")
+    @commands.guild_only()
+    @require_scope("members.manage")
+    async def unlinkmember(self, ctx, member: discord.Member):
+        removed = 0
+        try:
+            removed = await store.unlink_member_discord(member.id)
+        except StoreError as exc:
+            await ctx.send(f"⚠️ Couldn't unlink: {exc}")
+            return
+        if removed:
+            await ctx.send(f"🔓 Removed **{member.display_name}**'s "
+                           "club-member link.")
+        else:
+            await ctx.send(f"ℹ️ **{member.display_name}** isn't linked to a "
+                           "club member.")
+
+    @commands.hybrid_group(name="profile", description="Show a member's club profile.")
     @commands.guild_only()
     async def profile(self, ctx, member: discord.Member = None):
         """Your profile (or a public one) straight from the Appwrite source of truth."""
         member = member or ctx.author
         lang = await resolve_member_lang(ctx.author.id, None)
-        embed = await self._profile_embed(member)
+        embed = await self._profile_embed(member, viewer=ctx.author)
         # Public on purpose: members flex XP/level/role. The tabs stay
         # author-only (ProfileHubView user=ctx.author).
         await ctx.send(embed=embed, view=ProfileHubView(self, lang, member,
                                                         user=ctx.author))
+
+    @profile.command(name="setname",
+                     description="Set or update your real full name (cursive nickname applied).")
+    @commands.guild_only()
+    async def profile_setname(self, ctx, *, name: str):
+        """Set your own name — works even if you never set it before."""
+        given = name.strip()
+        if not given:
+            await ctx.send("⚠️ Please enter your real full name.")
+            return
+        nick = cursive_nickname(given)
+        if not nick:
+            await ctx.send("⚠️ Couldn't build a cursive nickname from that.")
+            return
+        nick_applied = False
+        try:
+            await ctx.author.edit(nick=nick, reason="Self-service: real name set")
+            nick_applied = True
+        except discord.Forbidden:
+            LOG.warning("setname: cannot change nickname of %s (permission missing)", ctx.author)
+        except discord.HTTPException as exc:
+            LOG.warning("setname: failed to set nickname for %s: %s", ctx.author, exc)
+        try:
+            await store.merge_member(ctx.author.id, {
+                "real_name": given,
+                "display_name": nick,
+            })
+        except StoreError as exc:
+            LOG.warning("setname: could not persist real_name for %s: %s", ctx.author.id, exc)
+            await ctx.send("⚠️ Couldn't save your name right now — try again later.")
+            return
+        try:
+            await store.maybe_auto_link_club_member(ctx.author.id, given)
+        except StoreError as exc:
+            LOG.warning("setname: auto-link failed for %s: %s", ctx.author.id, exc)
+        reply = f"✅ Saved! Your real name is **{given}** and your nickname is now `{nick}`."
+        if not nick_applied:
+            reply += "\n(⚠️ I couldn't change your server nickname — I need the *Manage Nicknames* permission.)"
+        await ctx.send(reply)
+
+    @profile.command(name="setbirthday",
+                     description="Set or update your birthday (YYYY-MM-DD).")
+    @commands.guild_only()
+    async def profile_setbirthday(self, ctx, date: str):
+        """Set your own birthday — works even if you never set it before."""
+        try:
+            birthday_full, birthday = parse_birthday(date)
+        except ValueError:
+            await ctx.send("⚠️ Invalid date! Use YYYY-MM-DD (e.g. 2004-12-25).")
+            return
+        try:
+            await store.merge_member(ctx.author.id, {
+                "birthday": birthday,
+                "birthday_full": birthday_full,
+            })
+        except StoreError as exc:
+            LOG.warning("setbirthday: could not persist birthday for %s: %s", ctx.author.id, exc)
+            await ctx.send("⚠️ Couldn't save your birthday right now — try again later.")
+            return
+        await ctx.send(f"🎉 Your birthday has been saved: {birthday_full}")
+        await self._announce_birthday_if_today(ctx.author)
+
+    async def _announce_birthday_if_today(self, member: discord.Member):
+        """Announce in the announcements channel if today is the member's birthday."""
+        record = await self._record(member.id)
+        birthday = record.get("birthday")
+        if not birthday:
+            return
+        if birthday == datetime.now().strftime("%m-%d"):
+            name = record.get("display_name") or record.get("real_name") or member.display_name
+            await announce_birthday(member.guild, name)
 
     @commands.hybrid_command(name="whois", description="Internal profile for staff.")
     @commands.guild_only()

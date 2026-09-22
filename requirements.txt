@@ -18,3 +18,5 @@ yt-dlp==2026.8.19
 # YTMusic powers query search and the /queue auto radio (yt-dlp's ytsearch is
 # bot-detected and unreliable).
 ytmusicapi==1.12.3
+# Blowfish for Deezer's BF_CBC_STRIPE stream decryption (DEEZER_ARL source).
+pycryptodome==3.23.0

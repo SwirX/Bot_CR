@@ -11,6 +11,7 @@ Member, everyone above keeps their club role. A member already in a different
 cell is moved, and the move is reported back.
 """
 
+import asyncio
 import logging
 
 import discord
@@ -131,8 +132,14 @@ class Cells(commands.Cog):
             return
 
         added, moved, already, failed = [], [], [], []
-        for member in targets:
-            record = await self._record(member.id)
+
+        async def assign(member):
+            """Per-member cell assignment; returns a classification tag."""
+            try:
+                record = await self._record(member.id)
+            except StoreError as exc:
+                LOG.warning("cell add read failed for %s: %s", member.id, exc)
+                return ("failed", None)
             previous = _clean_cell(record.get("cell"))
             payload = {"cell": target}
             role = str(record.get("club_role") or "").lower()
@@ -143,12 +150,44 @@ class Cells(commands.Cog):
                 await store.merge_member(member.id, payload)
             except StoreError as exc:
                 LOG.warning("cell add failed for %s: %s", member.id, exc)
+                return ("failed", None)
+            if not previous:
+                return ("added", None)
+            if previous.lower() == target.lower():
+                return ("already", None)
+            return ("moved", previous)
+
+        # Acknowledge first: each member costs a get_member plus a
+        # merge_member, and this used to run strictly sequentially — tagging ten
+        # members meant ~150 sequential Appwrite round trips, so the command
+        # overran Discord's 3s window and the user saw "This interaction
+        # failed" while the writes had partly succeeded. Bounded concurrency
+        # keeps the fan-out fast without stampeding the hub.
+        if ctx.interaction is not None and not ctx.interaction.response.is_done():
+            try:
+                await ctx.interaction.response.defer(ephemeral=True)
+            except discord.HTTPException:
+                pass
+
+        semaphore = asyncio.Semaphore(5)
+
+        async def guarded(member):
+            async with semaphore:
+                return await assign(member)
+
+        results = await asyncio.gather(*(guarded(m) for m in targets),
+                                       return_exceptions=True)
+        for member, outcome in zip(targets, results):
+            if isinstance(outcome, BaseException):
+                LOG.warning("cell add raised for %s: %s", member.id, outcome)
                 failed.append(member.display_name)
                 continue
-
-            if not previous:
+            kind, previous = outcome
+            if kind == "failed":
+                failed.append(member.display_name)
+            elif kind == "added":
                 added.append(member)
-            elif previous.lower() == target.lower():
+            elif kind == "already":
                 already.append(member)
             else:
                 moved.append((member, previous))
