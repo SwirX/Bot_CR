@@ -23,6 +23,13 @@ def today_str() -> str:
     return datetime.now(tz).strftime("%Y-%m-%d")
 
 
+def cap_grant(granted_today: int, cap: int, amount: int) -> int:
+    """Whole XP still allowed by the daily voice cap; 0 when exhausted."""
+    if granted_today >= cap or amount <= 0:
+        return 0
+    return min(amount, cap - granted_today)
+
+
 class Engagement(commands.Cog):
     """XP & levels plus daily challenges, all Appwrite-backed."""
 
@@ -33,6 +40,9 @@ class Engagement(commands.Cog):
         self.level_seen = {}       # user_id -> highest announced level
         self.name_cache = {}       # user_id -> username
         self.xp_cooldown = {}      # user_id -> last time XP was granted
+        self.voice_sessions = {}   # user_id -> [monotonic start, accrued fraction, guild_id]
+        self.voice_day_granted = {}  # user_id -> [date, voice XP granted that day]
+        self._voice_per_second = config.VOICE_XP_PER_MINUTE / 60.0
         self.daily_posted = None   # last date the challenge was posted for
         self.flush_loop.start()
 
@@ -50,8 +60,18 @@ class Engagement(commands.Cog):
         self.xp_cooldown[uid] = now
 
         gain = random.randint(config.XP_MIN, config.XP_MAX)
-        self.xp_pending[uid] = self.xp_pending.get(uid, 0) + gain
+        await self._grant_xp(uid, gain, name=message.author.name,
+                             mention=message.author.mention,
+                             channel=message.channel)
 
+    # ── shared XP grant ───────────────────────────────────────
+    async def _grant_xp(self, uid: int, amount: int, *, name: str,
+                        mention: str, channel=None) -> None:
+        """Credit XP into the pending bucket and announce any level-up."""
+        if amount <= 0:
+            return
+        self.name_cache[uid] = name
+        self.xp_pending[uid] = self.xp_pending.get(uid, 0) + amount
         base = self.xp_base.get(uid)
         if base is None:
             try:
@@ -60,15 +80,92 @@ class Engagement(commands.Cog):
                 record = None
             base = int((record or {}).get("xp", 0))
             self.xp_base[uid] = base
-
-        total = base + self.xp_pending[uid]
-        level = level_from_xp(total)
+        level = level_from_xp(base + self.xp_pending[uid])
         prev = self.level_seen.get(uid, level_from_xp(base))
         if level > prev:
             self.level_seen[uid] = level
-            await message.channel.send(
-                f"🎉 {message.author.mention} reached **level {level}**! GG!"
-            )
+            if channel is not None:
+                await channel.send(f"🎉 {mention} reached **level {level}**! GG!")
+
+    # ── voice-channel XP ──────────────────────────────────────
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        if member.bot:
+            return
+        now = time.monotonic()
+        if before.channel != after.channel:
+            await self._close_voice_session(member, before.channel, now)
+        if after.channel is not None and member.id not in self.voice_sessions:
+            self.voice_sessions[member.id] = [now, 0.0, member.guild.id]
+
+    def _adopt_existing_voice_sessions(self):
+        """Seed sessions for members already in voice when the bot comes up."""
+        now = time.monotonic()
+        for guild in self.bot.guilds:
+            for uid, state in guild.voice_states.items():
+                member = guild.get_member(uid)
+                if member is None or member.bot or state.channel is None:
+                    continue
+                if uid not in self.voice_sessions:
+                    self.voice_sessions[uid] = [now, 0.0, guild.id]
+
+    def _accrue_voice(self, uid: int, now: float) -> int:
+        """Whole XP a session earned since its last credit; the fraction carries."""
+        session = self.voice_sessions.get(uid)
+        if session is None:
+            return 0
+        elapsed = now - session[0]
+        if elapsed <= 0:
+            return 0
+        session[0] = now
+        session[1] += elapsed * self._voice_per_second
+        whole = int(session[1])
+        session[1] -= whole
+        return whole
+
+    async def _credit_open_voice_sessions(self):
+        """Accrue XP for everyone in voice (called once per flush tick)."""
+        now = time.monotonic()
+        for uid, session in list(self.voice_sessions.items()):
+            whole = self._accrue_voice(uid, now)
+            if whole <= 0:
+                continue
+            guild = self.bot.get_guild(session[2])
+            member = guild.get_member(uid) if guild else None
+            if member is None:
+                continue
+            channel = member.voice.channel if member.voice else None
+            await self._grant_voice_xp(member, channel, whole)
+
+    async def _close_voice_session(self, member, channel, now: float):
+        """Grant the leftover whole XP when a member leaves or switches channels."""
+        session = self.voice_sessions.pop(member.id, None)
+        if session is None:
+            return
+        elapsed = now - session[0]
+        if elapsed <= 0:
+            return
+        accrued = session[1] + elapsed * self._voice_per_second
+        whole = int(accrued)
+        if whole > 0:
+            await self._grant_voice_xp(member, channel, whole)
+
+    async def _grant_voice_xp(self, member, channel, amount: int):
+        """Daily-capped voice XP, routed through the shared grant path."""
+        today = today_str()
+        entry = self.voice_day_granted.get(member.id)
+        if entry is None or entry[0] != today:
+            entry = [today, 0]
+            self.voice_day_granted[member.id] = entry
+        grant = cap_grant(entry[1], config.VOICE_XP_DAILY_CAP, amount)
+        if grant <= 0:
+            return
+        entry[1] += grant
+        text = None
+        if channel is not None:
+            text = discord.utils.get(member.guild.text_channels, name=channel.name)
+        await self._grant_xp(member.id, grant, name=member.name,
+                             mention=member.mention, channel=text)
 
     # ── flush ──────────────────────────────────────────────────
     @commands.Cog.listener()
@@ -76,9 +173,11 @@ class Engagement(commands.Cog):
         await self.bot.wait_until_ready()
         if not self.flush_loop.is_running():
             self.flush_loop.start()
+        self._adopt_existing_voice_sessions()
 
     @tasks.loop(seconds=config.DASHBOARD_REFRESH_SECONDS)
     async def flush_loop(self):
+        await self._credit_open_voice_sessions()
         await self.flush()
         await self.maybe_post_daily_challenge()
 

@@ -17,9 +17,10 @@ command works as both `!prefix` and `/slash`.
 - 🎂 **Birthday tracker** — birthdays are stored per member in Appwrite and
   announced in the announcements channel on the day (plus an immediate
   announcement if you set a birthday that *is* today).
-- 📈 **XP & levels** — chatting earns XP (per-user cooldown), levels grow with
-  `100·L²` cumulative XP, level-ups are shouted in chat, and `/rank` +
-  `/leaderboard` read straight from the store.
+- 📈 **XP & levels** — chatting earns XP (per-user cooldown) and **voice-channel
+  time earns XP continuously** (daily cap), levels grow with `100·L²` cumulative
+  XP, level-ups are shouted in chat, and `/rank` + `/leaderboard` read straight
+  from the store.
 - 🔥 **Daily challenges** — staff set a challenge for the day
   (`/challenge set`), members claim it once (`/challenge claim`), history is
   kept, and each day's challenge is auto-posted to announcements.
