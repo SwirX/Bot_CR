@@ -72,7 +72,7 @@
   "mc.unlink.done": "✅ **{name}** délié — retiré de la liste blanche et votre lien est effacé.",
   "mc.unlink.failed": "Impossible de retirer l'entrée de la liste blanche — réessayez ou demandez au staff.",
   "mc.link.type_linked": "lié",
-  "mclink.bad_name": "❌ Ça ne ressemble pas à un pseudo Minecraft valide (lettres, chiffres, `_`, jusqu'à 16 caractères).",
+  "mclink.bad_name": "❌ Ça ne ressemble pas à un pseudo Minecraft valide (lettres, chiffres, `_`, `-`, jusqu'à 16 caractères).",
   "mclink.taken": "❌ **{name}** est déjà lié à un autre compte Discord. Si c'est bien vous, demandez à la direction de le relier.",
   "mclink.already_linked": "❌ Votre compte Discord a déjà une liaison Minecraft active. Dé-liez-la d'abord (`/unlinkmc`) pour associer un autre pseudo.",
   "mclink.announce": "🔐 **Robotics CMC — configuration de connexion unique**",

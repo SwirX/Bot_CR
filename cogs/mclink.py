@@ -46,7 +46,7 @@ _OTP_TTL_SECONDS = config.MC_LINK_CODE_TTL
 # Join-spam guard: at most one fresh OTP per Discord user per window (§5.2.6).
 _MINT_COOLDOWN_SECONDS = 60
 # Contract §5.1: Minecraft usernames are 3–16 chars of letters/digits/_.
-_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
 
 
 # ── Cog ────────────────────────────────────────────────────────────────

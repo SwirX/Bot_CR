@@ -40,8 +40,9 @@ from i18n.core import resolve_member_lang, t
 
 LOG = logging.getLogger("bot.minecraft")
 
-# Vanilla username rules: 1–16 chars of ASCII letters/digits/underscore.
-_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,16}$")
+# Username rules: 1–16 chars of ASCII letters/digits/underscore/dash
+# (dash allowed — the club's cracked server supports it).
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
 _PING_TIMEOUT = 10.0
