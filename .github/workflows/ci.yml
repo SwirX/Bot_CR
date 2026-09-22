@@ -26,6 +26,17 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      # ffmpeg is a real runtime dependency of the music cog — discord.py spawns
+      # it for every track. scripts/test_music_player.py exercises the real
+      # enqueue→play_next path, so without ffmpeg on the runner that test dies
+      # with "ffmpeg was not found" while passing on any dev machine that has
+      # it installed. Installing it keeps the two environments honest.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffmpeg -version | head -1
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
