@@ -49,6 +49,42 @@ _MINT_COOLDOWN_SECONDS = 60
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
 
 
+class OtpCopyView(discord.ui.View):
+    """'Copy code' button on the OTP DM.
+
+    Discord exposes no client-side clipboard API, so a button can't write to
+    the user's clipboard directly. Instead it answers with an EPHEMERAL
+    message holding ONLY the full in-game command in a code block — a single
+    selectable unit on every client (tap-and-hold on mobile, triple-click on
+    desktop) — so the code never has to be picked out of the DM text.
+    """
+
+    def __init__(self, code: str, minutes: int, lang: str,
+                 owner_id: int) -> None:
+        super().__init__(timeout=_OTP_TTL_SECONDS)
+        self.code = code
+        self.owner_id = owner_id
+        self._lang = lang
+        self._minutes = minutes
+        btn = discord.ui.Button(
+            label=t("mclink.copy_otp_button", lang),
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"otp_copy:{code.lower()}",
+        )
+        btn.callback = self._on_copy  # explicit callback (no decorator)
+        self.add_item(btn)
+
+    async def _on_copy(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.defer(ephemeral=True)  # ignore
+            return
+        await interaction.response.send_message(
+            f"```/otp {self.code}```\n"
+            + t("mclink.copy_otp_hint", self._lang,
+                minutes=self._minutes),
+            ephemeral=True)
+
+
 # ── Cog ────────────────────────────────────────────────────────────────
 class McLink(commands.Cog):
     """Pairing (pair_key mint) + per-login OTP minting watcher."""
@@ -246,7 +282,9 @@ class McLink(commands.Cog):
             minutes = max(1, _OTP_TTL_SECONDS // 60)
             if not await self._dm(
                     discord_id, t("mclink.dm_otp", lang, code=code,
-                                  name=username, minutes=minutes)):
+                                  name=username, minutes=minutes),
+                    view=OtpCopyView(code, minutes, lang,
+                                     owner_id=discord_id)):
                 # DM failed — expire so the plugin re-arms on rejoin instead
                 # of telling the player "code on the way" forever.
                 try:
