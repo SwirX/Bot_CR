@@ -198,6 +198,7 @@ class ProfileHubView(LoggedView, OwnerView, discord.ui.View):
         super().__init__(timeout=timeout)
         self.cog, self.lang, self.member = cog, lang, member
         self.user_id = user.id if user is not None else member.id
+        self._viewer = user if user is not None else member
         self.close.label = t("settings.close", lang)
         tabs = discord.ui.Select(
             placeholder=t("profile.tab.pick", lang), row=0,
@@ -231,7 +232,7 @@ class ProfileHubView(LoggedView, OwnerView, discord.ui.View):
             await self._go_robotics(interaction)
 
     async def _build_overview(self) -> tuple[discord.Embed, "ProfileHubView"]:
-        embed = await self.cog._profile_embed(self.member)
+        embed = await self.cog._profile_embed(self.member, viewer=self._viewer)
         return embed, self
 
     async def _build_robotics(self) -> tuple[discord.Embed, "ProfileHubView"]:
@@ -355,7 +356,7 @@ class ProfileMinecraftTabView(LoggedView, OwnerView, discord.ui.View):
             build=lambda: self._back_to_hub(hub))
 
     async def _back_to_hub(self, hub) -> tuple[discord.Embed, "ProfileHubView"]:
-        embed = await self.cog._profile_embed(self.member)
+        embed = await self.cog._profile_embed(self.member, viewer=self.viewer)
         return embed, hub
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
@@ -383,11 +384,23 @@ class Members(commands.Cog):
         key = str(record.get("club_role") or "").lower()
         return CLUB_ROLE_LABELS.get(key, "Core Member" if not key else key)
 
-    async def _profile_embed(self, member: discord.Member) -> discord.Embed:
+    async def _profile_embed(self, member: discord.Member, *,
+                               viewer: discord.Member | None = None) -> discord.Embed:
+        """Build a member's profile card.
+
+        ``viewer`` is whoever is looking. The internal fields (warning count) were
+        gated on ``scopes_for`` of the **subject**, so any member running
+        ``/profile @VicePresident`` read that person's yellow-card count, real
+        name and club id — data the ``members.read`` / ``internal.read`` scopes
+        exist to protect. Authorisation is always the viewer's.
+        """
         record = await self._record(member.id)
         name = record.get("real_name") or member.display_name
-        scopes = scopes_for(str(record.get("club_role") or "").lower(),
-                            is_member=member)
+        who = viewer if viewer is not None else member
+        viewer_scopes = scopes_for(str((await self._record(who.id)).get("club_role")
+                                       or "").lower(), is_member=who) \
+            if who.id != member.id else scopes_for(
+                str(record.get("club_role") or "").lower(), is_member=member)
         embed = discord.Embed(
             title=f"👤 {name}",
             color=discord.Color.teal(),
@@ -406,7 +419,7 @@ class Members(commands.Cog):
         embed.add_field(name="Voice time",
                         value=f"{int(voice // 3600)}h {int((voice % 3600) // 60)}m"
                               if voice else "0s", inline=True)
-        if "internal.read" in scopes:
+        if "internal.read" in viewer_scopes:
             embed.add_field(name="⚠️ Warnings",
                             value=str(record.get("warnings") or 0), inline=True)
         else:
@@ -591,7 +604,7 @@ class Members(commands.Cog):
         """Your profile (or a public one) straight from the Appwrite source of truth."""
         member = member or ctx.author
         lang = await resolve_member_lang(ctx.author.id, None)
-        embed = await self._profile_embed(member)
+        embed = await self._profile_embed(member, viewer=ctx.author)
         # Public on purpose: members flex XP/level/role. The tabs stay
         # author-only (ProfileHubView user=ctx.author).
         await ctx.send(embed=embed, view=ProfileHubView(self, lang, member,

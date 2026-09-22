@@ -47,12 +47,20 @@ def parse_birthday(raw: str) -> tuple[str, str]:
 
 
 async def announce_birthday(guild: discord.Guild, name: str) -> None:
-    """Post a birthday announcement to the announcements channel."""
+    """Post a birthday announcement to the announcements channel.
+
+    ``name`` is escaped and length-capped here rather than trusting callers:
+    it originates from member-supplied data (``real_name`` via ``/link``), and
+    the bot posts with its own mention privileges. Unescaped, a member could
+    set their name to ``"@everyone https://phish.example"`` and have the bot
+    announce it into #announcements, pinging the whole club.
+    """
     channel = discord.utils.get(guild.text_channels, name=config.CHANNEL_ANNOUNCEMENTS)
     if channel is None:
         LOG.warning("No announcement channel %r found", config.CHANNEL_ANNOUNCEMENTS)
         return
-    await channel.send(f"🎉 Happy Birthday to {name}! 🎂🎈")
+    safe = discord.utils.escape_mentions(str(name))[:64]
+    await channel.send(f"🎉 Happy Birthday to {safe}! 🎂🎈", allowed_mentions=discord.AllowedMentions.none())
 
 
 class BirthdayTracker(commands.Cog):
@@ -82,7 +90,12 @@ class BirthdayTracker(commands.Cog):
             return
 
         try:
-            members = await store.list_members(limit=100, order_by="messages")
+            # Was limit=100 ordered by messages, which meant only the 100 most-chatty
+            # members were ever checked: anyone ranked below that NEVER got a
+            # birthday announcement, silently and permanently — it just looked
+            # like "nobody else has a birthday set". Widen so the check covers
+            # the whole roster.
+            members = await store.list_members(limit=1000, order_by="messages")
         except StoreError:
             LOG.error("Could not read members for the birthday check")
             return

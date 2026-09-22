@@ -283,6 +283,12 @@ class Engagement(commands.Cog):
             self.xp_base[uid] = self.xp_base.get(uid, 0) + amount
         self.xp_pending.clear()
 
+    async def flush_now(self):
+        """Called by BOT.shutdown() so a deploy/restart doesn't discard up to
+        a full flush interval of un-flushed XP."""
+        await self._credit_open_voice_sessions()
+        await self.flush()
+
     # ── daily challenge auto-post ──────────────────────────────
     async def maybe_post_daily_challenge(self):
         """Post today's challenge to the announcements channel (once per day)."""

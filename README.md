@@ -52,8 +52,7 @@ command works as both `!prefix` and `/slash`.
   `/spacex`, `/github`, `/advice` and `/lyrics`, all keyless, selected from
   openpublicapis.com.
 - 🎵 **Music** — `/play <song>` streams into your voice channel from
-  YouTube → Deezer → Audius in order (Deezer decrypts to a local file — a
-  fallback that survives datacenter IPs YouTube blocks), plus `/pause`,
+  Deezer → Audius in order (Deezer decrypts to a local file), plus `/pause`,
   `/resume`, `/skip`, `/remove <n>`, `/keep`, `/stop`, `/loop`, `/volume`,
   `/nowplaying` and `/radio <station>` (any live world radio station by name),
   and an interactive panel with pause / vote-skip / loop / stop / lyrics
@@ -296,26 +295,27 @@ flushed in small batches to keep writes in the single-digits-per-minute range.
 > Channel/role names are all configurable via env — no code changes needed if
 > your server renames things.
 
-### 🍪 YouTube cookies for `/play` (recommended)
+### 🚫 YouTube playback was removed (SSRF)
 
-YouTube bot-flags datacenter-server IPs, which makes most stream extractions
-fail with *"Sign in to confirm you're not a bot"*. **YTMusic search still
-works** (the bot finds the right song every time), but the actual audio stream
-needs a trusted session. Cookies help — and are still worth configuring — but
-note that on heavily flagged networks even cookies + proof-of-origin tokens
-may not unlock streams. The bot never fails outright: YouTube is tried first,
-then **Deezer** (see below), then **Audius**.
+`/play` used to hand whatever URL a member typed straight to `yt-dlp`, behind
+no validation beyond an `^https?://` regex and with no socket timeout. Any
+member could therefore make the host fetch **arbitrary internal URLs** —
+`http://169.254.169.254/latest/meta-data/`, `http://10.0.0.x:6379/`, a
+localhost service — and use the bot as an internal port/host prober (blind:
+no response body ever reached Discord, but the requests were real). A
+black-holed target also pinned a thread from the default executor forever.
 
-1. In a browser you're logged into YouTube with, install a cookies-exporter
-   extension (e.g. *Get cookies.txt LOCALLY*) and export cookies for
-   `youtube.com` as a Netscape-format `cookies.txt`.
-2. Place it on the server (e.g. `/home/ubuntu/Bot_CR/cookies.txt`).
-3. Point the bot at it in `.env`:
-   `YT_COOKIES_FILE=/home/ubuntu/Bot_CR/cookies.txt`
-4. Restart the bot. Videos YouTube lets through now stream with the account.
+The provider was removed rather than patched. **Deezer** (with an `ARL` token)
+and **Audius** cover search and playback, and neither accepts an arbitrary
+URL — a Deezer query is a search string, not a fetch target.
 
-> 🔒 Treat `cookies.txt` like a password — it grants YouTube access as that
-> account. Keep it out of version control and out of the repo.
+Because of this, `YT_COOKIES_FILE` and `youtube.com_cookies.txt` are no longer
+read. If that file still exists on the host it is a live logged-in YouTube
+session sitting on disk for nothing — delete it:
+
+```bash
+rm -f /home/ubuntu/Bot_CR/youtube.com_cookies.txt
+```
 
 ### 🎧 Deezer source for `/play` (mainstream catalog, any network)
 
@@ -345,7 +345,7 @@ before playing.
 
 ---
 
-## ⛏️ Minecraft server bridge (`/mc`, `/minecraft`, `/linkmc`)
+## ⛏️ Minecraft server bridge (`/mc`, `/minecraft`)
 
 The club's Minecraft server (Robotics CMC) is managed through **Pterodactyl's
 Client API** — no Minecraft plugins required:
@@ -355,69 +355,15 @@ Client API** — no Minecraft plugins required:
   server-list ping), run state, player count and your own Discord ↔ Minecraft
   link status, with **Dank-Memer-style button drill-downs**:
   - 🔄 **Refresh** — re-check the live status;
-  - 🔗 **Link your account** → 💳 **Paid** / 🆓 **Free** → a modal asks for your
-    exact Minecraft username → whitelisted and saved;
+  - 🔗 **Link your account** → explains the one supported path: run `/mclink`
+    (the bot DMs a pairing code) and prove it in-game with `/mcverify <code>`.
+    There is no username modal here on purpose — see the mc-link section for
+    why an unverified self-service link was a full account takeover;
   - ❌ **Unlink** → confirmation → removes the whitelist entries and the
     Discord ↔ Minecraft link;
   - 🎛 **Server control** (visible **only** to the bot operator / Archon):
     ▶️ Start · ⏹ **Stop** · 🔄 **Restart** — same power signals as
     `/mcstart` `/mcstop` `/mcrestart`.
-- `/linkmc <username> <free|paid>` — the same linking as a **one-liner slash
-  command**; the member **declares their account type**:
-  - **paid** (bought Minecraft, e.g. `SwirXwasTaken`) → whitelists the **real
-    UUID** *and* the offline UUID, so they're covered whether they join with
-    the official launcher or a free one (the server runs `online-mode=false`).
-  - **free** (cracked/offline account) → whitelists the **offline UUID of the
-    exact name as typed** (case-sensitive — Mojang's capitalisation of the
-    same letters is a different account, e.g. `hatim` vs `Hatim`).
-  In both cases `whitelist.json` is written through the panel file API and
-  live-reloaded (`whitelist reload`) when the server is running, or left to
-  apply at next start when it's stopped.
-  The Discord ↔ Minecraft link is stored per member (`links.minecraft`, see the
-  identity model below) so staff can audit it and the profile hub can show it.
-
-### 🔗 Identity links (`/profile`)
-
-Every member doc carries a structured `links` object — a place per platform
-that gets linked to the Discord account:
-
-```jsonc
-"links": {
-  "minecraft": { "username": "SwirXwasTaken", "type": "paid",
-                 "uuids": ["real-uuid", "offline-uuid"], "linked_at": "…" },
-  "robotics":  null   // reserved — coming soon
-}
-```
-
-`/profile` is now an **identity hub** with tab buttons (Overview · ⛏️ Minecraft
-· 🔬 Robotics): the Minecraft tab shows the link card (username / type /
-whitelisted UUIDs / date) with quick **Link / Unlink** actions. Link/unlink
-from the *hub* or the *profile* are the same flows, and only the member
-themselves (or the operator/Archon) can link or unlink a profile — a plain
-viewer sees the card without the action buttons and without the UUIDs. Adding
-the robotics link later is just filling in `links.robotics`.
-
-Configure it in `.env`:
-
-```
-MC_PTERO_URL=https://panel.minecraft.bouyakhsass.com
-MC_PTERO_CLIENT_KEY=<client API key from Account → API Credentials>
-MC_SERVER_ID=<server identifier, e.g. 96f52139>
-MC_ADDRESS=minecraft.alibks.dev
-MC_PORT=25566
-MC_SERVER_NAME=Robotics CMC
-# Optional: who may run /mcstart /mcstop /mcrestart (defaults to BOT_ADMIN_USER_IDS).
-# MC_CONTROL_USER_IDS=407922956757499905
-```
-
-> 🔒 The client API key can manage the panel's servers, so keep it out of
-> version control — it lives in `.env` only.
-
-### 🎛 Server power control (`/mcstart`, `/mcstop`, `/mcrestart`)
-
-Only the **bot operator** and the **Archon** role can start/stop/restart the
-server — deliberately *not* pres/VP, other staff roles, or server admins:
-
 - `/mcstart` — boot the server.
 - `/mcstop` — graceful shutdown.
 - `/mcrestart` — graceful restart (offline server → hints `/mcstart` instead).
@@ -453,49 +399,55 @@ MC_PLAYER_ROLE=⛏️ Minecraft Player      # role auto-assigned on link
 MC_RALLY_COOLDOWN=2700                  # min seconds between auto pings
 ```
 
-### 🔐 mc-link (Discord ↔ Minecraft single sign-on, `/mclink`, `/mcpass`)
+### 🔐 mc-link (Discord ↔ Minecraft single sign-on, `/mclink`)
 
 The cracked (offline-mode) server can't trust what clients claim, so a Paper
 plugin gates logins through **AuthMe** and this bot — the **only** component
 that mints links and credentials — anchors every name to a Discord identity.
 Minecraft is an **untrusted client boundary**: a username, UUID or "op" flag a
-client presents is data, never proof. The Appwrite backend (`mc_link_codes`,
-`mc_auth`, `mc_challenges`) is the shared source of truth between the bot and
-the plugin; the plugin only *consumes* backend state and bot-issued secrets.
+client presents is data, never proof.
 
-- **`/mclink <username>`** (hybrid, guild-only, 2/60 s cooldown) — validates
-  with the existing `_USERNAME_RE`, refuses names already linked to a *different*
-  Discord account, then mints a single-use 6-char code in `mc_link_codes`
-  (TTL `MC_LINK_CODE_TTL`) and **DMs it** — codes and temp passwords are never
-  posted in a channel. In-game `/mcverify <code>` claims it.
-- **Watchers (~`MC_LINK_POLL_SECONDS`)** — `status=used` codes get a thanks DM,
-  the `MC_PLAYER_ROLE` role, a `bot_members.links.minecraft` sync (`type=linked`,
-  shown on `/mc` and `/profile`), and an audit entry. `mc_challenges`:
-  `new_ip` pending → a **12-char temp password**, AES-256-GCM sealed to
-  `payload_enc` (AAD = username), `approved`, DM'd with a **Deny** path;
-  `change_password` `done`/`failed` → DM confirmation/soft-failure.
-  Markers in `bot_settings` resume after restarts (at-least-once delivery).
-- **`/mcpass`** (slash) and the **🔑 Change password** button on `/mc` and the
-  Minecraft tab of `/profile` share one modal (8–64 chars + confirm) → an
-  encrypted `change_password` challenge the plugin applies server-side.
-- **📱 Devices** button (linked accounts only) — lists `current_ip` + `last_ips`
-  from `mc_auth`, IPs **masked by default** (`203.0.113.***`, raw only on a
-  detail tap), each removable behind a confirm (owner/operator only). Removal
-  edits `mc_auth.last_ips` directly so that IP triggers a fresh new-IP
-  challenge instead of auto-login — the café / school-Wi-Fi case.
+The design is **OTP-only** (mitigation plan §5). The old shared AES secret,
+`/mcpass`, IP-trust auto-login and the `mc_link_codes` / `mc_auth` /
+`mc_challenges` tables are **gone**. The bot's Appwrite key is the only shared
+credential, and the plugin only ever *consumes* backend state.
+
+- **`/mclink <username>`** (hybrid, guild-only, 2/60 s cooldown) — validates the
+  name, refuses it if this user already has a link *or* that name is already
+  taken by someone else, mints a single-use code and **DMs it** (never posted in
+  a channel; falls back to an ephemeral, invoker-only message if DMs are closed).
+  In-game `/mcverify <code>` proves the person actually controls the account and
+  only *then* does the link become active.
+- **There is deliberately no `/linkmc`.** A self-service command that took a
+  username and whitelisted it without in-game proof could be pointed at someone
+  else's unlinked name; because it wrote an *active* link, the OTP watcher would
+  then deliver that account's login code to the claimant — a full account
+  takeover. `/mclink` + `/mcverify` is the only linking path, and
+  `scripts/smoke_test.py` fails the build if a `linkmc` command reappears.
+- **Login OTP (`/otp <code>` in-game)** — when the plugin arms a challenge on
+  join, the watcher mints a **bcrypt-12 hash** of a fresh code, DMs the plaintext
+  to the linked Discord user, and expires the row if that DM fails. The plugin
+  verifies with `checkpw`; the plaintext is never stored. Hashing runs off the
+  event loop and the cycle has a wall-clock budget.
+- **Expired codes re-arm.** A minted-but-unused row that passes its TTL is
+  treated as stale and re-armed on the next join, so a forgotten code can never
+  wedge a player out of logging in.
+- **`/mcotp`** (hybrid, 2/60 s) re-arms a row the bot itself expired after a
+  failed DM. It refuses to overwrite a live code and never touches
+  `failed_attempts` — the plugin's brute-force lockout.
+- **Watchers (~`MC_LINK_POLL_SECONDS`)** — pending-OTP minting, pair expiry, and
+  an activation sync that grants `MC_PLAYER_ROLE`, the thanks DM, the
+  `links.minecraft` record shown on `/mc` / `/profile`, and an audit entry. A
+  marker in `bot_settings` resumes after restarts (at-least-once delivery).
 
 ```
-MC_LINK_SECRET=...                     # AES-256-GCM key, 32 bytes hex, shared with the plugin
-MC_LINK_CODE_TTL=300                   # link-code lifetime (s)
-MC_TEMP_TTL=300                        # temp-password lifetime (s)
+MC_LINK_CODE_TTL=300                   # OTP + pair-code lifetime (s)
+MC_PAIR_KEY_TTL=300                    # unclaimed pairing-code lifetime (s)
 MC_LINK_POLL_SECONDS=5                 # watcher poll interval (s)
 ```
 
-The crypto twin (`cogs/_mc_crypto.py`) must stay byte-compatible with the
-plugin's `CipherBox` (`iv + tag + ciphertext`, hex, AAD = username); crypto and
-credential-mint helpers are covered by `scripts/test_mclink.py` (run alongside
-the smoke test; the watcher loops are guarded so an empty `MC_LINK_SECRET`
-disables the whole cog instead of crashing).
+`scripts/test_mclink.py` covers the code generation and hashing contract
+(CSPRNG `secrets.choice` over an unambiguous alphabet, bcrypt-12 at rest).
 
 ### 🔄 `/bot status` update checker
 

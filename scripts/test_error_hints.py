@@ -25,7 +25,11 @@ os.environ.setdefault("APPWRITE_API_KEY", "y")
 import discord  # noqa: E402
 from discord.ext import commands  # noqa: E402
 
-sys.modules.setdefault("KeepAlive", types.SimpleNamespace(keep_alive=lambda: None))
+sys.modules.setdefault("KeepAlive", types.SimpleNamespace(
+    keep_alive=lambda: None,
+    mark_ready=lambda: None,
+    mark_not_ready=lambda: None,
+))
 import BOT  # noqa: E402
 
 

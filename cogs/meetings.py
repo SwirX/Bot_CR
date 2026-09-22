@@ -31,7 +31,8 @@ from discord.ext import commands
 import config
 from cogs import _meetings as meetlib
 from cogs._perms import is_meeting_admin, require_meeting_admin
-from cogs._ui import MemberPickerView, OwnerView, close_panel, select_value
+from cogs._ui import (LoggedView, MemberPickerView, OwnerView, close_panel,
+                      select_value)
 from data.store import store
 from data.store import StoreError
 
@@ -46,7 +47,7 @@ MAX_MEMBERS = 15  # sane cap on tagged members per private room
 _CARD_ROWS = 2
 
 
-class MeetingListView(OwnerView, discord.ui.View):
+class MeetingListView(OwnerView, LoggedView, discord.ui.View):
     """``/meeting list``: a dropdown over meeting ids that opens the report.
 
     The dropdown carries up to :data:`config.MEETING_MAX_PICKER_OPTIONS`
@@ -121,7 +122,7 @@ class MeetingListView(OwnerView, discord.ui.View):
             child.disabled = True
 
 
-class MeetingStatsView(OwnerView, discord.ui.View):
+class MeetingStatsView(OwnerView, LoggedView, discord.ui.View):
     """The report hub: stats, the CSV, and the way to the absentee page.
 
     Owner-scoped, like the other panels in the bot — a meeting report names
@@ -161,7 +162,13 @@ class MeetingStatsView(OwnerView, discord.ui.View):
                          _button: discord.ui.Button):
         if not await self._owned(interaction):
             return
-        meeting = self.meeting
+        # Re-read the row. The view captured `self.meeting` at construction, so
+        # a report opened while the meeting was live kept ended_at == "" for
+        # its whole 300s life. `_dur_seconds` clamps open rows to ended_at and
+        # only falls back to `now`, so pressing CSV after `/meeting end`
+        # credited everyone present from the panel-open moment to whenever the
+        # button was hit — up to hours of false presence.
+        meeting = await self.cog._fresh_meeting(self.meeting)
         sessions = await self.cog._sessions(meeting["id"])
         totals = meetlib.rollup(sessions, ended_at=meeting.get("ended_at") or "",
                                 granted=meeting.get("granted") or [])
@@ -229,7 +236,7 @@ class MeetingStatsView(OwnerView, discord.ui.View):
             child.disabled = True
 
 
-class MeetingAbsenteesView(OwnerView, discord.ui.View):
+class MeetingAbsenteesView(OwnerView, LoggedView, discord.ui.View):
     """The absentee page: one 🟨 yellow-card button per expected-but-absent member.
 
     Paged at :data:`config.MEETING_ABSENTEE_PAGE_SIZE` because a club-wide
@@ -302,12 +309,22 @@ class MeetingAbsenteesView(OwnerView, discord.ui.View):
         async def callback(interaction: discord.Interaction, button: discord.ui.Button):
             if not await self._owned(interaction):
                 return
+            # Claim the slot BEFORE the await. increment_member appends a new
+            # warnings row on every call rather than bumping a counter, so it
+            # cannot dedupe; the button was only disabled after the round trip
+            # returned, and Discord does not debounce double-clicks. One
+            # double-click used to write two yellow cards and two modlog lines.
+            if uid in self.issued:
+                await self._ephemeral(
+                    interaction, f"🟨 Already issued a yellow card to **{label}**.")
+                return
+            self.issued.add(uid)
             issued, error = await self.cog._issue_yellow_card(
                 uid, interaction.user, self.meeting.get("title") or "")
             if error:
+                self.issued.discard(uid)  # allow a retry on failure
                 await self._ephemeral(interaction, f"⚠️ {error}")
                 return
-            self.issued.add(uid)
             # Disable just this card rather than re-rendering: the rest of the
             # page is unchanged and a rebuild would drop the user's scroll.
             button.disabled = True
@@ -394,6 +411,26 @@ class Meetings(commands.Cog):
         self.bot = bot
         # channel_id (int) -> {"owner": int, "members": [int, ...]}
         self.meetings: dict[int, dict] = {}
+
+    @property
+    def _start_lock(self) -> asyncio.Lock:
+        """Serialises `/meeting start`.
+
+        Two concurrent starts could both pass the "is a meeting already
+        running?" check and create two live meetings; the older was then
+        unreachable by every command (``get_live_meeting`` returns the newest)
+        and stayed ``live=True`` forever with its channel locked to an audience.
+
+        Created lazily rather than in ``__init__`` so it is available on any
+        construction path. The lock is deliberately NOT held across the
+        custom-audience picker, which can block for minutes — the check is
+        re-asserted after it returns instead.
+        """
+        lock = self.__dict__.get("_start_lock_obj")
+        if lock is None:
+            lock = asyncio.Lock()
+            self.__dict__["_start_lock_obj"] = lock
+        return lock
 
     # ── persistence ──────────────────────────────────────────────────
     @commands.Cog.listener()
@@ -557,6 +594,26 @@ class Meetings(commands.Cog):
             LOG.error("Meetings: could not read attendance for %s: %s",
                       meeting_id, exc)
             return []
+
+    async def _fresh_meeting(self, cached: dict) -> dict:
+        """Re-read a meeting row so a long-lived report view never renders from
+        a stale snapshot.
+
+        The views capture ``self.meeting`` at construction and live for 300s.
+        If the panel was opened while the meeting was still running,
+        ``ended_at`` stayed "" for its whole life, and ``_dur_seconds`` clamps
+        open rows to ``ended_at`` and only falls back to ``now`` — so pressing
+        CSV or Absentees after ``/meeting end`` credited everyone present from
+        the moment the panel opened until the button was hit. Hours of false
+        presence, with no error anywhere.
+        """
+        try:
+            fresh = await store.get_meeting(cached["id"])
+        except StoreError as exc:
+            LOG.warning("Meetings: could not refresh meeting %s: %s",
+                        cached.get("id"), exc)
+            return cached
+        return fresh or cached
 
     async def _absent_entries(self, meeting: dict) -> tuple[list[str], dict[str, str]]:
         """``(ids, {id: display_name})`` for the absentee page.
@@ -932,6 +989,20 @@ class Meetings(commands.Cog):
             await ctx.send("❌ `minutes` must be between 1 and 1440.")
             return
 
+        # `ctx.typing()` only shows a channel typing indicator — it does NOT
+        # acknowledge a slash interaction. Everything below does several Appwrite
+        # writes plus up to ~60 sequential set_permissions calls (each a rate
+        # -limited Discord round trip), which reliably overruns the 3s window, so
+        # the final ctx.send died with "Unknown interaction" and the admin was
+        # told nothing while the meeting went live. Acknowledge first.
+        interaction = getattr(ctx, "interaction", None)
+        response = getattr(interaction, "response", None)
+        if response is not None and not response.is_done():
+            try:
+                await response.defer(ephemeral=True)
+            except discord.HTTPException:
+                pass
+
         extras = [m for m in (also or []) if not m.bot]
         if len(extras) > config.MEETING_MAX_EXTRA_MEMBERS:
             await ctx.send(
@@ -972,21 +1043,36 @@ class Meetings(commands.Cog):
                 return
 
         created = False
-        if channel is None:
-            channel = await self._make_meeting_channel(ctx, scope)
-            if channel is None:
-                return  # the helper already explained itself
-            created = True
-        else:
-            # Starting a meeting in the same channel the running one uses would
-            # clobber the live snapshot; the check above catches it, but be
-            # explicit about the channel too in case the live lookup missed it.
-            clash = await self._live_meeting_for_channel(channel.id)
-            if clash is not None:
+        # Re-check AFTER the audience picker. That picker blocks on
+        # `view.wait()` for up to 5 minutes, so a second admin can start a
+        # meeting in the meantime; without this re-check the first invocation
+        # then created a SECOND live meeting that `get_live_meeting` (which
+        # returns the newest) could never reach — orphaned at live=True forever,
+        # with its channel locked to an audience and no command able to end it.
+        async with self._start_lock:
+            existing = await self._live_meeting()
+            if existing is not None:
+                where = (f"<#{existing['channel_id']}>"
+                         if existing["channel_id"] else "a deleted channel")
                 await ctx.send(
-                    f"⏳ A meeting is already running in <#{channel.id}>. "
-                    f"End it with `/meeting end` first.")
+                    f"⏳ A meeting is already running in {where} "
+                    f"(`{existing['title']}`). End it with `/meeting end` first.")
                 return
+
+            if channel is None:
+                channel = await self._make_meeting_channel(ctx, scope)
+                if channel is None:
+                    return  # the helper already explained itself
+                created = True
+            else:
+                # Starting a meeting in the same channel the running one uses
+                # would clobber the live snapshot.
+                clash = await self._live_meeting_for_channel(channel.id)
+                if clash is not None:
+                    await ctx.send(
+                        f"⏳ A meeting is already running in <#{channel.id}>. "
+                        f"End it with `/meeting end` first.")
+                    return
 
         try:
             audience_members = await meetlib.resolve_audience(
@@ -1031,14 +1117,24 @@ class Meetings(commands.Cog):
                     "created_by": ctx.author.id,
                 })
                 await store.save_meeting_channel_state(meeting_id, snapshot)
+                # Track exactly which overwrites get written so a failure
+                # part-way through can undo all of them. The rollback used to
+                # pass an empty set, so it replayed only the snapshot ids and
+                # silently left the k member grants (and @everyone, and the
+                # bot's manage_channels/manage_roles) on the channel — while the
+                # admin was told "couldn't narrow the channel" and reasonably
+                # assumed nothing had happened.
+                written: set[str] = set()
                 await meetlib.ensure_bot_access(channel)
-                await meetlib.apply_meeting_permissions(
-                    channel, audience=audience_members, grant_extra=extras)
+                written.add(str(ctx.guild.me.id))
+                written.update(
+                    await meetlib.apply_meeting_permissions(
+                        channel, audience=audience_members, grant_extra=extras))
             except StoreError as exc:
                 LOG.error("Meetings: /meeting start failed: %s", exc)
                 # Roll the channel back: a half-started meeting with a narrowed
                 # channel and no live row is the worst possible state.
-                await self._restore_quietly(channel, snapshot, set())
+                await self._restore_quietly(channel, snapshot, written)
                 if created:
                     await self._discard_channel(channel)
                 if meeting_id:
@@ -1047,7 +1143,7 @@ class Meetings(commands.Cog):
                 return
             except discord.HTTPException as exc:
                 LOG.error("Meetings: /meeting start permission write failed: %s", exc)
-                await self._restore_quietly(channel, snapshot, set())
+                await self._restore_quietly(channel, snapshot, written)
                 if created:
                     await self._discard_channel(channel)
                 if meeting_id:
@@ -1103,9 +1199,18 @@ class Meetings(commands.Cog):
                                ["couldn't read the attendance log"])
 
         # Close anyone still in the channel so their time is recorded up to now
-        # instead of being left as a row that never ended.
-        for uid in [s["discord_user"] for s in sessions if s["open"]]:
-            await self._close_session(meeting["id"], int(uid))
+        # instead of being left as a row that never ended. Guard the cast: one
+        # row with an empty discord_user used to raise ValueError here, which
+        # aborted /meeting end *before* end_meeting — leaving the meeting
+        # live=True so every retry hit the same crash and it could never be
+        # ended by any command.
+        for uid in {s["discord_user"] for s in sessions
+                    if s.get("open") and s.get("discord_user")}:
+            try:
+                await self._close_session(meeting["id"], int(uid))
+            except (StoreError, ValueError) as exc:
+                LOG.warning("Meetings: could not close session for %s: %s", uid, exc)
+                problems.append(f"couldn't close an attendance row ({uid})")
 
         created = False
         snapshot: dict = {}
@@ -1113,10 +1218,20 @@ class Meetings(commands.Cog):
             snapshot = await store.meeting_channel_state(meeting["id"])
         created = meetlib.channel_was_created(snapshot)
 
-        # Every member the bot granted is expected + visitors; targets that
-        # already existed are rewritten from the snapshot, and the rest are
-        # deleted so no grant outlives the meeting.
-        granted = {*(meeting["expected"] or []), *(meeting["visitors"] or [])}
+        # Every member the bot granted is expected + visitors, PLUS:
+        #   * the ids /meeting unlock wrote to (a member outside `expected` was
+        #     in neither the snapshot nor `expected`, so their explicit
+        #     view/connect/speak/stream overwrite survived the meeting forever),
+        #   * @everyone and the bot itself. Neither is ever in the snapshot
+        #     (inheritance means there was no prior explicit overwrite) nor in
+        #     `expected` — the audience resolver filters bots, and visitors was
+        #     always empty. So both of the overwrites the bot writes at start
+        #     were never removed, permanently exposing a category-denied channel
+        #     to the whole server and leaving manage_channels/manage_roles on it.
+        granted = {*(meeting["expected"] or []), *(meeting["visitors"] or []),
+                   *(meeting.get("granted") or [])}
+        if channel is not None:
+            granted |= {str(ctx.guild.default_role.id), str(ctx.guild.me.id)}
         decision = meetlib.end_plan(snapshot, channel_exists=channel is not None,
                                     granted=set(granted))
         if decision["problem"]:
@@ -1257,11 +1372,27 @@ class Meetings(commands.Cog):
         if channel is None:
             await ctx.send("❌ The meeting channel is gone; can't unlock it.")
             return
+        if not meeting.get("locked"):
+            await ctx.send("🔓 The meeting isn't locked — nobody has been "
+                           "locked out of it.")
+            return
 
         async with ctx.typing():
             try:
                 await meetlib.allow_member(
                     channel, member, reason="Meeting re-entry granted by admin")
+                # Record the write so /meeting end removes it. This member is
+                # by definition outside `expected` (that is why they were
+                # locked), so without this their explicit
+                # view/connect/speak/stream overwrite outlived the meeting on
+                # the club's main voice channel, with no way to undo it via the
+                # bot.
+                try:
+                    await store.grant_meeting_reentry(
+                        meeting["id"], member.id)
+                except StoreError as exc:
+                    LOG.warning("Meetings: could not record unlock for %s: %s",
+                                member.id, exc)
             except (discord.NotFound, discord.Forbidden,
                     discord.HTTPException) as exc:
                 await ctx.send(f"⚠️ Couldn't let {member.display_name} back in: {exc}")
@@ -1418,7 +1549,23 @@ class Meetings(commands.Cog):
             await ctx.send(f"⚠️ Created the room but couldn't lock it down: {exc}")
             return
         for member in allowed:
-            await self._grant_access(channel, member)
+            # The lock-down above is carefully handled; this loop was not. Any
+            # HTTPException (missing Manage Roles, or Discord's 100-overwrite
+            # ceiling — the owner may pick unboundedly here) escaped *before*
+            # the room was registered, leaving a channel that exists, denies
+            # @everyone, admits only some members, is absent from self.meetings
+            # (so auto-cleanup skips it) and that /meeting endroom cannot find.
+            # An invisible, permanently unmanageable channel.
+            try:
+                await self._grant_access(channel, member)
+            except (discord.Forbidden, discord.NotFound,
+                    discord.HTTPException) as exc:
+                LOG.error("Meetings: grant failed for %s in %s: %s",
+                          member.id, channel.id, exc)
+                await self._delete_room_quietly(channel)
+                await ctx.send(f"⚠️ Created the room but couldn't admit "
+                               f"{member.display_name}: {exc}")
+                return
 
         self.meetings[channel.id] = {"owner": author.id,
                                      "members": [m.id for m in allowed]}

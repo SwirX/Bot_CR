@@ -31,6 +31,7 @@ import discord
 
 import config
 from cogs._perms import meeting_tier
+from data.store import _parse_ts
 
 # What an attendee needs: see the channel, join it, be heard, and stream.
 # Kept as permission *names* rather than bit values because a
@@ -312,20 +313,45 @@ def restore_plan(snapshot: dict, *, granted: set[int]) -> dict[str, dict]:
 
 async def apply_meeting_permissions(channel: discord.VoiceChannel, *,
                                     audience: list[discord.Member],
-                                    grant_extra: list[discord.Member] | None = None) -> None:
+                                    grant_extra: list[discord.Member] | None = None
+                                    ) -> set[str]:
     """Open ``channel`` to the audience for the duration of the meeting.
 
-    ``@everyone`` is granted the attendee permissions so non-audience members
-    can still *see* the channel and get a clear "you weren't invited" from
-    Discord rather than a channel that simply doesn't exist in their sidebar —
-    a hidden channel looks like a bug to the people who were left out.
+    Returns the set of target ids actually written, so the caller can pass it
+    to the rollback/cleanup path. This used to return nothing while writing
+    three kinds of overwrite, so a mid-way failure rolled back only part of what
+    had been applied and left the rest on the channel forever.
+
+    Two behaviours changed here, both of them bugs:
+
+    * **@everyone gets ``view_channel`` only, not ``connect``/``speak``/
+      ``stream``.** The full attendee set was granted to @everyone, which meant
+      ``connect=True`` for the entire server: *anyone* could join any tracked
+      meeting, the audience was never actually enforced, and they were logged as
+      attendees. Seeing the channel but being unable to join is what the
+      original intent described.
+    * The bot's own overwrite (``ensure_bot_access``) is now returned by the
+      caller for cleanup too. @everyone and the bot are in neither the snapshot
+      nor ``expected``, so neither was ever removed at /meeting end — meaning a
+      category-denied channel used for a meeting stayed visible and joinable by
+      the whole server permanently, and the bot kept manage_channels/manage_roles
+      on it.
     """
+    written: set[str] = set()
+    # Viewable-but-not-joinable for non-audience members: a hidden channel just
+    # looks like a bug to the people who were left out.
     await channel.set_permissions(
-        channel.guild.default_role, **ATTENDEE_KWARGS,
+        channel.guild.default_role, view_channel=True,
         reason="Meeting in progress")
+    written.add(str(channel.guild.default_role.id))
     for member in {*(a for a in audience), *(grant_extra or [])}:
-        await channel.set_permissions(member, **ATTENDEE_KWARGS,
-                                      reason="Meeting audience")
+        try:
+            await channel.set_permissions(member, **ATTENDEE_KWARGS,
+                                          reason="Meeting audience")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            continue
+        written.add(str(member.id))
+    return written
 
 
 async def ensure_bot_access(channel: discord.VoiceChannel) -> None:
@@ -391,12 +417,17 @@ async def restore_channel(channel: discord.VoiceChannel, snapshot: dict, *,
 
 # ── attendance rollups ──────────────────────────────────────────────────
 def _parse(iso: str) -> datetime | None:
-    if not iso:
-        return None
-    try:
-        return datetime.fromisoformat(iso)
-    except ValueError:
-        return None
+    """Parse a hub timestamp into a **tz-aware** datetime, or None.
+
+    Two bugs lived here. It didn't strip the trailing ``Z``, which
+    ``datetime.fromisoformat`` only learned to accept in Python 3.11 — on 3.10
+    every hub timestamp returned None, ``_dur_seconds`` fell through to 0, and
+    the whole attendance CSV was silently zeroed. And it could return a *naive*
+    datetime, which then raised TypeError when compared against an aware value.
+
+    Reuse the store's parser rather than keeping a third copy of this.
+    """
+    return _parse_ts(iso)
 
 
 def _dur_seconds(start: str, end: str, until: datetime | None = None) -> int:
