@@ -150,7 +150,7 @@ class MusicPlayer:
         self.auto_radio = False
         self._radio_history: deque[str] = deque(maxlen=400)
         self._refill_task: asyncio.Task | None = None
-        self._last_refill_at = 0.0
+        self._last_refill_at: float | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._last_active = time.monotonic()
         # True when the player chose to leave (stop / idle / shutdown) rather
@@ -188,7 +188,13 @@ class MusicPlayer:
             return
         if len(self.queue) >= RADIO_REFILL_AT:
             return
-        if time.monotonic() - self._last_refill_at < RADIO_REFILL_COOLDOWN:
+        # None means "never refilled". 0.0 would be wrong: time.monotonic()
+        # counts from boot, so on a host up for less than the cooldown
+        # `now - 0.0 < RADIO_REFILL_COOLDOWN` is true and the radio can never
+        # fill its queue.
+        if (self._last_refill_at is not None
+                and time.monotonic() - self._last_refill_at
+                < RADIO_REFILL_COOLDOWN):
             return
         self._refill_task = asyncio.create_task(self.refill_radio())
 

@@ -7,6 +7,7 @@ No Discord connection; message objects are minimal fakes.
 import asyncio
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -98,3 +99,29 @@ class JockieNudgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class FreshBootSentinelTests(unittest.TestCase):
+    def _dispatch(self, message):
+        cog = JockieNudge(None)
+        asyncio.run(cog.on_message(message))
+        return cog
+
+    """Regression: cooldown sentinels must not be 0.0.
+
+    ``time.monotonic()`` counts from boot, so a host that has been up for less
+    than the cooldown window reports a value below it. A missing key defaulted
+    to 0.0 therefore looked like "nudged at epoch zero" and suppressed the
+    first nudge entirely — on every fresh boot and every CI runner.
+    """
+
+    def test_first_nudge_fires_when_monotonic_is_tiny(self):
+        real = time.monotonic
+        time.monotonic = lambda: 3.0  # host up 3 seconds
+        try:
+            message = _Message("m!play shape of you", user_id=1, channel_id=10)
+            self._dispatch(message)
+            self.assertEqual(
+                len(message.replies), 1,
+                "first nudge must fire even when monotonic() is near zero")
+        finally:
+            time.monotonic = real

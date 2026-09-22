@@ -42,11 +42,18 @@ class JockieNudge(commands.Cog):
         if not content[2:].lstrip()[:1].isalpha():
             return
         now = time.monotonic()
-        if now - self._user_last_nudge.get(
-                message.author.id, 0.0) < _USER_COOLDOWN_SECONDS:
+        # Use `None` as "never nudged", NOT 0.0. time.monotonic() is measured
+        # from an arbitrary origin (Linux: boot time), so on a host that has
+        # been up less than the cooldown window `now - 0.0 < 600` is TRUE and
+        # the very first nudge is silently suppressed — for every user, on
+        # every fresh boot and every CI runner. A missing key must mean "no
+        # cooldown", not "nudged at epoch zero".
+        last_user = self._user_last_nudge.get(message.author.id)
+        if last_user is not None and now - last_user < _USER_COOLDOWN_SECONDS:
             return
-        if now - self._channel_last_nudge.get(
-                message.channel.id, 0.0) < _CHANNEL_COOLDOWN_SECONDS:
+        last_channel = self._channel_last_nudge.get(message.channel.id)
+        if (last_channel is not None
+                and now - last_channel < _CHANNEL_COOLDOWN_SECONDS):
             return
         self._user_last_nudge[message.author.id] = now
         self._channel_last_nudge[message.channel.id] = now
