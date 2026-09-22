@@ -94,6 +94,11 @@ DASHBOARD_REFRESH_SECONDS = _env("DASHBOARD_REFRESH_SECONDS", 60, cast=int)
 XP_COOLDOWN_SECONDS = _env("XP_COOLDOWN_SECONDS", 60, cast=int)
 XP_MIN = _env("XP_MIN", 4, cast=int)
 XP_MAX = _env("XP_MAX", 12, cast=int)
+# Voice-channel XP: continuous accrual while connected to a voice channel,
+# independent of the message cooldown; capped per day so AFK parking can't
+# dominate the leaderboard.
+VOICE_XP_PER_MINUTE = _env("VOICE_XP_PER_MINUTE", 2, cast=int)
+VOICE_XP_DAILY_CAP = _env("VOICE_XP_DAILY_CAP", 120, cast=int)
 
 # ── Club website ───────────────────────────────────────────────────────
 WEBSITE_URL = _env("WEBSITE_URL", "https://robotics.ma")
