@@ -1469,6 +1469,36 @@ class Store:
             _T["discord_mc_links"], 100,
             queries=[Query.equal("is_active", True)])
 
+    async def mc_active_link_for_user(self, discord_id) -> dict | None:
+        """The member's verified link straight from the hub, or None.
+
+        The hub tables are the source of truth; the member sidecar slot the
+        profile/hub cards used to read is only refreshed by the claim watcher
+        for links that activated *after* ``mc_link.last_claim``, so links that
+        predated the marker never displayed. Returns a dict shaped like the
+        legacy ``links.minecraft`` slot: username/type/uuids/linked_at.
+        """
+        uid = str(discord_id)
+        rows = await self._listed(
+            _T["discord_mc_links"], 50,
+            queries=[Query.equal("discord_user", uid),
+                     Query.equal("is_active", True)])
+        for row in rows:
+            account_id = _rel_id(row.get("minecraft_account"))
+            if not account_id:
+                continue
+            account = await self.mc_resolve_account(account_id)
+            if account is None:
+                continue
+            return {
+                "username": (account.get("username") or account_id),
+                "type": "free" if bool(account.get("is_cracked")) else "paid",
+                "uuids": [str(u) for u in [account.get("uuid")] if u],
+                "linked_at": (row.get("verified_at")
+                              or row.get("$createdAt") or ""),
+            }
+        return None
+
     async def mc_deactivate_link(self, discord_id: int,
                                  username: str | None = None) -> None:
         """Flip the member's link row(s) back to inactive (unlink flow).
