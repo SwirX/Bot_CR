@@ -122,6 +122,9 @@ class MusicPlayer:
         self.host_id: int | None = None
         self.now_playing_message = None
         self.now_playing_view = None
+        # Set by the owning cog; used to rebuild the control view each time
+        # the panel is (re)posted so buttons never go stale on an old message.
+        self.now_playing_view_factory = None
         self._audio_factory = audio_factory
         self._watchdog_task: asyncio.Task | None = None
         self._last_active = time.monotonic()
@@ -303,29 +306,48 @@ class MusicPlayer:
         return embed
 
     async def _update_panel(self, stopped: str = ""):
-        message = self.now_playing_message
-        if message is None:
+        """(Re)post the now-playing panel so it stays the newest chat message.
+
+        The old panel is deleted and a fresh copy — control view included —
+        is sent to the player's text channel: no buttons ever sit on a buried
+        message, and the panel is always one message the user can act on.
+        ``stopped`` posts a plain notice without controls instead.
+        """
+        old = self.now_playing_message
+        self.now_playing_message = None
+        self.now_playing_view = None
+        if old is not None:
+            try:
+                await old.delete()
+            except (discord.HTTPException, discord.NotFound):
+                pass
+        if self.text_channel is None:
             return
-        view = self.now_playing_view
+        view = None
+        if not stopped and self.now_playing_view_factory is not None:
+            view = self.now_playing_view_factory()
         embed = self.embed(stopped=stopped)
         try:
-            await message.edit(embed=embed, view=view if not stopped else None)
-        except discord.NotFound:
-            self.now_playing_message = None
-            self.now_playing_view = None
+            message = await self.text_channel.send(embed=embed, view=view)
+        except (discord.HTTPException, discord.NotFound):
+            return
+        if not stopped:
+            self.now_playing_message = message
+            self.now_playing_view = view
 
 
 class NowPlayingView(discord.ui.View):
-    """Interactive panel: pause/resume, vote-skip, loop, stop, lyrics."""
+    """Interactive panel: pause/resume, vote-skip, loop, stop, lyrics.
+
+    Every action defers immediately, lets the player (re)post the panel as
+    the newest message, then answers the user privately — the controls never
+    edit a message that may have just been replaced.
+    """
 
     def __init__(self, cog, player: MusicPlayer):
         super().__init__(timeout=None)
         self.cog = cog
         self.player = player
-
-    async def _reaction(self, interaction: discord.Interaction, feedback: str):
-        await interaction.response.edit_message(
-            embed=self.player.embed(), view=self.player.now_playing_view or self)
 
     @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.secondary, custom_id="music:pause")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -347,14 +369,17 @@ class NowPlayingView(discord.ui.View):
         else:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
             return
-        await self._reaction(interaction, feedback)
+        await interaction.response.defer()
+        await player._update_panel()
         await interaction.followup.send(feedback, ephemeral=True)
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="music:skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = self.player
+        await interaction.response.defer()
         skipped, needed, votes = await player.vote_skip(interaction.user)
-        await self._reaction(interaction, "")
+        if not skipped:
+            await player._update_panel()  # skipping reposts via the after-hook
         if skipped:
             await interaction.followup.send(
                 f"⏭️ Skipped by {interaction.user.mention}.", ephemeral=True)
@@ -369,8 +394,8 @@ class NowPlayingView(discord.ui.View):
                 "🔒 Only the session host, the requester, or staff can toggle loop.",
                 ephemeral=True)
             return
-        state = await self.player.toggle_loop()
-        await self._reaction(interaction, "")
+        await interaction.response.defer()
+        state = await self.player.toggle_loop()  # reposts the panel itself
         await interaction.followup.send(
             f"🔂 Loop {'on' if state else 'off'}.", ephemeral=True)
 
@@ -381,12 +406,9 @@ class NowPlayingView(discord.ui.View):
                 "🔒 Only the session host, the requester, or staff can stop the player.",
                 ephemeral=True)
             return
+        await interaction.response.defer()
         await self.player.stop()
-        try:
-            await interaction.response.edit_message(
-                embed=self.player.embed("⏹️ Stopped."), view=None)
-        except discord.NotFound:
-            await interaction.response.send_message("⏹️ Stopped.", ephemeral=True)
+        await interaction.followup.send("⏹️ Stopped and left the channel.", ephemeral=True)
 
     @discord.ui.button(emoji="🎤", style=discord.ButtonStyle.success, custom_id="music:lyrics")
     async def lyrics(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -423,6 +445,7 @@ class Music(commands.Cog):
         player = self.players.get(guild_id)
         if player is None:
             player = MusicPlayer(self.bot, guild_id, text_channel)
+            player.now_playing_view_factory = lambda: NowPlayingView(self, player)
             self.players[guild_id] = player
         elif text_channel is not None:
             player.text_channel = text_channel
@@ -572,7 +595,8 @@ class Music(commands.Cog):
             await ctx.send("🎵 Nothing is playing to skip.")
             return
         skipped, needed, votes = await player.vote_skip(ctx.author)
-        await player._update_panel()
+        if not skipped:
+            await player._update_panel()  # skipping reposts via the play hook
         if skipped:
             await ctx.send("⏭️ Skipped.")
         else:
