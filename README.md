@@ -277,6 +277,13 @@ enough** (128 kbps MP3). The bot grabs the track through Deezer's grey-web
 API, downloads the encrypted stream, and decrypts its BF-CBC "stripe" locally
 before playing.
 
+> 🎧 **Premium upgrade:** serve the ARL from a **Deezer Premium** session and
+> the bot automatically negotiates **320 kbps MP3** (or **FLAC** for
+> lossless-enabled accounts) at login — no code change. 128 kbps MP3 is the
+> *quality ceiling* on free accounts and shows audible "sparkle" on loud,
+> high-frequency-dense tracks; 320 kbps largely eliminates it. Confirm the
+> active format in the bot's log: `Deezer session ready: format=MP3_320 …`.
+
 1. Log into https://www.deezer.com in a browser used for nothing else.
 2. Open DevTools → **Storage → Cookies** (or Application → Cookies) and copy
    the value of the `arl` cookie for `deezer.com`.
