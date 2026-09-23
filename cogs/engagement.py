@@ -235,13 +235,19 @@ class Engagement(commands.Cog):
         xp = int((record or {}).get("xp", 0)) + self.xp_pending.get(uid, 0)
         level, into, need = xp_progress(xp)
         filled = int(10 * into / need) if need else 10
-        bar = "🟩" * filled + "⬛" * (10 - filled)
+        # White empties read as "not filled yet" on dark and light themes;
+        # black squares were invisible on the dark sidebar.
+        bar = "🟩" * filled + "⬜" * (10 - filled)
+        percent = int(100 * into / need) if need else 100
         embed = discord.Embed(
             title=f"📈 {member.display_name} — Level {level}",
             color=discord.Color.green(),
         )
-        embed.add_field(name="XP", value=f"{xp} total ({into}/{need} to next level)")
-        embed.add_field(name="Progress", value=f"{bar}", inline=False)
+        embed.add_field(
+            name="XP",
+            value=f"{xp:,} XP total · {into:,}/{need:,} to level {level + 1}",
+        )
+        embed.add_field(name="Progress", value=f"{bar} {percent}%", inline=False)
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="leaderboard", description="Server XP leaderboard (paginated).")
