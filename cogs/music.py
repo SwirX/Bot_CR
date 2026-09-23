@@ -165,10 +165,14 @@ class MusicPlayer:
 
     # ── queue / playback ────────────────────────────────────────
     async def enqueue(self, track: Track):
-        """Add a track; start playback immediately if nothing is playing."""
+        """Add a track; start playback only when nothing else is busy.
+
+        A paused track counts as busy — auto-starting over it would silently
+        drop what the user paused.
+        """
         self.queue.append(track)
         self._touch()
-        if self.voice and self.voice.is_playing():
+        if self.voice and (self.voice.is_playing() or self.voice.is_paused()):
             return False
         await self.play_next()
         return True
@@ -491,17 +495,16 @@ class Music(commands.Cog):
         player._touch()
         return player
 
-    async def _send_panel(self, ctx, player: MusicPlayer):
-        view = NowPlayingView(self, player)
-        player.now_playing_view = view
-        player.now_playing_message = await ctx.send(embed=player.embed(), view=view)
-
     # ── commands ────────────────────────────────────────────────
     @commands.hybrid_command(name="play", description="Play a song (search or URL).")
     @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def play(self, ctx, *, query: str):
-        """Stream the first playable source for the query, in provider order."""
+        """Stream the first playable source for the query, in provider order.
+
+        While anything is busy (playing *or* paused) the song is only queued —
+        playback is never interrupted by an extra `/play`.
+        """
         # Slash interactions expire after ~3s; joining voice and resolving a
         # source can easily take longer, so acknowledge before any awaits.
         # On prefix invocations ctx.defer() is a no-op.
@@ -522,10 +525,13 @@ class Music(commands.Cog):
         started = await player.enqueue(track)
         if fresh:
             player.host_id = ctx.author.id
-        if started and player.now_playing_message is None:
-            await self._send_panel(ctx, player)
-        elif not started:
-            await ctx.send(f"➕ **{track.title}** added to the queue (#{len(player.queue)}).")
+        if started:
+            await ctx.send(f"🎵 Now playing: **{track.title}**")
+        else:
+            await ctx.send(
+                f"➕ **{track.title}** added to the queue (#{len(player.queue)}).")
+        # Re-post the controls panel last so it stays the newest message.
+        await player._update_panel()
 
     @commands.hybrid_command(name="pause", description="Pause the current track.")
     @commands.guild_only()
@@ -695,10 +701,11 @@ class Music(commands.Cog):
         started = await player.enqueue(track)
         if fresh:
             player.host_id = ctx.author.id
-        if started and player.now_playing_message is None:
-            await self._send_panel(ctx, player)
-        elif not started:
+        if started:
+            await ctx.send(f"🎵 Now playing: **{track.title}**")
+        else:
             await ctx.send(f"➕ **{track.title}** added to the queue.")
+        await player._update_panel()  # keep the controls panel as the newest message
 
     # ── lyrics (LRCLIB) ─────────────────────────────────────────
     async def _lyrics_for(self, title: str, artist: str):
