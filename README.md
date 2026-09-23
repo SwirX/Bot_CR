@@ -42,12 +42,17 @@ command works as both `!prefix` and `/slash`.
 - 🌐 **Public-API commands** — `/weather`, `/define`, `/meme`, `/crypto`,
   `/spacex`, `/github`, `/advice` and `/lyrics`, all keyless, selected from
   openpublicapis.com.
-- 🎵 **Music** — `/play <song>` streams YouTube audio (YTMusic search + yt-dlp
-  + ffmpeg) into your voice channel: `/pause`, `/resume`, `/skip` (majority
-  vote — requester and staff skip instantly), `/stop`, `/loop`, `/volume`,
-  `/queue` (plus `/queue auto` to generate a 📻 YTMusic radio queue from the
-  current track), `/nowplaying`, an interactive panel with pause / vote-skip /
-  loop / stop / lyrics buttons, and auto-disconnect after a minute of idle.
+- 🎵 **Music** — `/play <song>` streams music into your voice channel from
+  YouTube → Deezer → Audius in order (Deezer decrypts to a local file; a
+  fallback that survives datacenter IPs that YouTube blocks): `/pause`,
+  `/resume`, `/skip` (majority vote — requester and staff skip instantly),
+  `/stop`, `/loop`, `/volume`, `/queue` (plus `/queue auto` to generate a 📻
+  radio queue from the current track — Deezer radio, falling back to YTMusic),
+  `/nowplaying`, and an interactive panel with pause / vote-skip / loop / stop
+  / lyrics buttons. While anything is playing *or paused*, an extra `/play`
+  only queues — playback is never interrupted. The controls panel is always
+  kept as the newest chat message: whenever the state changes it is deleted
+  and re-posted at the bottom. Auto-disconnects after a minute of idle.
 - 🤖 **Private meeting rooms** — `/meeting create @a @b [name]` spins up a
   private VC (auto-deleted when empty), `/meeting end` cleans it up.
 - 🔐 **Club permission scopes** — an authorization layer instead of scattered
