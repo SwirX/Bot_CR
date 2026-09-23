@@ -50,6 +50,7 @@ class Track:
     artist: str = ""
     requester_id: int | None = None
     headers: dict = field(default_factory=dict)
+    provider: str = ""
     votes: set = field(default_factory=set)
     # Decrypted local audio file (Deezer); when set, playback reads this path
     # instead of `url`.
@@ -418,6 +419,10 @@ class NowPlayingView(discord.ui.View):
         if player.current is None:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
             return
+        if player.current.provider == "radio":
+            await interaction.response.send_message(
+                "📻 This is a live radio stream — it has no lyrics.", ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
         result = await self.cog._lyrics_for(
             player.current.title, player.current.artist)
@@ -493,6 +498,7 @@ class Music(commands.Cog):
             artist=playable.artist,
             requester_id=requester_id,
             headers=playable.headers,
+            provider=playable.provider,
             local_path=playable.local_path,
         )
 
@@ -715,16 +721,16 @@ class Music(commands.Cog):
         await player._update_panel()
 
     @commands.hybrid_command(name="radio",
-                             description="Play a public internet radio station.")
+                             description="Search and play any live internet radio station by name.")
     @commands.guild_only()
     async def radio(self, ctx, station: str = "groovesalad"):
-        """Stream a public radio station — no search involved."""
+        """Search the world radio directory by name and start streaming."""
         await ctx.defer()
         player = await self._ensure_voice(ctx)
         if player is None:
             return
         try:
-            playable = radio_provider.resolve(station)
+            playable = await radio_provider.resolve_station(station)
         except SourceUnavailable as exc:
             await ctx.send(f"⚠️ {exc.message}")
             return
