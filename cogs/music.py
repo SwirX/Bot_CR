@@ -35,6 +35,42 @@ USER_AGENT = "Bot_CR/1.0 (robotics-club Discord bot; contact: server staff)"
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
 
+@dataclass
+class Track:
+    """One queued song. Votes reset when the track starts playing."""
+
+    title: str
+    url: str
+    webpage_url: str = ""
+    video_id: str = ""
+    duration: int | None = None
+    thumbnail: str = ""
+    artist: str = ""
+    requester_id: int | None = None
+    headers: dict = field(default_factory=dict)
+    votes: set = field(default_factory=set)
+    # Decrypted local audio file (Deezer); when set, playback reads this path
+    # instead of `url`.
+    local_path: str = ""
+
+
+def _ffmpeg_kwargs(track: Track) -> dict:
+    """The ffmpeg options for a track: HTTP knobs only for streamed URLs.
+
+    The ``-reconnect`` family belongs to ffmpeg's HTTP input layer. Pointing
+    them at a local file makes ffmpeg abort with "Option reconnect not found"
+    (exit 8) — exactly the "resolved but nothing plays" bug, because Deezer's
+    decrypted files used to get the same before-options as a URL. A local file
+    needs no before-options at all.
+    """
+    if track.local_path:
+        return {"options": "-vn"}
+    before = FFMPEG_BEFORE
+    if track.headers:
+        before = f"{before} {_header_option(track.headers)}"
+    return {"before_options": before, "options": "-vn"}
+
+
 def _header_option(headers: dict) -> str:
     """Render yt-dlp's ``http_headers`` as an ffmpeg ``-headers`` argument.
 
@@ -66,25 +102,6 @@ def fmt_duration(seconds) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
-
-
-@dataclass
-class Track:
-    """One queued song. Votes reset when the track starts playing."""
-
-    title: str
-    url: str
-    webpage_url: str = ""
-    video_id: str = ""
-    duration: int | None = None
-    thumbnail: str = ""
-    artist: str = ""
-    requester_id: int | None = None
-    headers: dict = field(default_factory=dict)
-    votes: set = field(default_factory=set)
-    # Decrypted local audio file (Deezer); when set, playback reads this path
-    # instead of `url`.
-    local_path: str = ""
 
 
 class MusicPlayer:
@@ -179,19 +196,9 @@ class MusicPlayer:
     def _make_source(self, track: Track):
         if self._audio_factory is not None:
             return self._audio_factory(track)
-        before = FFMPEG_BEFORE
-        if track.local_path:
-            return discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(
-                    track.local_path, before_options=before, options="-vn"),
-                volume=self.volume)
-        if track.headers:
-            before = f"{before} {_header_option(track.headers)}"
+        kwargs = _ffmpeg_kwargs(track)
         audio = discord.FFmpegPCMAudio(
-            track.url,
-            before_options=before,
-            options="-vn",
-        )
+            track.local_path or track.url, **kwargs)
         return discord.PCMVolumeTransformer(audio, volume=self.volume)
 
     def _after_hook(self, error):
