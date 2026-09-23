@@ -15,6 +15,7 @@ loop math is unit-testable without a real Discord voice connection.
 import asyncio
 import concurrent.futures
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ import discord
 from discord.ext import commands
 
 from cogs._perms import is_bot_admin
+from cogs.music_sources import deezer as deezer_provider
 from cogs.music_sources import radio as radio_provider
 from cogs.music_sources import resolve_playable, youtube as youtube_provider
 from cogs.music_sources.model import AllSourcesFailed, Playable, SourceUnavailable
@@ -660,51 +662,57 @@ class Music(commands.Cog):
         await ctx.send(embed=player.embed())
 
     async def _queue_auto(self, ctx, player: MusicPlayer, size: int = 8):
-        """Generate a radio queue from the currently playing track."""
+        """Generate a radio queue around the current track.
+
+        The Deezer track-radio runs first when an ARL is configured (works on
+        datacenter IPs where YouTube Music is blocked); the YTMusic radio is
+        the fallback for YouTube-sourced tracks.
+        """
         if player.voice is None or not player.voice.is_connected():
             await ctx.send("🎧 I need to be in a voice channel first — use `/play`.")
             return
-        if player.current is None or not player.current.video_id:
+        if player.current is None:
             await ctx.send("🎵 Play something first, then run `/queue auto` "
                            "to generate a 📻 radio queue.")
             return
         await ctx.defer()
         current = player.current
-        try:
-            seed_ids = await asyncio.to_thread(
-                youtube_provider.radio_seed_ids, current.video_id, size)
-        except Exception as exc:
-            LOG.warning("Auto-queue seed failed for %r: %s", current.title, exc)
-            await ctx.send("⚠️ Couldn't generate a radio for the current track.")
-            return
-        if not seed_ids:
-            await ctx.send("⚠️ No related tracks found for the current track.")
-            return
-        await ctx.send(f"📻 Building a radio queue from **{current.title}**…")
-        playables = await youtube_provider.resolve_parallel(seed_ids)
+        playables: list[Playable] = []
+        if os.environ.get("DEEZER_ARL"):
+            try:
+                playables = await deezer_provider.radio_tracks(current.title, size)
+            except Exception as exc:
+                LOG.warning("Auto-queue Deezer radio failed for %r: %s",
+                            current.title, exc)
+                playables = []
+        if not playables and current.video_id:
+            try:
+                seed_ids = await asyncio.to_thread(
+                    youtube_provider.radio_seed_ids, current.video_id, size)
+                if seed_ids:
+                    playables = await youtube_provider.resolve_parallel(seed_ids)
+            except Exception as exc:
+                LOG.warning("Auto-queue seed failed for %r: %s", current.title, exc)
+                playables = []
         if not playables:
-            await ctx.send("⚠️ Couldn't resolve any of the radio tracks.")
+            await ctx.send("⚠️ Couldn't generate a radio for the current track.")
             return
         for playable in playables:
             await player.enqueue(
                 Music._track_from_playable(playable, ctx.author.id))
-        await player._update_panel()
         await ctx.send(
-            f"➕ **{len(playables)}** songs from the radio of **{current.title}** "
+            f"📻 **{len(playables)}** songs from the radio of **{current.title}** "
             f"added to the queue.")
+        await player._update_panel()  # keep the controls panel as the newest message
 
     @commands.hybrid_command(name="nowplaying", description="Show the current track.")
     @commands.guild_only()
     async def nowplaying(self, ctx):
-        player = self._player(ctx.guild.id)
+        player = self._player(ctx.guild.id, ctx.channel)
         if player.current is None:
             await ctx.send("🎵 Nothing is playing.")
             return
-        if player.now_playing_message is None:
-            await self._send_panel(ctx, player)
-        else:
-            await player._update_panel()
-            await ctx.send(embed=player.embed())
+        await player._update_panel()
 
     @commands.hybrid_command(name="radio",
                              description="Play a public internet radio station.")
