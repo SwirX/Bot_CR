@@ -11,12 +11,15 @@ per-track TRACK_TOKEN; media.deezer.com/v1/get_url exchanges it for a CDN URL.
 """
 
 import hashlib
+import logging
 from random import randint
 from typing import AsyncIterable, AsyncIterator
 
 import aiohttp
 
 from cogs.music_sources.model import SourceUnavailable
+
+LOG = logging.getLogger("music.deezer_gw")
 
 try:
     from Crypto.Cipher import Blowfish
@@ -123,6 +126,10 @@ class GwLightClient:
             if flag is None or options.get(flag):
                 self.format = candidate
                 break
+        LOG.info(
+            "Deezer session ready: format=%s (hq=%s lossless=%s)",
+            self.format, bool(options.get("web_hq")),
+            bool(options.get("web_lossless")))
 
     async def search(self, query: str, limit: int = 20) -> list[dict]:
         data = await self._call("search.music", {
