@@ -147,6 +147,43 @@ class PanelTests(unittest.TestCase):
         self.assertEqual(len(player.text_channel.sent), 1)
         self.assertIsNone(player.text_channel.sent[0].get("view"))
 
+    def test_embed_renders_non_empty_queue(self):
+        """Regression: unpacking Tracks without enumerate crashed every panel
+        repost and the /queue embed while songs were queued."""
+        player = MusicPlayer(bot=object(), guild_id=1)
+        player.current = Track(title="Current", url="u")
+        player.queue.append(Track(title="Next one", url="u1"))
+        player.queue.append(Track(title="Next two", url="u2"))
+        fields = player.embed().to_dict()["fields"]
+        self.assertEqual(fields[-1]["name"], "Up next (2)")
+        self.assertIn("1. **Next one**", fields[-1]["value"])
+        self.assertIn("2. **Next two**", fields[-1]["value"])
+
+    def test_play_next_announces_the_new_track(self):
+        player = MusicPlayer(bot=object(), guild_id=1)
+        player.voice = _FakeVoice(playing=False)
+        player.text_channel = _FakeTextChannel()
+        player._audio_factory = lambda track: "source"
+        player.queue.append(Track(title="Song A", url="u"))
+        asyncio.run(player.play_next())
+        self.assertEqual(player.current.title, "Song A")
+        contents = [s.get("content") for s in player.text_channel.sent
+                    if "content" in s]
+        self.assertTrue(any("Now playing" in c and "Song A" in c for c in contents))
+
+    def test_stop_clears_panel_and_never_reposts(self):
+        """/stop must produce exactly one message — the caller's own."""
+        player = MusicPlayer(bot=object(), guild_id=1)
+        old = _FakeMessage()
+        player.now_playing_message = old
+        player.text_channel = _FakeTextChannel()
+        player.queue.append(Track(title="t", url="u"))
+        asyncio.run(player.stop())
+        self.assertTrue(old.deleted)
+        self.assertEqual(len(player.text_channel.sent), 0)
+        self.assertIsNone(player.current)
+        self.assertEqual(list(player.queue), [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

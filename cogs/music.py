@@ -201,6 +201,7 @@ class MusicPlayer:
         self.current.votes.clear()
         source = self._make_source(track)
         self.voice.play(source, after=self._after_hook)
+        await self._announce_current()
         await self._update_panel()
 
     def _make_source(self, track: Track):
@@ -223,7 +224,12 @@ class MusicPlayer:
             LOG.exception("after-hook crashed")
 
     # ── control ─────────────────────────────────────────────────
-    async def stop(self, label: str = "⏹️ Stopped."):
+    async def stop(self):
+        """Stop playback, empty the queue, leave — and remove the panel.
+
+        Callers send their own confirmation, so /stop and the panel button
+        never double-post a message in a different style.
+        """
         await self._cancel_watchdog()
         self.queue.clear()
         self.current = None
@@ -231,7 +237,14 @@ class MusicPlayer:
             self.voice.stop()
         if self.voice and self.voice.is_connected():
             await self.voice.disconnect()
-        await self._update_panel(stopped=label)
+        old = self.now_playing_message
+        self.now_playing_message = None
+        self.now_playing_view = None
+        if old is not None:
+            try:
+                await old.delete()
+            except (discord.HTTPException, discord.NotFound):
+                pass
 
     async def toggle_loop(self):
         self.loop = not self.loop
@@ -301,12 +314,22 @@ class MusicPlayer:
                             value=f"{votes}/{skip_threshold(self._listeners())}", inline=True)
         if self.queue:
             lines = "\n".join(
-                f"{i + 1}. **{t.title}**" for i, t in list(self.queue)[:6])
+                f"{i + 1}. **{t.title}**" for i, t in enumerate(list(self.queue)[:6]))
             more = f"\n*+{len(self.queue) - 6} more*" if len(self.queue) > 6 else ""
             embed.add_field(name=f"Up next ({len(self.queue)})", value=lines + more, inline=False)
         else:
             embed.add_field(name="Up next", value="—", inline=False)
         return embed
+
+    async def _announce_current(self) -> None:
+        """One chat line announcing the track that just started."""
+        if self.text_channel is None or self.current is None:
+            return
+        try:
+            await self.text_channel.send(
+                content=f"🎵 Now playing: **{self.current.title}**")
+        except discord.HTTPException:
+            pass
 
     async def _update_panel(self, stopped: str = ""):
         """(Re)post the now-playing panel so it stays the newest chat message.
@@ -556,9 +579,7 @@ class Music(commands.Cog):
         started = await player.enqueue(track)
         if fresh:
             player.host_id = ctx.author.id
-        if started:
-            await ctx.send(f"🎵 Now playing: **{track.title}**")
-        else:
+        if not started:
             await ctx.send(
                 f"➕ **{track.title}** added to the queue (#{len(player.queue)}).")
         # Re-post the controls panel last so it stays the newest message.
@@ -739,9 +760,7 @@ class Music(commands.Cog):
         started = await player.enqueue(track)
         if fresh:
             player.host_id = ctx.author.id
-        if started:
-            await ctx.send(f"🎵 Now playing: **{track.title}**")
-        else:
+        if not started:
             await ctx.send(f"➕ **{track.title}** added to the queue.")
         await player._update_panel()  # keep the controls panel as the newest message
 
