@@ -13,6 +13,7 @@ from pathlib import Path
 
 import aiohttp
 
+from cogs.music_sources import deezer_radio
 from cogs.music_sources.deezer_gw import GwLightClient
 from cogs.music_sources.model import Playable, SourceUnavailable
 
@@ -114,8 +115,10 @@ async def resolve(query: str) -> Playable:
 async def radio_tracks(seed: str, limit: int = 8) -> list[Playable]:
     """Similar-track radio around a title, each delivered decrypted locally.
 
-    Used by ``/queue auto`` — resolves the Deezer track-radio of the best
-    search hit for ``seed`` (a title) in parallel, keeping the strongest hits.
+    Used by ``/queue auto``. gw-light's ``song.getRadio`` is dead
+    (GATEWAY_ERROR on every payload), so the feed comes from
+    api.deezer.com's artist radio instead and streams through the same
+    ARL + BF_CBC_STRIPE path.
     """
     _sweep_cache()
     async with aiohttp.ClientSession() as session:
@@ -125,7 +128,7 @@ async def radio_tracks(seed: str, limit: int = 8) -> list[Playable]:
         if not hits:
             return []
         seed_id = int(hits[0]["SNG_ID"])
-        related = await client.radio(seed_id)
+        related = await deezer_radio.radio_track_dicts(session, seed_id, limit)
         gate = asyncio.Semaphore(4)  # gw-light dislikes bursts
 
         async def _worker(track: dict) -> Playable | None:
@@ -133,6 +136,6 @@ async def radio_tracks(seed: str, limit: int = 8) -> list[Playable]:
                 return await _build_playable(client, track)
 
         results = await asyncio.gather(
-            *(asyncio.ensure_future(_worker(t)) for t in related[:limit]),
+            *(asyncio.ensure_future(_worker(t)) for t in related),
             return_exceptions=True)
     return [r for r in results if isinstance(r, Playable) and r.local_path]
