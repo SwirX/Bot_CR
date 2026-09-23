@@ -102,12 +102,11 @@ class Engagement(commands.Cog):
         """Seed sessions for members already in voice when the bot comes up."""
         now = time.monotonic()
         for guild in self.bot.guilds:
-            for uid, state in guild.voice_states.items():
-                member = guild.get_member(uid)
-                if member is None or member.bot or state.channel is None:
-                    continue
-                if uid not in self.voice_sessions:
-                    self.voice_sessions[uid] = [now, 0.0, guild.id]
+            for channel in guild.voice_channels:
+                for member in channel.members:
+                    if member.bot or member.id in self.voice_sessions:
+                        continue
+                    self.voice_sessions[member.id] = [now, 0.0, guild.id]
 
     def _accrue_voice(self, uid: int, now: float) -> int:
         """Whole XP a session earned since its last credit; the fraction carries."""
