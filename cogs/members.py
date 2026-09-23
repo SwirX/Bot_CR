@@ -20,7 +20,7 @@ from data.names import LINK_SEARCH_THRESHOLD, best_match, top_matches
 from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
                           scopes_for_author, require_scope)
 from cogs._dates import days_until, fmt_date
-from cogs._ui import OwnerView, PaginatorView, LoggedView, close_panel
+from cogs._ui import OwnerView, PaginatorView, LoggedView, close_panel, select_value
 from cogs.minecraft import LinkChoiceView, UnlinkConfirmView, mc_link_card_embed
 from i18n.core import resolve_member_lang, t
 
@@ -217,7 +217,7 @@ class ProfileHubView(LoggedView, OwnerView, discord.ui.View):
     async def _tab_select(self, interaction: discord.Interaction):
         if not await self._owned(interaction):
             return
-        tab = interaction.values[0]
+        tab = select_value(interaction)
         if tab == "overview":
             await _render_with_spinner(
                 interaction, lang=self.lang,
