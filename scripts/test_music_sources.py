@@ -199,5 +199,48 @@ class DeezerGuardTests(unittest.TestCase):
                          (youtube.resolve, deezer.resolve, audius.resolve))
 
 
+class DeezerLoginFormatTests(unittest.TestCase):
+    """Format negotiation on login, faked without any network or ARL value.
+
+    Locks in the behaviour behind the Premium-ARL upgrade: an account with
+    the hq/lossless OPTIONS flags must land on MP3_320 or FLAC
+    automatically, so swapping the ARL upgrades playback with no code change.
+    """
+
+    @staticmethod
+    def _client(options: dict):
+        from cogs.music_sources.deezer_gw import GwLightClient
+
+        class _Stub(GwLightClient):
+            async def _call(self, method, payload):
+                return {
+                    "USER": {"USER_ID": 42, "OPTIONS": options},
+                    "checkForm": "tok",
+                }
+
+        return _Stub("arl", None)
+
+    def test_premium_hq_selects_mp3_320(self):
+        client = self._client({"web_hq": True})
+        asyncio.run(client.login())
+        self.assertEqual(client.format, "MP3_320")
+
+    def test_lossless_account_prefers_flac(self):
+        client = self._client({"web_hq": True, "web_lossless": True})
+        asyncio.run(client.login())
+        self.assertEqual(client.format, "FLAC")
+
+    def test_free_account_falls_back_to_mp3_128(self):
+        client = self._client({})
+        asyncio.run(client.login())
+        self.assertEqual(client.format, "MP3_128")
+
+    def test_negotiated_format_ignores_unrelated_options(self):
+        client = self._client({"web_hq": True, "web_lossless": False,
+                               "streaming": True, "dgd_support": 1})
+        asyncio.run(client.login())
+        self.assertEqual(client.format, "MP3_320")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
