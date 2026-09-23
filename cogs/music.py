@@ -2,9 +2,10 @@
 
 Joins the author's voice channel and streams the first playable source for a
 query (YouTube via yt-dlp first, Audius as the automatic keyless fallback,
-public radio stations on request), with a queue, a ``/queue auto`` YTMusic-radio
-generator, majority vote-skip, per-track loop, volume control and an
-interactive now-playing panel that also looks up lyrics on LRCLIB. The bot
+public radio stations on request), with a queue, a ``/queue auto`` radio feed
+that refills itself around the last played song and keeps sessions going,
+majority vote-skip, per-track loop, volume control and an interactive
+now-playing panel that also looks up lyrics on LRCLIB. The bot
 auto-disconnects after being idle for a bit.
 
 The playback state machine lives in :class:`MusicPlayer` and is deliberately
@@ -87,6 +88,10 @@ def _header_option(headers: dict) -> str:
 
 IDLE_LEAVE_SECONDS = 60
 IDLE_CHECK_SECONDS = 10
+RADIO_REFILL_AT = 6         # top the queue back up when fewer than this many songs wait
+RADIO_REFILL_SIZE = 8       # songs to add per refill
+RADIO_REFILL_FETCH = 12     # fetch a little extra so history-dedup still finds fresh songs
+RADIO_REFILL_COOLDOWN = 30  # minimum seconds between refills
 
 
 def skip_threshold(listener_count: int) -> int:
@@ -110,7 +115,8 @@ def fmt_duration(seconds) -> str:
 class MusicPlayer:
     """Per-guild queue + playback state machine (voice injected for tests)."""
 
-    def __init__(self, bot, guild_id, text_channel=None, *, audio_factory=None):
+    def __init__(self, bot, guild_id, text_channel=None, *,
+                 audio_factory=None, radio_fetcher=None, track_factory=None):
         self.bot = bot
         self.guild_id = guild_id
         self.text_channel = text_channel
@@ -129,12 +135,97 @@ class MusicPlayer:
         # the panel is (re)posted so buttons never go stale on an old message.
         self.now_playing_view_factory = None
         self._audio_factory = audio_factory
+        # Auto-radio feed wiring injected by the owning cog: how to fetch
+        # related playables for a seed, and how to map one onto a Track.
+        self.radio_fetcher = radio_fetcher
+        self.track_factory = track_factory
+        # Continuous radio mode: `/queue auto` turns it on and the player
+        # keeps topping the queue up from the last played song.
+        self.auto_radio = False
+        self._radio_history: deque[str] = deque(maxlen=400)
+        self._refill_task: asyncio.Task | None = None
+        self._last_refill_at = 0.0
         self._watchdog_task: asyncio.Task | None = None
         self._last_active = time.monotonic()
+        # True when the player chose to leave (stop / idle / shutdown) rather
+        # than being removed by a moderator — suppresses the "kicked" notice.
+        self._intentional_leave = False
 
     def _touch(self):
         """Note recent activity so the idle watchdog doesn't disconnect."""
         self._last_active = time.monotonic()
+
+    # ── auto-radio ────────────────────────────────────────────
+    @staticmethod
+    def _key_of(track: Track) -> str:
+        """Stable identity for radio dedup (Deezer track URL >> yt id >> stream)."""
+        return track.webpage_url or track.video_id or track.url or ""
+
+    def note_radio_play(self, track: Track) -> None:
+        """Remember a radio-fed track so auto-refills never replay it."""
+        key = self._key_of(track)
+        if key:
+            self._radio_history.append(key)
+
+    def _queue_keys(self) -> set[str]:
+        keys = {self._key_of(self.current)} if self.current is not None else set()
+        keys.update(self._key_of(t) for t in self.queue)
+        return keys
+
+    def _maybe_refill(self):
+        """Start a radio refill when the queue is running low — one at a time."""
+        if not self.auto_radio or self.current is None:
+            return
+        if self._refill_task is not None and not self._refill_task.done():
+            return
+        if len(self.queue) >= RADIO_REFILL_AT:
+            return
+        if time.monotonic() - self._last_refill_at < RADIO_REFILL_COOLDOWN:
+            return
+        self._refill_task = asyncio.create_task(self.refill_radio())
+
+    async def refill_radio(self) -> int:
+        """Pull a fresh radio batch around the last played song and announce it.
+
+        Returns how many songs were added. A radio feed is a small fixed pool,
+        so anything this session already heard — plus the current queue — is
+        filtered out before enqueueing; otherwise refills would just replay.
+        """
+        seed = self.current
+        self._last_refill_at = time.monotonic()
+        if self.radio_fetcher is None or seed is None:
+            return 0
+        try:
+            playables = await self.radio_fetcher(seed, RADIO_REFILL_FETCH)
+        except Exception as exc:
+            LOG.warning("Auto-radio refill failed for %r: %s", seed.title, exc)
+            playables = []
+        heard = set(self._radio_history) | self._queue_keys()
+        fresh = [p for p in playables
+                 if (p.webpage_url or p.video_id or p.stream_url or "") not in heard]
+        fresh = fresh[:RADIO_REFILL_SIZE]
+        requester = seed.requester_id or 0
+        for playable in fresh:
+            self.queue.append(self.track_factory(playable, requester))
+        self._touch()
+        await self._announce_refill(seed, len(fresh))
+        return len(fresh)
+
+    async def _announce_refill(self, seed: Track, added: int) -> None:
+        if self.text_channel is None:
+            return
+        if added:
+            text = (f"📻 +{added} songs from the radio of **{seed.title}** — "
+                    "auto-radio keeps the queue topped up.")
+        elif not self.queue and self.current is seed:
+            text = (f"📻 The radio of **{seed.title}** is out of fresh songs and "
+                    "the queue is empty — try `/play` for something specific.")
+        else:
+            return  # nothing changed, nothing to say
+        try:
+            await self.text_channel.send(content=text)
+        except (discord.HTTPException, discord.NotFound):
+            pass
 
     def start_watchdog(self):
         """Ensure the idle-leave watchdog is running for this voice session."""
@@ -157,9 +248,13 @@ class MusicPlayer:
                 if self.queue or self.current is not None:
                     continue  # something is waiting; don't interrupt it
                 if time.monotonic() - self._last_active >= IDLE_LEAVE_SECONDS:
+                    place = (self.voice.channel.name if self.voice.channel
+                             else "the voice channel")
+                    self._intentional_leave = True
                     await self.voice.disconnect()
-                    await self._update_panel(
-                        stopped="Left the voice channel after being idle.")
+                    await self._update_panel(stopped=(
+                        f"😴 Quiet for a minute, so I dipped out of **{place}**. "
+                        "/play and I'll be right back!"))
                     return
         except asyncio.CancelledError:
             return
@@ -199,10 +294,13 @@ class MusicPlayer:
             return
         self.current = track
         self.current.votes.clear()
+        if self.auto_radio:
+            self.note_radio_play(track)
         source = self._make_source(track)
         self.voice.play(source, after=self._after_hook)
         await self._announce_current()
         await self._update_panel()
+        self._maybe_refill()
 
     def _make_source(self, track: Track):
         if self._audio_factory is not None:
@@ -231,11 +329,16 @@ class MusicPlayer:
         never double-post a message in a different style.
         """
         await self._cancel_watchdog()
+        self.auto_radio = False
+        self._radio_history.clear()
+        if self._refill_task is not None:
+            self._refill_task.cancel()
         self.queue.clear()
         self.current = None
         if self.voice and self.voice.is_playing():
             self.voice.stop()
         if self.voice and self.voice.is_connected():
+            self._intentional_leave = True
             await self.voice.disconnect()
         old = self.now_playing_message
         self.now_playing_message = None
@@ -474,7 +577,10 @@ class Music(commands.Cog):
     def _player(self, guild_id: int, text_channel=None) -> MusicPlayer:
         player = self.players.get(guild_id)
         if player is None:
-            player = MusicPlayer(self.bot, guild_id, text_channel)
+            player = MusicPlayer(
+                self.bot, guild_id, text_channel,
+                radio_fetcher=self.fetch_radio,
+                track_factory=Music._track_from_playable)
             player.now_playing_view_factory = lambda: NowPlayingView(self, player)
             self.players[guild_id] = player
         elif text_channel is not None:
@@ -483,8 +589,12 @@ class Music(commands.Cog):
 
     def _cleanup(self, guild_id: int):
         player = self.players.pop(guild_id, None)
-        if player is not None and player._watchdog_task is not None:
+        if player is None:
+            return
+        if player._watchdog_task is not None:
             player._watchdog_task.cancel()
+        if player._refill_task is not None:
+            player._refill_task.cancel()
 
     def _can_control(self, member: discord.Member, player: MusicPlayer) -> bool:
         """Who may use destructive controls on this guild's shared player.
@@ -502,6 +612,7 @@ class Music(commands.Cog):
 
     async def cog_unload(self):
         for player in list(self.players.values()):
+            player._intentional_leave = True
             if player.voice and player.voice.is_connected():
                 await player.voice.disconnect()
         if self._http is not None and not self._http.closed:
@@ -676,11 +787,11 @@ class Music(commands.Cog):
     async def queue(self, ctx, mode: str | None = None):
         """Show the queue, or generate a 📻 radio queue from the current track.
 
-        `!queue auto` (or `/queue auto`) pulls a related-tracks radio for the
-        song that's currently playing and adds it to the queue.
+        `!queue auto` (or `/queue auto`) turns the 📻 auto-radio on: the queue
+        is topped up from the last played song's radio whenever it runs low.
         """
         if mode is not None and mode.strip().lower() in ("auto", "radio", "seed"):
-            await self._queue_auto(ctx, self._player(ctx.guild.id))
+            await self._queue_auto(ctx, self._player(ctx.guild.id, ctx.channel))
             return
         player = self._player(ctx.guild.id)
         if player.current is None and not player.queue:
@@ -688,12 +799,36 @@ class Music(commands.Cog):
             return
         await ctx.send(embed=player.embed())
 
-    async def _queue_auto(self, ctx, player: MusicPlayer, size: int = 8):
-        """Generate a radio queue around the current track.
+    async def fetch_radio(self, seed: Track, size: int) -> list[Playable]:
+        """Radio playables around a seed: Deezer artist-radio first, YTMusic
+        as the fallback for YouTube-sourced seeds (they don't run from the
+        datacenter IP, so Deezer is the real feed while an ARL is set)."""
+        playables: list[Playable] = []
+        if os.environ.get("DEEZER_ARL"):
+            try:
+                playables = await deezer_provider.radio_tracks(seed.title, size)
+            except Exception as exc:
+                LOG.warning("Auto-radio Deezer feed failed for %r: %s",
+                            seed.title, exc)
+                playables = []
+        if not playables and seed.video_id:
+            try:
+                seed_ids = await asyncio.to_thread(
+                    youtube_provider.radio_seed_ids, seed.video_id, size)
+                if seed_ids:
+                    playables = await youtube_provider.resolve_parallel(seed_ids)
+            except Exception as exc:
+                LOG.warning("Auto-radio seed failed for %r: %s", seed.title, exc)
+                playables = []
+        return playables
 
-        The Deezer track-radio runs first when an ARL is configured (works on
-        datacenter IPs where YouTube Music is blocked); the YTMusic radio is
-        the fallback for YouTube-sourced tracks.
+    async def _queue_auto(self, ctx, player: MusicPlayer):
+        """Switch on continuous auto-radio and top the queue up immediately.
+
+        One-shot batches die after a few songs. With auto-radio on, the queue
+        is refilled around the *last played* song whenever it runs low, every
+        refill is announced, and tracks this session already heard are never
+        re-served.
         """
         if player.voice is None or not player.voice.is_connected():
             await ctx.send("🎧 I need to be in a voice channel first — use `/play`.")
@@ -703,34 +838,12 @@ class Music(commands.Cog):
                            "to generate a 📻 radio queue.")
             return
         await ctx.defer()
-        current = player.current
-        playables: list[Playable] = []
-        if os.environ.get("DEEZER_ARL"):
-            try:
-                playables = await deezer_provider.radio_tracks(current.title, size)
-            except Exception as exc:
-                LOG.warning("Auto-queue Deezer radio failed for %r: %s",
-                            current.title, exc)
-                playables = []
-        if not playables and current.video_id:
-            try:
-                seed_ids = await asyncio.to_thread(
-                    youtube_provider.radio_seed_ids, current.video_id, size)
-                if seed_ids:
-                    playables = await youtube_provider.resolve_parallel(seed_ids)
-            except Exception as exc:
-                LOG.warning("Auto-queue seed failed for %r: %s", current.title, exc)
-                playables = []
-        if not playables:
-            await ctx.send("⚠️ Couldn't generate a radio for the current track.")
-            return
-        for playable in playables:
-            await player.enqueue(
-                Music._track_from_playable(playable, ctx.author.id))
-        await ctx.send(
-            f"📻 **{len(playables)}** songs from the radio of **{current.title}** "
-            f"added to the queue.")
-        await player._update_panel()  # keep the controls panel as the newest message
+        player.auto_radio = True
+        player.start_watchdog()
+        added = await player.refill_radio()
+        if added == 0 and player.queue:
+            await ctx.send("📻 Couldn't add fresh radio songs right now — "
+                           "the queue keeps what it has.")
 
     @commands.hybrid_command(name="nowplaying", description="Show the current track.")
     @commands.guild_only()
@@ -793,8 +906,23 @@ class Music(commands.Cog):
     async def on_voice_state_update(self, member, before, after):
         if member.id != self.bot.user.id:
             return
-        if after.channel is None:
+        if after.channel is None and before.channel is not None:
+            player = self.players.get(member.guild.id)
+            if player is not None and not player._intentional_leave:
+                await self._report_forced_leave(player, before.channel)
             self._cleanup(member.guild.id)
+
+    async def _report_forced_leave(self, player: MusicPlayer, channel) -> None:
+        """One honest line in the music channel when the bot is removed from
+        voice against its will (kicked / yanked out of the channel)."""
+        if player.text_channel is None:
+            return
+        try:
+            await player.text_channel.send(
+                content=f"👢 I was yanked out of **{channel.name}** — /play and "
+                        "I'll be right back!")
+        except (discord.HTTPException, discord.NotFound):
+            pass
 
 
 async def setup(bot):
