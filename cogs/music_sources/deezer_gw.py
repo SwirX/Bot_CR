@@ -56,7 +56,12 @@ def blowfish_key(track_id: int) -> bytes:
 
 async def decrypt_chunks(
         chunks: AsyncIterable[bytes], track_id: int) -> AsyncIterator[bytes]:
-    """Decrypt every third full 2048-byte chunk; pass everything else through."""
+    """Decrypt every third full 2048-byte chunk; pass everything else through.
+
+    Only safe when every item is already aligned to the file's 2048-byte
+    stripe (e.g. slicing an in-memory download). For network streams use
+    :func:`decrypt_stream`, which is immune to transport chunk sizes.
+    """
     if Blowfish is None:
         raise SourceUnavailable(
             "deezer", "missing_dep",
@@ -70,6 +75,44 @@ async def decrypt_chunks(
             chunk = cipher.decrypt(chunk)
         index += 1
         yield chunk
+
+
+async def decrypt_stream(
+        reader: "aiohttp.StreamReader", track_id: int) -> AsyncIterator[bytes]:
+    """Decrypt a striped CDN stream regardless of transport chunking.
+
+    The stripe is defined in file byte offsets: every third 2048-byte block
+    counted from the start of the file. ``iter_chunked`` yields whatever the
+    TCP buffer currently holds, so transport parcel sizes must not leak into
+    the cipher — accumulate raw bytes here and slice strictly on 2048-byte
+    boundaries. That keeps ``index % 3`` aligned with the file for the whole
+    download (a drifted index scrambled everything past the first short
+    chunk, the cause of the 128k stutter).
+    """
+    if Blowfish is None:
+        raise SourceUnavailable(
+            "deezer", "missing_dep",
+            "pycryptodome is not installed — run the bot from its venv.")
+    key = blowfish_key(track_id)
+    buf = b""
+    index = 0
+    while True:
+        if len(buf) < CHUNK_BYTES:
+            piece = await reader.read(CHUNK_BYTES - len(buf))
+            if not piece:
+                break
+            buf += piece
+            continue
+        block = buf[:CHUNK_BYTES]
+        buf = buf[CHUNK_BYTES:]
+        if index % 3 == 0:
+            # Blowfish state must reset per chunk; the IV is fixed.
+            cipher = Blowfish.new(key, Blowfish.MODE_CBC, _BF_IV)
+            block = cipher.decrypt(block)
+        index += 1
+        yield block
+    if buf:
+        yield buf
 
 
 class GwLightClient:
@@ -186,8 +229,7 @@ class GwLightClient:
                         "deezer", "api_error",
                         f"Deezer CDN returned HTTP {response.status}.")
                 with open(destination, "wb") as output:
-                    async for chunk in decrypt_chunks(
-                            response.content.iter_chunked(CHUNK_BYTES), track_id):
+                    async for chunk in decrypt_stream(response.content, track_id):
                         output.write(chunk)
         except aiohttp.ClientError as exc:
             raise SourceUnavailable(

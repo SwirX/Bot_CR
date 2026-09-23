@@ -167,6 +167,59 @@ class DeezerDrmTests(unittest.TestCase):
         from cogs.music_sources.deezer_gw import blowfish_key
         self.assertNotEqual(blowfish_key(1), blowfish_key(2))
 
+    def test_decrypt_stream_survives_transport_chunk_sizes(self):
+        """Stripe alignment must survive aiohttp's arbitrary read sizes.
+
+        Regression for the mushy/stuttering playback: iter_chunked yields
+        whatever the TCP buffer holds (1442, 1510, ... byte parcels), which
+        used to drift the ``index % 3`` stripe and scramble everything past
+        the first short chunk — the rest of the track decoded as muffled
+        error-concealed garbage.
+        """
+        from Crypto.Cipher import Blowfish
+        from cogs.music_sources.deezer_gw import (
+            _BF_IV, CHUNK_BYTES, blowfish_key, decrypt_stream,
+        )
+
+        class _SlicingReader:
+            """Mimic aiohttp.StreamReader.read(): at most n bytes at a time."""
+
+            def __init__(self, data: bytes, sizes: list[int]):
+                self._data = data
+                self._sizes = sizes
+                self._pos = 0
+
+            async def read(self, n: int) -> bytes:
+                if self._pos >= len(self._data):
+                    return b""
+                take = (max(1, min(n, self._sizes.pop(0)))
+                        if self._sizes else n)
+                out = self._data[self._pos:self._pos + take]
+                self._pos += len(out)
+                return out
+
+        track_id = 7
+        key = blowfish_key(track_id)
+        full_chunk = bytes(range(256)) * 8  # 256 * 8 == 2048
+        plain = b"".join(full_chunk for _ in range(7)) + b"\x00trailing"
+        striped = bytearray()
+        for index in range(7):
+            if index % 3 == 0:
+                cipher = Blowfish.new(key, Blowfish.MODE_CBC, _BF_IV)
+                striped += cipher.encrypt(full_chunk)
+            else:
+                striped += full_chunk
+        striped += b"\x00trailing"
+        # Hostile mix: tiny, partial and bursty parcel sizes.
+        reader = _SlicingReader(
+            bytes(striped), [1, 2047, 1024, 3, 2045, 512, 1536, 2048, 7, 17])
+
+        async def _decrypt_all():
+            return b"".join(
+                [c async for c in decrypt_stream(reader, track_id)])
+
+        self.assertEqual(asyncio.run(_decrypt_all()), plain)
+
 
 class DeezerGuardTests(unittest.TestCase):
     def test_missing_arl_disables_provider_without_network(self):
