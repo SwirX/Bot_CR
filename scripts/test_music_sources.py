@@ -113,14 +113,51 @@ class RegistryTests(unittest.TestCase):
 
 
 class RadioTests(unittest.TestCase):
-    def test_known_station_resolves(self):
-        playable = radio.resolve("GrooveSalad")
+    def test_known_station_resolves_instantly(self):
+        playable = asyncio.run(radio.resolve_station("GrooveSalad"))
         self.assertEqual(playable.provider, "radio")
         self.assertIn("somafm.com", playable.stream_url)
 
-    def test_unknown_station_raises(self):
-        with self.assertRaises(SourceUnavailable):
-            radio.resolve("nope")
+    def test_pick_station_prefers_exact_name_over_popular_partial(self):
+        stations = [
+            {"name": "Hitradio Austria", "url": "u1", "clickcount": 5},
+            {"name": "HitRadio", "url": "u2", "clickcount": 100},
+        ]
+        picked = radio.pick_station(stations, "hitradio")
+        self.assertEqual(picked["name"], "HitRadio")
+
+    def test_pick_station_matches_compact_names(self):
+        stations = [{"name": "Radio Mars FM", "url": "u", "clickcount": 7}]
+        picked = radio.pick_station(stations, "radiomars")
+        self.assertEqual(picked["name"], "Radio Mars FM")
+
+    def test_pick_station_skips_entries_without_stream(self):
+        stations = [
+            {"name": "Hitradio", "url": "", "url_resolved": "", "clickcount": 99},
+            {"name": "Hitradio Retro", "url": "u", "clickcount": 9},
+        ]
+        picked = radio.pick_station(stations, "hitradio")
+        self.assertEqual(picked["name"], "Hitradio Retro")
+
+    def test_pick_station_returns_none_when_feed_is_empty(self):
+        self.assertIsNone(radio.pick_station([], "hitradio"))
+
+    def test_build_station_playable_carries_stream_metadata(self):
+        playable = radio._build_station_playable({
+            "name": "Radio Mars",
+            "country": "Belgium",
+            "url_resolved": "http://x/stream",
+            "favicon": "http://x/fav.png",
+        })
+        self.assertEqual(playable.provider, "radio")
+        self.assertEqual(playable.stream_url, "http://x/stream")
+        self.assertTrue(playable.headers["User-Agent"])
+        self.assertIn("Belgium", playable.title)
+
+    def test_prefix_variants_recover_concatenated_names(self):
+        self.assertEqual(radio._prefix_variants("radiomars"), ["mars"])
+        self.assertEqual(radio._prefix_variants("radio"), [])
+        self.assertEqual(radio._prefix_variants("hitradio"), [])
 
 
 class DeezerDrmTests(unittest.TestCase):
