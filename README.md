@@ -551,6 +551,7 @@ python scripts/test_mclink.py  # mc-link crypto/credential unit checks
 
 A huge thanks to the amazing folks who helped bring **Bot_CR** to life! 👏✨
 
+- **[Ali](https://github.com/SwirX)** - The one who revived the bot with a modern twist! 🧑💻🚀
 - **[Hamza](https://github.com/Yasahiru)** - The genius behind it all! 🤓💡
 - **[Kawtar](https://github.com/ELGADDIxKawtar)** - For her outstanding contributions! 🧑‍💻🌟
 - **[Wieam](https://github.com/wieam-ar)** - For her dedication and hard work! 🧑‍💻💪
