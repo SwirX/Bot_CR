@@ -42,17 +42,29 @@ command works as both `!prefix` and `/slash`.
 - 🌐 **Public-API commands** — `/weather`, `/define`, `/meme`, `/crypto`,
   `/spacex`, `/github`, `/advice` and `/lyrics`, all keyless, selected from
   openpublicapis.com.
-- 🎵 **Music** — `/play <song>` streams music into your voice channel from
-  YouTube → Deezer → Audius in order (Deezer decrypts to a local file; a
-  fallback that survives datacenter IPs that YouTube blocks): `/pause`,
-  `/resume`, `/skip` (majority vote — requester and staff skip instantly),
-  `/stop`, `/loop`, `/volume`, `/queue` (plus `/queue auto` to generate a 📻
-  radio queue from the current track — Deezer radio, falling back to YTMusic),
-  `/nowplaying`, and an interactive panel with pause / vote-skip / loop / stop
-  / lyrics buttons. While anything is playing *or paused*, an extra `/play`
-  only queues — playback is never interrupted. The controls panel is always
-  kept as the newest chat message: whenever the state changes it is deleted
-  and re-posted at the bottom. Auto-disconnects after a minute of idle.
+- 🎵 **Music** — `/play <song>` streams into your voice channel from
+  YouTube → Deezer → Audius in order (Deezer decrypts to a local file — a
+  fallback that survives datacenter IPs YouTube blocks), plus `/pause`,
+  `/resume`, `/skip`, `/remove <n>`, `/keep`, `/stop`, `/loop`, `/volume`,
+  `/nowplaying` and `/radio <station>` (any live world radio station by name),
+  and an interactive panel with pause / vote-skip / loop / stop / lyrics
+  buttons. **Skip & remove voting** — the requester of a song, the session
+  host and staff act instantly; anyone else opens a 20-second yes/no vote
+  that passes as soon as the yes side holds a majority of the listeners
+  present, and resolves at its deadline (ties and silence pass unless a
+  strict majority voted no), so a lone troll can never deadlock the room;
+  `/keep` votes against the motion — and the requester's keep is an outright
+  veto. 📻 **Auto-radio** — `/queue auto` keeps the queue full around the
+  *last played* song: whenever it runs low it refills from that track's Deezer
+  radio (YTMusic as fallback), every refill is announced, and nothing heard
+  this session is ever re-served. While anything plays *or is paused*, an
+  extra `/play` only queues — playback is never interrupted. The controls
+  panel is always the newest chat message (deleted and re-posted on every
+  state change), and the bot auto-disconnects after a minute of idle with a
+  friendly goodbye.
+- 🔁 **JockieMusic migration nudge** — members who still type `m!` get a
+  friendly pitch for `/play` and `/queue auto` (once per user, rarely per
+  channel), so the old music bot converts without ever feeling like spam.
 - 🤖 **Private meeting rooms** — `/meeting create @a @b [name]` spins up a
   private VC (auto-deleted when empty), `/meeting end` cleans it up.
 - 🔐 **Club permission scopes** — an authorization layer instead of scattered
@@ -135,13 +147,17 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `addrole <role> <@members...>` | staff | Give a role |
 | `removerole <role> <@members...>` | staff | Take a role away |
 | `setlead <role> <@members...>` | staff | Replace leadership holders (Lead/VP/President) |
+| `bot status`, `bot update`, `bot restart` | bot-admin | Bot health, pull nightly + relaunch, restart |
 | `weather <city>`, `define <word>`, `meme` | everyone | Open-Meteo / dictionary / meme |
 | `crypto [coin]`, `spacex`, `github <user>`, `advice` | everyone | Live data APIs |
 | `lyrics [song]` | everyone | LRCLIB lyrics — omit the song to look up the current track |
 | `play <song>` | everyone | Stream music (joins your voice channel) |
-| `queue [auto]` | everyone | Show the queue, or generate a radio queue from the current track |
+| `queue [auto]` | everyone | Show the queue — `auto` keeps it full with 📻 radio from the last played song (nothing heard is re-served) |
 | `pause`, `resume` | everyone | Pause / resume music |
-| `skip` | everyone | Vote to skip (requester/staff: instant) |
+| `skip` | everyone | Vote to skip (requester / host / staff skip instantly) |
+| `remove <n>` | everyone | Remove queue song #n — instant if you added it, else a vote |
+| `keep` | everyone | Vote against an open skip/remove vote (the requester's keep vetoes) |
+| `radio <station>` | everyone | Stream any live internet radio station by name |
 | `stop`, `loop`, `volume <1-100>`, `nowplaying` | everyone | Music control |
 | `meeting create <@members...> [name]`, `meeting end` | everyone | Private VC room |
 | `link <club-id> [real-name]`, `unlink` | everyone | Link/unlink your club account |
@@ -513,7 +529,19 @@ cogs/                     one file per feature; auto-discovered
   welcome.py / goodbye.py join / leave messages
   rules.py                rules board
   general.py              hello / ping / custom help
+  music.py                full music player — playback engine, skip/remove voting, panel
+  music_sources/          providers: YouTube, Deezer (+ ARL gateway), Audius, world radio
+  minecraft.py            MC server control/power + linked-player session pings
+  mclink.py               MC↔Discord account linking (CipherBox handshake)
+  meetings.py             private voice-meeting rooms
+  apis.py                 weather / dictionary / meme / crypto / spacex / github / advice / lyrics
+  settings.py             guild settings + language switch (AR/EN/FR)
+  bot_admin.py            /bot status · update · restart (ff-only pull + relaunch)
+  jockie_nudge.py         friendly /play pitch when members type JockieMusic's `m!`
+  i18n/                   per-language string tables (core.py resolver)
   _perms.py / _scopes.py  staff bypass + club permission-scope resolver
+  _ui.py                  shared embed / button / select builders
+  _mc_crypto.py           CipherBox crypto for MC credentials
   members.py              link/unlink, profiles, hierarchy, notifications, dashboard
   cells.py                /cell add — place members into a cell
   tasks.py                task CRUD + lists (priority/due/cell)
@@ -524,6 +552,13 @@ cogs/                     one file per feature; auto-discovered
 scripts/
   bootstrap_appwrite.py   idempotent schema provisioning
   smoke_test.py           hermetic cog-load check (used by CI)
+  test_music_player.py    skip/remove voting + motion logic (hermetic)
+  test_music_sources.py   YouTube/Deezer/Audius/radio source resolution
+  test_deezer_radio.py    Deezer radio feed & refill behavior
+  test_jockie_nudge.py    nudge cooldowns & pitch wording
+  test_mclink.py          CipherBox interop vectors + credential mint
+  test_memberlinks.py / test_names.py / test_voice_xp.py / test_updates.py / test_mc_hub.py
+                          unit checks per feature
 KeepAlive.py              Flask keep-alive on $PORT
 render.yaml               Render worker service definition
 ```
@@ -536,13 +571,19 @@ it automatically.
 ## ✅ Quality gates
 
 `.github/workflows/ci.yml` runs on every push/PR against Python 3.12 and 3.13:
-byte-compiles every module, runs `scripts/smoke_test.py` (loads all cogs,
-asserts every command is hybrid and the custom `help` is installed) and the
-hermetic `scripts/test_mclink.py` (CipherBox interop vectors + credential mint).
+byte-compiles every module, runs `scripts/smoke_test.py` (loads all 25 cogs,
+asserts every command is hybrid and the custom `help` is installed), the
+hermetic `scripts/test_mclink.py` (CipherBox interop vectors + credential
+mint) and the music suite — `test_music_player.py` (skip/remove voting),
+`test_music_sources.py` (source resolution), `test_deezer_radio.py` (radio
+feed/refill) and `test_jockie_nudge.py` — plus the per-feature unit checks
+(`test_memberlinks.py`, `test_names.py`, `test_voice_xp.py`, `test_updates.py`,
+`test_mc_hub.py`).
 
 ```bash
 python scripts/smoke_test.py   # run the same check locally
 python scripts/test_mclink.py  # mc-link crypto/credential unit checks
+python scripts/test_music_player.py   # skip/remove voting logic
 ```
 
 ---
