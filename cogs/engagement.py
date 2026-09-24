@@ -62,11 +62,12 @@ class Engagement(commands.Cog):
         gain = random.randint(config.XP_MIN, config.XP_MAX)
         await self._grant_xp(uid, gain, name=message.author.name,
                              mention=message.author.mention,
+                             member=message.author,
                              channel=message.channel)
 
     # ── shared XP grant ───────────────────────────────────────
     async def _grant_xp(self, uid: int, amount: int, *, name: str,
-                        mention: str, channel=None) -> None:
+                        mention: str, member=None, channel=None) -> None:
         """Credit XP into the pending bucket and announce any level-up."""
         if amount <= 0:
             return
@@ -86,6 +87,39 @@ class Engagement(commands.Cog):
             self.level_seen[uid] = level
             if channel is not None:
                 await channel.send(f"🎉 {mention} reached **level {level}**! GG!")
+            await self._grant_level_roles(member, level)
+
+    # ── level-up role rewards ─────────────────────────────────
+    async def _grant_level_roles(self, member, level: int) -> None:
+        """Grant every configured reward role at or below ``level``.
+
+        The mapping is ``level -> role_id`` (config.LEVEL_ROLE_REWARDS), so a
+        member jumping several levels at once gets every reward they're due,
+        and already-held roles are skipped. A guest or unloaded member (voice
+        XP granted from a channel the cog can't resolve) is a silent no-op.
+        """
+        if not config.LEVEL_ROLE_REWARDS or not member:
+            return
+        guild = getattr(member, "guild", None)
+        if guild is None or getattr(member, "bot", False):
+            return
+        held = {r.id for r in getattr(member, "roles", ())}
+        granted: list[str] = []
+        for reward_level, role_id in sorted(config.LEVEL_ROLE_REWARDS.items()):
+            if reward_level > level or role_id in held:
+                continue
+            role = guild.get_role(role_id)
+            if role is None or role in getattr(member, "roles", ()):
+                continue
+            try:
+                await member.add_roles(role, reason=f"Level {level} reward")
+            except discord.Forbidden:
+                LOG.warning("No permission to grant reward role %s (%s)",
+                            role.name, role_id)
+                continue
+            granted.append(role.name)
+        if granted:
+            LOG.info("%s earned level reward roles: %s", getattr(member, "name", member.id), granted)
 
     # ── voice-channel XP ──────────────────────────────────────
     @commands.Cog.listener()
@@ -164,7 +198,8 @@ class Engagement(commands.Cog):
         if channel is not None:
             text = discord.utils.get(member.guild.text_channels, name=channel.name)
         await self._grant_xp(member.id, grant, name=member.name,
-                             mention=member.mention, channel=text)
+                             mention=member.mention, member=member,
+                             channel=text)
 
     # ── flush ──────────────────────────────────────────────────
     @commands.Cog.listener()
@@ -284,6 +319,48 @@ class Engagement(commands.Cog):
             await ctx.send(embed=pages[0])
         else:
             await ctx.send(embed=pages[0], view=PaginatorView(pages, user=ctx.author))
+
+    @commands.hybrid_command(
+        name="levelrewards",
+        description="(staff) Grant configured level reward roles to members already past the thresholds.")
+    @mod_perms(manage_roles=True)
+    async def levelrewards(self, ctx, action: str = "backfill"):
+        """Idempotent backfill so rewards behave retroactively.
+
+        Runs from the store's leaderboard list (highest XP first), granting
+        every configured reward role to members who are already past the
+        thresholds — they leveled up before LEVEL_ROLE_REWARDS existed.
+        """
+        if action.lower() != "backfill":
+            await ctx.send("⚠️ Usage: `/levelrewards backfill`")
+            return
+        if not config.LEVEL_ROLE_REWARDS:
+            await ctx.send("⚠️ No `LEVEL_ROLE_REWARDS` configured — nothing to grant.")
+            return
+        await ctx.defer()
+        try:
+            records = await store.list_members(limit=100, order_by="xp")
+        except StoreError as exc:
+            await ctx.send(f"⚠️ Could not read the leaderboard: {exc}")
+            return
+        granted = already = 0
+        for record in records:
+            uid = int(record.get("user_id") or 0)
+            member = ctx.guild.get_member(uid)
+            if member is None or member.bot:
+                continue
+            level = level_from_xp(int(record.get("xp", 0)))
+            before = set(member.roles)
+            await self._grant_level_roles(member, level)
+            if set(member.roles) != before:
+                granted += 1
+            else:
+                already += 1
+        await ctx.send(
+            f"✅ Backfill done: **{granted}** updated, **{already}** already had their roles."
+            if (granted or already)
+            else "⚠️ No eligible members found."
+        )
 
     # ── daily challenge commands ───────────────────────────────
     @commands.hybrid_group(name="challenge", description="Daily challenges.")

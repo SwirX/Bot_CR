@@ -94,6 +94,23 @@ DASHBOARD_REFRESH_SECONDS = _env("DASHBOARD_REFRESH_SECONDS", 60, cast=int)
 XP_COOLDOWN_SECONDS = _env("XP_COOLDOWN_SECONDS", 60, cast=int)
 XP_MIN = _env("XP_MIN", 4, cast=int)
 XP_MAX = _env("XP_MAX", 12, cast=int)
+
+# Level-up role rewards: comma-separated "level:role_id" pairs, granted
+# automatically when a member reaches (or passes) the level. E.g.
+# LEVEL_ROLE_REWARDS="5:111111111111111,10:222222222222222"
+def _level_roles(raw: str | None) -> dict[int, int]:
+    out: dict[int, int] = {}
+    for part in (raw or "").split(","):
+        pair = part.strip()
+        if not pair or ":" not in pair:
+            continue
+        level_text, _, role_text = pair.partition(":")
+        if level_text.strip().isdigit() and role_text.strip().isdigit():
+            out[int(level_text.strip())] = int(role_text.strip())
+    return out
+
+
+LEVEL_ROLE_REWARDS = _level_roles(_env("LEVEL_ROLE_REWARDS", ""))
 # Voice-channel XP: continuous accrual while connected to a voice channel,
 # independent of the message cooldown; capped per day so AFK parking can't
 # dominate the leaderboard.
