@@ -638,7 +638,9 @@ class NowPlayingView(discord.ui.View):
             return
         await interaction.response.defer()
         await self.player.stop()
-        await interaction.followup.send("⏹️ Stopped and left the channel.", ephemeral=True)
+        # Public line in the music channel — not an ephemeral reply tied to a
+        # panel message that is about to be deleted.
+        await self.player._announce_action("⏹️ Stopped and left the channel.")
 
     @discord.ui.button(emoji="🎤", style=discord.ButtonStyle.success, custom_id="music:lyrics")
     async def lyrics(self, interaction: discord.Interaction, button: discord.ui.Button):
