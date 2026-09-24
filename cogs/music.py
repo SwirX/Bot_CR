@@ -607,15 +607,18 @@ class NowPlayingView(discord.ui.View):
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = self.player
         await interaction.response.defer()
-        skipped, needed, votes = await player.vote_skip(interaction.user)
-        if not skipped:
-            await player._update_panel()  # skipping reposts via the after-hook
-        if skipped:
+        status, yes, no = await player.cast_vote("skip", interaction.user)
+        if status == "vote":
+            await player._update_panel()  # show the live vote on the panel
             await interaction.followup.send(
-                f"⏭️ Skipped by {interaction.user.mention}.", ephemeral=True)
+                f"🗳️ Skip vote — 👍 {yes} · 👎 {no}. Use `/keep` to vote against.",
+                ephemeral=True)
         else:
+            # pass/kept/idle: the motion itself already posted its outcome
+            # (and the after-hook reposted the panel when it skipped).
+            word = "⏭️ Skipped by" if status == "passed" else "⏹️ No action"
             await interaction.followup.send(
-                f"⏭️ Skip vote {votes}/{needed}.", ephemeral=True)
+                f"{word} {interaction.user.mention}.", ephemeral=True)
 
     @discord.ui.button(emoji="🔂", style=discord.ButtonStyle.secondary, custom_id="music:loop")
     async def loop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -829,21 +832,73 @@ class Music(commands.Cog):
         await player._update_panel()
         await ctx.send("▶️ Resumed.", delete_after=8)
 
-    @commands.hybrid_command(name="skip", description="Vote to skip the current track.")
+    @commands.hybrid_command(name="skip",
+                             description="Skip the current track — instant if you requested it, else a vote.")
     @commands.guild_only()
     async def skip(self, ctx):
-        """Requester/staff skip instantly; everyone else needs a majority vote."""
+        """Requester/host/staff skip instantly; everyone else votes."""
         player = self._player(ctx.guild.id)
         if player.voice is None or player.current is None:
             await ctx.send("🎵 Nothing is playing to skip.")
             return
-        skipped, needed, votes = await player.vote_skip(ctx.author)
-        if not skipped:
-            await player._update_panel()  # skipping reposts via the play hook
-        if skipped:
-            await ctx.send("⏭️ Skipped.")
+        status, yes, no = await player.cast_vote("skip", ctx.author)
+        if status == "passed":
+            return  # the motion already announced the outcome in chat
+        if status == "vote":
+            await player._update_panel()  # show the live vote
+            await ctx.send(
+                f"🗳️ Skip vote — 👍 {yes} · 👎 {no}. Use `/keep` to vote against.")
         else:
-            await ctx.send(f"⏭️ Skip vote {votes}/{needed}.")
+            await ctx.send("🎵 Nothing to skip right now.")
+
+    @commands.hybrid_command(name="remove",
+                             description="Remove a queued song by number — instant if you added it, else a vote.")
+    @commands.guild_only()
+    async def remove(self, ctx, position: int):
+        """Drop queue entry #position; its requester removes it instantly."""
+        player = self._player(ctx.guild.id)
+        if not player.queue:
+            await ctx.send("🎵 The queue is empty.")
+            return
+        if not 1 <= position <= len(player.queue):
+            await ctx.send(f"🎵 #**{position}** isn't in the queue — "
+                           "`/queue` shows the numbers.")
+            return
+        target = player.queue[position - 1]
+        status, yes, no = await player.cast_vote(
+            "remove", ctx.author, target_key=MusicPlayer._key_of(target),
+            target_title=target.title)
+        if status == "passed":
+            return  # the motion already announced the removal in chat
+        if status == "vote":
+            await player._update_panel()  # show the live vote
+            await ctx.send(
+                f"🗳️ Vote to remove **{target.title}**: 👍 {yes} · 👎 {no} — "
+                "`/keep` to keep it.")
+        else:
+            await ctx.send("🗳️ Cannot vote on that right now.")
+
+    @commands.hybrid_command(name="keep",
+                             description="Vote to keep the song while a skip/remove vote is open.")
+    @commands.guild_only()
+    async def keep(self, ctx):
+        """Vote against an open skip/remove motion (the requester vetoes)."""
+        player = self._player(ctx.guild.id)
+        vote = player._vote
+        if vote is None:
+            await ctx.send("🗳️ No vote is open right now.")
+            return
+        status, yes, no = await player.cast_vote(
+            vote.kind, ctx.author, want=False,
+            target_key=vote.target_key, target_title=vote.target_title)
+        if status == "kept":
+            await player._update_panel()
+            await ctx.send("✋ Kept — you're the requester of this one.")
+        elif status == "vote":
+            await player._update_panel()  # show the live vote
+            await ctx.send(f"✋ Noted — 👍 {yes} · 👎 {no}.")
+        else:
+            await ctx.send("🗳️ Nothing to vote on right now.")
 
     @commands.hybrid_command(name="stop", description="Stop playback and leave the channel.")
     @commands.guild_only()
