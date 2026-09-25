@@ -89,6 +89,53 @@ ROLE_LEAD = _env("ROLE_LEAD", "Lead")
 LEADER_ROLES = [s.strip() for s in _env(
     "LEADER_ROLES", "Lead,Vice President,President").split(",") if s.strip()]
 
+# ── Meeting admin / audience roles ─────────────────────────────────────
+# /meeting start, /meeting end, /meeting lock and /meeting unlock are gated on
+# MEETING_ADMIN_ROLES plus MEETING_ADMIN_USER_IDS. These are EXACT Discord role
+# display names (emoji prefixes included) — the bot matches role names
+# literally, so a stale name here silently drops an admin.
+#
+# Note this is deliberately *narrower* than bot staff: the Manager role is a
+# meeting admin, and the Cell Chiefs are not — they are the audience, not the
+# organisers. The bot operator stays covered through
+# MEETING_ADMIN_USER_IDS so a role reshuffle can't lock the club out of its own
+# meeting log.
+ROLE_MANAGER = _env("ROLE_MANAGER", "「👸」Manager")
+MEETING_ADMIN_ROLES = frozenset(
+    r.strip() for r in _env(
+        "MEETING_ADMIN_ROLES",
+        f"{ROLE_ARCHON},{ROLE_PRESIDENT},{ROLE_VICE_PRESIDENT},{ROLE_MANAGER}",
+    ).split(",") if r.strip()
+)
+# Discord user ids that may always run the /meeting admin commands.
+MEETING_ADMIN_USER_IDS = frozenset(
+    int(i) for i in _env("MEETING_ADMIN_USER_IDS", _env("BOT_ADMIN_USER_IDS", ""))
+    .split(",") if i.strip().isdigit()
+)
+
+# Audience resolution for /meeting start. Roles are matched by an
+# emoji-stripped, case-insensitive *keyword* so a club that renames
+# "「🦾」Head of Project Unit" to "「🦾」Head of Projects Unit" still resolves,
+# while @everyone and the level/bio/pings roles can never leak into a meeting.
+BUREAU_OFFICE_KEYWORDS = ("archon", "president", "vice president", "manager")
+UNIT_HEAD_KEYWORDS = ("head", "chief", "lead")
+UNIT_MEMBER_KEYWORDS = ("member of",)
+# A role is only "a club member" if it also names a unit/cell, except for the
+# two catch-all membership tiers the club grants to everyone it counts.
+CATCHALL_MEMBER_KEYWORDS = ("new member", "old member")
+UNIT_KEYWORDS = ("unit", "cell", "club")
+
+# Roles that should never be treated as meeting audience, whatever their name.
+MEETING_EXCLUDED_ROLE_KEYWORDS = ("bot", "jockie", "easypoll", "minecraft ping")
+
+# How many extra tagged members /meeting start may add on top of the resolved
+# audience, and how many absentees the report page lists per page.
+MEETING_MAX_EXTRA_MEMBERS = _env("MEETING_MAX_EXTRA_MEMBERS", 25, cast=int)
+MEETING_ABSENTEE_PAGE_SIZE = _env("MEETING_ABSENTEE_PAGE_SIZE", 10, cast=int)
+# Cap on per-member "you already left" deny-overwrites a lock may create.
+# Discord allows 100 overwrites per channel, so the bot stays well clear of it.
+MEETING_MAX_LOCKED_OUT = _env("MEETING_MAX_LOCKED_OUT", 60, cast=int)
+
 # ── Behaviour ──────────────────────────────────────────────────────────
 DASHBOARD_REFRESH_SECONDS = _env("DASHBOARD_REFRESH_SECONDS", 60, cast=int)
 # How often the reminder scheduler wakes up to deliver due DMs (seconds).
