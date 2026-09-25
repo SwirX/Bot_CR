@@ -113,6 +113,14 @@ def _level_roles(raw: str | None) -> dict[int, int]:
 
 
 LEVEL_ROLE_REWARDS = _level_roles(_env("LEVEL_ROLE_REWARDS", ""))
+
+# Content-driven XP bonuses stacked on top of the base roll — still one
+# credit per message under the shared cooldown, so they can't be farmed.
+XP_BONUS_IMAGE = _env("XP_BONUS_IMAGE", 5, cast=int)
+XP_BONUS_LINK = _env("XP_BONUS_LINK", 2, cast=int)
+XP_BONUS_LONG_MSG = _env("XP_BONUS_LONG_MSG", 3, cast=int)
+XP_LONG_MSG_WORDS = _env("XP_LONG_MSG_WORDS", 50, cast=int)
+XP_BONUS_VOICE_NOTE = _env("XP_BONUS_VOICE_NOTE", 5, cast=int)
 # Voice-channel XP: continuous accrual while connected to a voice channel,
 # independent of the message cooldown; capped per day so AFK parking can't
 # dominate the leaderboard.

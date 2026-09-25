@@ -60,10 +60,59 @@ class Engagement(commands.Cog):
         self.xp_cooldown[uid] = now
 
         gain = random.randint(config.XP_MIN, config.XP_MAX)
+        gain += self._richness_bonus(message)
         await self._grant_xp(uid, gain, name=message.author.name,
                              mention=message.author.mention,
                              member=message.author,
                              channel=message.channel)
+
+    # ── content bonuses ───────────────────────────────────────
+    _IMAGE_EXT = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "avif", "svg"}
+
+    @staticmethod
+    def _has_image(message) -> bool:
+        """Image attachment — by MIME type or by filename extension."""
+        for attachment in message.attachments:
+            ctype = (getattr(attachment, "content_type", "") or "").lower()
+            if ctype.startswith("image/"):
+                return True
+            ext = (getattr(attachment, "filename", "") or "").rsplit(".", 1)[-1].lower()
+            if ext in Engagement._IMAGE_EXT:
+                return True
+        return False
+
+    @staticmethod
+    def _has_voice_note(message) -> bool:
+        return any(
+            getattr(a, "is_voice_message", None) and a.is_voice_message()
+            for a in message.attachments
+        )
+
+    @staticmethod
+    def _has_link(message) -> bool:
+        content = getattr(message, "content", "") or ""
+        return "://" in content or any(
+            token.startswith("www.") for token in content.split()
+        )
+
+    def _richness_bonus(self, message) -> int:
+        """Extra XP for rich messages: images, voice notes, links, long posts.
+
+        Additive and configurable; sits inside the single cooldown credit so
+        a spammer can still only earn once per window — it just earns more
+        for content that takes effort.
+        """
+        bonus = 0
+        if self._has_image(message):
+            bonus += config.XP_BONUS_IMAGE
+        if self._has_voice_note(message):
+            bonus += config.XP_BONUS_VOICE_NOTE
+        if self._has_link(message):
+            bonus += config.XP_BONUS_LINK
+        words = len((getattr(message, "content", "") or "").split())
+        if words >= config.XP_LONG_MSG_WORDS:
+            bonus += config.XP_BONUS_LONG_MSG
+        return bonus
 
     # ── shared XP grant ───────────────────────────────────────
     async def _grant_xp(self, uid: int, amount: int, *, name: str,
