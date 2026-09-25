@@ -477,6 +477,29 @@ class Store:
             uid, duser, ddata, mship, mem, side, warnings,
             club_member_id=club_member_id, club_member_name=club_member_name)
 
+    async def get_members(self, user_ids) -> list[dict]:
+        """Flat records for many Discord ids (batched $id queries).
+
+        Members with no identity row at all are omitted (same contract as
+        get_member returning None). Bulk path for sweeps/audits.
+        """
+        ids = [str(uid) for uid in user_ids if uid]
+        if not ids:
+            return []
+        ddata = await self._get_rows_batch(_T["discord_data"], ids)
+        dusers = await self._get_rows_batch(_T["discord_users"], ids)
+        mems = await self._get_rows_batch(_T["members"], ids)
+        mships = await self._get_rows_batch(_T["memberships"], ids)
+        sides = await self._sidecar_batch(ids)
+        out = []
+        for uid in ids:
+            if ddata.get(uid) is None and dusers.get(uid) is None:
+                continue
+            out.append(await self._assemble(
+                uid, dusers.get(uid), ddata.get(uid), mships.get(uid),
+                mems.get(uid), sides.get(uid)))
+        return out
+
     async def _club_link(self, uid: str) -> tuple[str, str]:
         """(club member id, club member name) via member_discord_links."""
         link = await self.discord_member_link(uid)
