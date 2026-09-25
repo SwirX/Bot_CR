@@ -23,21 +23,22 @@ import discord  # noqa: E402
 from discord.ext import commands  # noqa: E402
 
 EXPECTED_COMMANDS = {
-    "8ball", "accountage", "addrole", "advice", "assign", "ban", "bot", "cancel", "cell",
+    "8ball", "accountage", "addrole", "advice", "admin", "assign", "ban", "bot", "cancel", "cell",
     "challenge",
     "choose", "claim", "clap", "close", "coinflip", "competition",
     "competitions", "complete", "compliment", "create", "crypto",
-    "current_voice_time",
     "dashboard", "define", "del", "dice", "edit", "end", "event", "events",
     "fact", "fixname", "github", "hierarchy", "hello", "help", "history",
     "hug", "joke", "kick", "language", "leaderboard", "levelrewards", "link", "linkmc", "linkmember", "list", "lock", "loop", "lyrics",
     "mc", "mclink", "mcrestart", "mcsession", "mcstart", "mcstop", "meeting", "meme", "minecraft", "modlog", "mute", "notifications", "nowplaying",
-    "online_members", "overdue", "pause", "ping", "play", "poll", "profile", "queue",
+    "overdue", "pause", "ping", "play", "poll", "profile", "queue",
     "quiz", "quote", "rank", "remind", "removerole", "resume", "results", "reverse", "roast",
-    "robot", "roles", "rps", "set", "setlead", "setprofile", "settings", "ship", "skip",
-    "slap", "slowmode", "spacex", "stop", "task", "tasks", "timeout", "today",
-    "total_messages", "total_voice_time", "unban", "unlink", "unlinkmember", "unlock", "unmute",
-    "untimeout", "view", "volume", "vote", "warn", "weather", "website", "whois",
+    "robot", "roles", "rps", "set", "setbirthday", "setlead", "setname", "setprofile",
+    "settings", "ship", "skip",
+    "slap", "slowmode", "spacex", "stats", "stop", "task", "tasks", "timeout", "today",
+    "unban", "unlink", "unlinkmember", "unlock", "unmute",
+    "untimeout", "view", "voicetime", "volume", "vote", "warn", "weather", "website", "whois",
+    "namesweep",
 }
 
 

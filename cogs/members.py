@@ -8,6 +8,7 @@ the permission-scope resolver in cogs/_scopes.py.
 
 import logging
 import re
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -21,7 +22,9 @@ from cogs._scopes import (CLUB_ROLE_LABELS, SCOPE_LABELS, scopes_for,
                           scopes_for_author, require_scope)
 from cogs._dates import days_until, fmt_date
 from cogs._ui import OwnerView, PaginatorView, LoggedView, close_panel, select_value
+from cogs.birthday_tracker import announce_birthday, parse_birthday
 from cogs.minecraft import LinkChoiceView, UnlinkConfirmView, mc_link_card_embed
+from cogs.onboarding import cursive_nickname
 from i18n.core import resolve_member_lang, t
 
 
@@ -582,7 +585,7 @@ class Members(commands.Cog):
             await ctx.send(f"ℹ️ **{member.display_name}** isn't linked to a "
                            "club member.")
 
-    @commands.hybrid_command(name="profile", description="Show a member's club profile.")
+    @commands.hybrid_group(name="profile", description="Show a member's club profile.")
     @commands.guild_only()
     async def profile(self, ctx, member: discord.Member = None):
         """Your profile (or a public one) straight from the Appwrite source of truth."""
@@ -593,6 +596,77 @@ class Members(commands.Cog):
         # author-only (ProfileHubView user=ctx.author).
         await ctx.send(embed=embed, view=ProfileHubView(self, lang, member,
                                                         user=ctx.author))
+
+    @profile.command(name="setname",
+                     description="Set or update your real full name (cursive nickname applied).")
+    @commands.guild_only()
+    async def profile_setname(self, ctx, *, name: str):
+        """Set your own name — works even if you never set it before."""
+        given = name.strip()
+        if not given:
+            await ctx.send("⚠️ Please enter your real full name.")
+            return
+        nick = cursive_nickname(given)
+        if not nick:
+            await ctx.send("⚠️ Couldn't build a cursive nickname from that.")
+            return
+        nick_applied = False
+        try:
+            await ctx.author.edit(nick=nick, reason="Self-service: real name set")
+            nick_applied = True
+        except discord.Forbidden:
+            LOG.warning("setname: cannot change nickname of %s (permission missing)", ctx.author)
+        except discord.HTTPException as exc:
+            LOG.warning("setname: failed to set nickname for %s: %s", ctx.author, exc)
+        try:
+            await store.merge_member(ctx.author.id, {
+                "real_name": given,
+                "display_name": nick,
+            })
+        except StoreError as exc:
+            LOG.warning("setname: could not persist real_name for %s: %s", ctx.author.id, exc)
+            await ctx.send("⚠️ Couldn't save your name right now — try again later.")
+            return
+        try:
+            await store.maybe_auto_link_club_member(ctx.author.id, given)
+        except StoreError as exc:
+            LOG.warning("setname: auto-link failed for %s: %s", ctx.author.id, exc)
+        reply = f"✅ Saved! Your real name is **{given}** and your nickname is now `{nick}`."
+        if not nick_applied:
+            reply += "\n(⚠️ I couldn't change your server nickname — I need the *Manage Nicknames* permission.)"
+        await ctx.send(reply)
+
+    @profile.command(name="setbirthday",
+                     description="Set or update your birthday (YYYY-MM-DD).")
+    @commands.guild_only()
+    async def profile_setbirthday(self, ctx, date: str):
+        """Set your own birthday — works even if you never set it before."""
+        try:
+            birthday_full, birthday = parse_birthday(date)
+        except ValueError:
+            await ctx.send("⚠️ Invalid date! Use YYYY-MM-DD (e.g. 2004-12-25).")
+            return
+        try:
+            await store.merge_member(ctx.author.id, {
+                "birthday": birthday,
+                "birthday_full": birthday_full,
+            })
+        except StoreError as exc:
+            LOG.warning("setbirthday: could not persist birthday for %s: %s", ctx.author.id, exc)
+            await ctx.send("⚠️ Couldn't save your birthday right now — try again later.")
+            return
+        await ctx.send(f"🎉 Your birthday has been saved: {birthday_full}")
+        await self._announce_birthday_if_today(ctx.author)
+
+    async def _announce_birthday_if_today(self, member: discord.Member):
+        """Announce in the announcements channel if today is the member's birthday."""
+        record = await self._record(member.id)
+        birthday = record.get("birthday")
+        if not birthday:
+            return
+        if birthday == datetime.now().strftime("%m-%d"):
+            name = record.get("display_name") or record.get("real_name") or member.display_name
+            await announce_birthday(member.guild, name)
 
     @commands.hybrid_command(name="whois", description="Internal profile for staff.")
     @commands.guild_only()

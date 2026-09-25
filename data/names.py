@@ -27,6 +27,11 @@ AUTO_LINK_THRESHOLD = 0.72
 LINK_SEARCH_THRESHOLD = 0.5
 
 
+def has_cursive(text: str | None) -> bool:
+    """True when the text contains any Mathematical Bold Script letter."""
+    return any(0x1D4D0 <= ord(ch) <= 0x1D503 for ch in str(text or ""))
+
+
 def decursive(text: str) -> str:
     """Map Unicode Mathematical Bold Script letters back to plain Latin.
 

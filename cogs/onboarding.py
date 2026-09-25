@@ -8,6 +8,8 @@ import config
 from data.store import store
 from data.store import StoreError
 from cogs.birthday_tracker import announce_birthday, parse_birthday
+from cogs._perms import mod_perms
+from data.names import decursive, has_cursive
 
 LOG = logging.getLogger("bot.onboarding")
 
@@ -57,6 +59,39 @@ def cursive_nickname(real_name: str, *, max_len: int = NICKNAME_MAX) -> str:
 
 def find_text_channel(guild: discord.Guild, name: str):
     return discord.utils.get(guild.text_channels, name=name)
+
+
+def plan_namesweep(members, records):
+    """Classify members for /namesweep. Pure — no Discord/store I/O.
+
+    ``members``  — objects with ``.id`` and ``.nick`` (discord.Member works).
+    ``records``  — {uid: assembled member dict} from ``store.get_members``.
+
+    Returns (backfill, skipped, name_dm, birthday_dm):
+      backfill     — [(member, plain_name)] cursive nick, no stored name yet
+      skipped      — [member] has a stored real name already
+      name_dm      — [member] no stored real name and nothing to backfill
+      birthday_dm  — [member] no stored birthday
+    """
+    backfill, skipped, name_dm, birthday_dm = [], [], [], []
+    for member in members:
+        record = records.get(str(member.id)) or {}
+        has_name = bool(record.get("real_name"))
+        nick = member.nick or ""
+        if has_cursive(nick):
+            if has_name:
+                skipped.append(member)
+            else:
+                plain = decursive(nick).strip()
+                if plain:
+                    backfill.append((member, plain))
+                else:
+                    name_dm.append(member)
+        elif not has_name:
+            name_dm.append(member)
+        if not record.get("birthday"):
+            birthday_dm.append(member)
+    return backfill, skipped, name_dm, birthday_dm
 
 
 # ── Name modal ──────────────────────────────────────────────────────────
@@ -277,6 +312,76 @@ class Onboarding(commands.Cog):
         if birthday == today:
             name = record.get("display_name") or record.get("real_name") or member.display_name
             await announce_birthday(guild, name)
+
+    # ── staff admin ────────────────────────────────────────────
+    @commands.hybrid_group(name="admin",
+                           description="(staff) Administrative tools — namesweep and friends.")
+    @commands.guild_only()
+    async def admin(self, ctx):
+        """Staff admin tools — use a subcommand (e.g. /admin namesweep)."""
+        await ctx.send("🛠️ Admin tools — try `/admin namesweep` to backfill real "
+                       "names from cursive nicknames and nudge members with "
+                       "missing name/birthday.")
+
+    @admin.command(name="namesweep",
+                   description="Backfill real names from cursive nicknames and DM members missing name/birthday.")
+    @mod_perms(manage_nicknames=True)
+    async def namesweep(self, ctx):
+        """Scan server nicknames: save plain names for cursive ones, then DM
+        members who still have no stored real name (and separately, no
+        birthday) with a tagged reminder to use /profile setname and
+        /profile setbirthday. Members whose names are already stored are
+        skipped."""
+        members = [m for m in ctx.guild.members if not m.bot]
+        try:
+            records = {rec["user_id"]: rec
+                       for rec in await store.get_members([m.id for m in members])}
+        except StoreError as exc:
+            LOG.warning("namesweep: could not read member records: %s", exc)
+            await ctx.send("⚠️ Couldn't read member records right now — try again later.")
+            return
+        backfill, skipped, name_dm, birthday_dm = plan_namesweep(members, records)
+
+        backfilled = 0
+        for member, plain in backfill:
+            try:
+                await store.merge_member(member.id, {"real_name": plain})
+                backfilled += 1
+            except StoreError as exc:
+                LOG.warning("namesweep: could not persist name for %s: %s", member.id, exc)
+            try:
+                await member.edit(nick=plain, reason="namesweep: removed cursive from nickname")
+            except (discord.Forbidden, discord.HTTPException):
+                LOG.info("namesweep: could not de-cursive nickname of %s", member.id)
+
+        name_sent = name_blocked = 0
+        for member in name_dm:
+            try:
+                await member.send(
+                    f"Hey {member.mention} — we don't have your real name on file yet! "
+                    "Set it with **/profile setname** to get your cursive nickname. ✨"
+                )
+                name_sent += 1
+            except discord.Forbidden:
+                name_blocked += 1
+
+        bday_sent = bday_blocked = 0
+        for member in birthday_dm:
+            try:
+                await member.send(
+                    f"Hey {member.mention}! We're missing your birthday 🎂 — "
+                    "set it with **/profile setbirthday** so we can celebrate you."
+                )
+                bday_sent += 1
+            except discord.Forbidden:
+                bday_blocked += 1
+
+        await ctx.send(
+            f"🧹 **Namesweep complete** — backfilled **{backfilled}** real name(s) "
+            f"from cursive nicknames ({len(skipped)} already stored, skipped).\n"
+            f"📨 Name nudges: {name_sent} DM'd, {name_blocked} blocked (DMs closed).\n"
+            f"🎂 Birthday nudges: {bday_sent} DM'd, {bday_blocked} blocked (DMs closed)."
+        )
 
 
 async def setup(bot):
