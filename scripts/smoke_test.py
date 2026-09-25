@@ -23,7 +23,7 @@ import discord  # noqa: E402
 from discord.ext import commands  # noqa: E402
 
 EXPECTED_COMMANDS = {
-    "8ball", "accountage", "addrole", "advice", "assign", "ban", "bot", "cancel", "cell",
+    "8ball", "accountage", "addrole", "advice", "admin", "assign", "ban", "bot", "cancel", "cell",
     "challenge",
     "choose", "claim", "clap", "close", "coinflip", "competition",
     "competitions", "complete", "compliment", "create", "crypto",
@@ -39,6 +39,7 @@ EXPECTED_COMMANDS = {
     "slap", "slowmode", "spacex", "stop", "task", "tasks", "timeout", "today",
     "total_messages", "total_voice_time", "unban", "unlink", "unlinkmember", "unlock", "unmute",
     "untimeout", "view", "volume", "vote", "warn", "weather", "website", "whois",
+    "namesweep",
 }
 
 
