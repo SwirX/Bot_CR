@@ -312,13 +312,19 @@ def _dur_seconds(start: str, end: str) -> int:
     return max(0, int(((b or datetime.now(timezone.utc)) - a).total_seconds()))
 
 
-def rollup(sessions: list[dict], *, ended_at: str = "") -> dict[str, dict]:
+def rollup(sessions: list[dict], *, ended_at: str = "",
+           granted: list[str] | None = None) -> dict[str, dict]:
     """Attendance rows -> one summary per member.
 
     ``sessions`` is the append-only join log, so a rejoin is simply a second
     entry for the same member. Totals are ``time_present`` (sum of the
     intervals), ``visits`` (join count) and ``first_join``/``last_join``.
+
+    ``admitted`` is set for anyone in ``granted`` (the members an admin let back
+    in after a lockout) who actually turned up — that's the flag the report uses
+    to show "was let back in" separately from "was here the whole time".
     """
+    readmitted = {str(uid) for uid in (granted or [])}
     out: dict[str, dict] = {}
     for row in sessions or []:
         uid = str(row.get("discord_user") or "")
@@ -333,7 +339,7 @@ def rollup(sessions: list[dict], *, ended_at: str = "") -> dict[str, dict]:
             "first_join": row.get("joined_at") or "",
             "last_join": row.get("joined_at") or "",
             "in_channel": False,
-            "admitted": False,
+            "admitted": uid in readmitted,
         })
         entry["visits"] += 1
         entry["time_present"] += _dur_seconds(row.get("joined_at") or "",
@@ -343,9 +349,7 @@ def rollup(sessions: list[dict], *, ended_at: str = "") -> dict[str, dict]:
             entry["in_channel"] = False
         else:
             entry["in_channel"] = True
-        if row.get("admitted_by"):
-            entry["admitted"] = True
-    # Prefer the longest-joined session's name; a member may have renamed.
+    # Prefer the most recent name: a member may have renamed mid-meeting.
     for uid, entry in out.items():
         names = [r.get("display_name") for r in sessions or []
                  if str(r.get("discord_user")) == uid and r.get("display_name")]
@@ -374,6 +378,35 @@ def absentee_ids(meeting: dict, sessions: list[dict]) -> list[str]:
     readmitted = {str(uid) for uid in (meeting.get("granted") or [])}
     return [uid for uid in (meeting.get("expected") or [])
             if str(uid) not in attended and str(uid) not in readmitted]
+
+
+def lock_targets(sessions: list[dict], *, granted: list[str] | None = None) -> list[str]:
+    """Member ids a ``/meeting lock`` should deny rejoin to.
+
+    The rule is "entered *and* left", so:
+      * a member with a closed row and no open row — locked;
+      * a member who left but is currently back in — not locked (they are in the
+        room right now; denying them would kick the person running the meeting
+        out of their own channel);
+      * a member who never joined — not locked, since there is nothing to
+        prevent and denying them would invent an absence they didn't make;
+      * a member an admin already readmitted — not re-locked.
+
+    Order is first-appearance so the lock output is stable.
+    """
+    still_in = {str(s["discord_user"]) for s in sessions or [] if s["open"]}
+    readmitted = {str(uid) for uid in (granted or [])}
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in sessions or []:
+        uid = str(row.get("discord_user") or "")
+        if not uid or uid in seen or uid in still_in or uid in readmitted:
+            continue
+        if not row.get("left_at"):
+            continue
+        seen.add(uid)
+        out.append(uid)
+    return out
 
 
 def format_duration(seconds: int) -> str:
