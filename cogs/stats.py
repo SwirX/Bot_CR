@@ -20,6 +20,16 @@ def fmt_seconds(seconds: float) -> str:
     return f"{hours:02d}h {minutes:02d}m {secs:02d}s"
 
 
+def rank_voice(rows, limit: int = 10):
+    """Pure: (name, seconds) rows -> sorted desc, gaps dropped, capped.
+
+    Cap mirrors the account-age leaderboard (max 25); limit is clamped to >=1.
+    """
+    non_empty = [(name, secs) for name, secs in rows if secs > 0]
+    ranked = sorted(non_empty, key=lambda item: item[1], reverse=True)
+    return ranked[: max(1, min(limit, 25))]
+
+
 class Stats(commands.Cog):
     """Unified stats tracking: messages, voice time, online presence.
 
@@ -159,8 +169,32 @@ class Stats(commands.Cog):
         return activity, total_messages, total_voice
 
     # ── commands ───────────────────────────────────────────────
-    @commands.hybrid_command(name="total_messages", description="Total messages sent in the server.")
-    async def total_messages(self, ctx):
+    @commands.hybrid_group(name="stats", description="Server statistics at a glance.")
+    @commands.guild_only()
+    async def stats(self, ctx):
+        """Server-wide counters: messages, voice time, and who's awake right now."""
+        try:
+            counters = await store.get_counters()
+        except StoreError:
+            counters = {}
+        total_messages = int(counters.get("total_messages", 0)) + self.total_messages
+        total_voice = await self.view_total_voice_seconds()
+        online = sum(1 for m in ctx.guild.members if m.status in ACTIVE_STATUSES)
+        embed = discord.Embed(
+            title="📊 Server stats",
+            description=(
+                f"📨 **{total_messages}** messages sent\n"
+                f"🎧 **{fmt_seconds(total_voice)}** in voice channels\n"
+                f"🟢 **{online}** members online"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Subcommands: messages · voice · session · online")
+        await ctx.send(embed=embed)
+
+    @stats.command(name="messages",
+                   description="Total messages sent in the server.")
+    async def stats_messages(self, ctx):
         """Persisted total plus anything still pending in memory."""
         try:
             counters = await store.get_counters()
@@ -168,6 +202,36 @@ class Stats(commands.Cog):
             counters = {}
         total = int(counters.get("total_messages", 0)) + self.total_messages
         await ctx.send(f"Total messages sent in the server: {total}")
+
+    @stats.command(name="voice",
+                   description="Total voice time spent in the server.")
+    async def stats_voice(self, ctx):
+        """Persisted total plus anything still pending in memory or live."""
+        total = await self.view_total_voice_seconds()
+        await ctx.send(f"Total voice time in the server: {fmt_seconds(total)}")
+
+    @stats.command(name="session",
+                   description="Time in your voice channel this session.")
+    async def stats_session(self, ctx):
+        if not ctx.author.voice:
+            await ctx.send("You are not in a voice channel!")
+            return
+        channel = ctx.author.voice.channel
+        now = time.monotonic()
+        total = 0.0
+        for member in channel.members:
+            start = self.voice_join.get(member.id)
+            if start is not None:
+                total += now - start
+        await ctx.send(
+            f"Total time spent in {channel.name} so far: {fmt_seconds(total)}"
+        )
+
+    @stats.command(name="online",
+                   description="Number of members currently online/idle/dnd.")
+    async def stats_online(self, ctx):
+        online = sum(1 for m in ctx.guild.members if m.status in ACTIVE_STATUSES)
+        await ctx.send(f"Number of online members: {online}")
 
     async def view_total_voice_seconds(self) -> float:
         """Persisted total + pending closed segments + unflushed open seconds.
@@ -194,33 +258,67 @@ class Stats(commands.Cog):
             for uid, start in self.voice_join.items()
         )
 
-    @commands.hybrid_command(name="total_voice_time", description="Total voice time spent in the server.")
-    async def total_voice_time(self, ctx):
-        """Persisted total plus anything still pending in memory or live."""
-        total = await self.view_total_voice_seconds()
-        await ctx.send(f"Total voice time in the server: {fmt_seconds(total)}")
-
-    @commands.hybrid_command(name="current_voice_time",
-                             description="Time in your voice channel this session.")
-    async def current_voice_time(self, ctx):
-        if not ctx.author.voice:
-            await ctx.send("You are not in a voice channel!")
-            return
-        channel = ctx.author.voice.channel
+    # ── voicetime flex + leaderboard ─────────────────────────
+    def _pending_per_user(self) -> dict[int, float]:
+        """uid -> total seconds still unflushed (closed segments + live opens)."""
         now = time.monotonic()
-        total = 0.0
-        for member in channel.members:
-            start = self.voice_join.get(member.id)
-            if start is not None:
-                total += now - start
-        await ctx.send(
-            f"Total time spent in {channel.name} so far: {fmt_seconds(total)}"
-        )
+        pending = dict(self.voice_seconds)
+        for uid, start in self.voice_join.items():
+            pending[uid] = pending.get(uid, 0.0) + \
+                (now - start) - self.voice_credited.get(uid, 0.0)
+        return pending
 
-    @commands.hybrid_command(name="online_members", description="Number of members currently online/idle/dnd.")
-    async def online_members(self, ctx):
-        online = sum(1 for m in ctx.guild.members if m.status in ACTIVE_STATUSES)
-        await ctx.send(f"Number of online members: {online}")
+    async def _member_voice_total(self, uid: int) -> float:
+        """Stored voice_seconds + this member's pending unflushed seconds."""
+        try:
+            record = await store.get_member(uid)
+        except StoreError:
+            record = None
+        stored = float((record or {}).get("voice_seconds") or 0.0)
+        return stored + self._pending_per_user().get(uid, 0.0)
+
+    @commands.hybrid_group(name="voicetime",
+                           description="Voice-time flex card — your (or a member's) total voice time.")
+    async def voicetime(self, ctx, member: discord.Member | None = None):
+        """Your (or someone's) total voice time on the server."""
+        target = member or ctx.author
+        total = await self._member_voice_total(target.id)
+        embed = discord.Embed(
+            title=f"🎧 {target.display_name}'s voice time",
+            description=f"**{fmt_seconds(total)}** total in voice channels.",
+            color=discord.Color.purple(),
+        )
+        await ctx.send(embed=embed)
+
+    @voicetime.command(name="leaderboard",
+                       description="Top members by total voice time.")
+    @commands.cooldown(1, 10, commands.BucketType.channel)
+    async def voicetime_leaderboard(self, ctx, limit: int = 10):
+        """Top-N most active voice members, oldest count by accumulated time."""
+        fetch = min(max(limit, 1) + 30, 500)
+        try:
+            records = await store.list_members(limit=fetch, order_by="voice_seconds")
+        except StoreError:
+            records = []
+        pending = self._pending_per_user()
+        rows = []
+        for rec in records:
+            uid = rec.get("user_id") or rec.get("$id") or ""
+            name = rec.get("display_name") or rec.get("real_name") or "Unknown"
+            total = float(rec.get("voice_seconds") or 0.0) + pending.get(uid, 0.0)
+            rows.append((name, total))
+        top = rank_voice(rows, limit)
+        if not top:
+            await ctx.send("🎧 Nobody has recorded voice time yet.")
+            return
+        lines = [f"`{i:>2}.` **{name}** — {fmt_seconds(total)}"
+                 for i, (name, total) in enumerate(top, start=1)]
+        embed = discord.Embed(
+            title="🎧 Top voice time",
+            description="\n".join(lines),
+            color=discord.Color.purple(),
+        )
+        await ctx.send(embed=embed)
 
 
 async def setup(bot):
