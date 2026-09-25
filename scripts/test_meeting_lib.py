@@ -278,6 +278,15 @@ def main() -> int:
     ended = ml.rollup(sessions, ended_at=iso(minutes=90))
     check("Cell closed at end", ended["2"]["in_channel"], False)
 
+    print("\nrollup() flags members an admin readmitted after a lockout")
+    check("not admitted by default", total["1"]["admitted"], False)
+    check("granted member flagged",
+          ml.rollup(sessions, granted=["1"])["1"]["admitted"], True)
+    check("granted-but-absent member is not in the rollup at all",
+          "9" in ml.rollup(sessions, granted=["9"]), False)
+    check("granted ids match as strings",
+          ml.rollup(sessions, granted=[1])["1"]["admitted"], True)
+
     print("\nattendance_csv() is one row per join plus a totals block")
     meeting = {"id": "m1", "title": "Bureau meeting", "channel_name": "Bureau",
                "channel_id": "1336692513460977746", "scope": "bureau",

@@ -111,31 +111,6 @@ class Meetings(commands.Cog):
         except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
             LOG.info("Meetings: cleanup of %s skipped: %s", channel_id, exc)
 
-    # ── listeners ────────────────────────────────────────────────────
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member, before, after):
-        """Delete tracked rooms the moment they empty out."""
-        affected = set()
-        if before.channel is not None:
-            affected.add(before.channel.id)
-        if after.channel is not None:
-            affected.add(after.channel.id)
-        for channel_id in affected:
-            if channel_id not in self.meetings:
-                continue
-            channel = self._find_channel(channel_id)
-            if channel is None:
-                # Deleted out from under us — drop the stale entry.
-                self.meetings.pop(channel_id, None)
-                await self._save_meetings()
-                continue
-            try:
-                occupants = len(channel.members)
-            except (discord.Forbidden, discord.HTTPException):
-                continue
-            if occupants == 0:
-                await self._destroy_meeting(channel_id)
-
     @commands.hybrid_group(
         name="meeting",
         description="Club meetings with attendance tracking, and private voice rooms.")
@@ -209,6 +184,109 @@ class Meetings(commands.Cog):
             LOG.error("Meetings: could not close attendance for %s: %s",
                       discord_id, exc)
             return False
+
+    # ── attendance: voice-state listener ────────────────────────────
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        """Track meeting attendance as people join, leave and rejoin.
+
+        Two things are recorded from a single voice transition: a join opens a
+        new ``meeting_sessions`` row and a leave closes the open one. Because
+        the log is append-only, a member who drops out and comes back 20 minutes
+        later produces two rows with their own joined_at/left_at, which is what
+        the CSV and the report need.
+
+        The lookup is per-channel (``get_live_meeting_for_channel``) so this
+        only touches the hub when the transition actually involves a channel
+        that currently has a meeting running — this listener fires for every
+        voice change in the guild, so a global query here would hammer Appwrite.
+        """
+        old_id = before.channel.id if before.channel is not None else None
+        new_id = after.channel.id if after.channel is not None else None
+        if old_id == new_id:
+            return
+        if member.bot:
+            # Bots are never attendees (resolve_audience filters them too), so
+            # recording one would just pollute the CSV with the club's music
+            # and integration bots sitting in the VC.
+            return
+
+        # Resolve which side of the transition is the meeting channel. If the
+        # member moved between two non-meeting channels there is nothing to do.
+        meeting = await self._live_meeting_for_channel(new_id) if new_id else None
+        if meeting is not None:
+            await self._record_join(meeting, member)
+        elif old_id is not None:
+            meeting = await self._live_meeting_for_channel(old_id)
+            if meeting is not None:
+                await self._record_leave(meeting, member)
+
+        # Keep the private-room auto-cleanup working alongside meeting tracking.
+        await self._maybe_destroy_room(before, after)
+
+    async def _record_join(self, meeting: dict, member: discord.Member) -> None:
+        """Open an attendance row for ``member`` joining ``meeting``'s channel."""
+        # Guard against a duplicate row if two voice events race (Discord
+        # occasionally emits an extra update). If the member already has an open
+        # session, this is not a new visit.
+        try:
+            open_rows = await store.list_meeting_sessions(meeting["id"], open_only=True)
+        except StoreError as exc:
+            LOG.error("Meetings: attendance read failed for %s: %s",
+                      meeting["id"], exc)
+            return
+        if any(str(r["discord_user"]) == str(member.id) for r in open_rows):
+            return
+        # A member locked out is denied connect, so a voice event can't get them
+        # in — but a rejoin *while unlocked* after a lock is a legitimate second
+        # visit and should be logged as such.
+        note = meetlib.scope_note_for(member, meeting["scope"])
+        # "Readmitted" is derived from the meeting's ``granted`` list rather than
+        # stamped on the row. The voice listener has no idea which admin pressed
+        # /meeting unlock — the grant was recorded at unlock time — and the
+        # report only needs to know that the join followed a lockout.
+        readmitted = str(member.id) in {str(g) for g in meeting["granted"] or []}
+        try:
+            await store.record_meeting_join(
+                meeting["id"], member.id, member.display_name, scope_note=note)
+        except StoreError as exc:
+            LOG.error("Meetings: could not record join for %s: %s", member.id, exc)
+            return
+        LOG.info("Meetings: %s joined %s as %s%s", member.display_name,
+                 meeting["title"], note, " (readmitted)" if readmitted else "")
+
+    async def _record_leave(self, meeting: dict, member: discord.Member) -> None:
+        """Close ``member``'s open attendance row when they leave the channel."""
+        try:
+            closed = await store.close_meeting_session(meeting["id"], member.id)
+        except StoreError as exc:
+            LOG.error("Meetings: could not record leave for %s: %s", member.id, exc)
+            return
+        if closed:
+            LOG.info("Meetings: %s left %s", member.display_name, meeting["title"])
+
+    async def _maybe_destroy_room(self, before, after) -> None:
+        """Auto-delete a tracked private room once it empties (legacy flow)."""
+        affected = set()
+        if before.channel is not None:
+            affected.add(before.channel.id)
+        if after.channel is not None:
+            affected.add(after.channel.id)
+        for channel_id in affected:
+            if channel_id not in self.meetings:
+                continue
+            channel = self._find_channel(channel_id)
+            if channel is None:
+                # Deleted out from under us — drop the stale entry.
+                self.meetings.pop(channel_id, None)
+                await self._save_meetings()
+                continue
+            try:
+                occupants = len(channel.members)
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+            if occupants == 0:
+                await self._destroy_meeting(channel_id)
 
     # ── commands: tracked meetings ───────────────────────────────────
     @meeting.command(
@@ -399,7 +477,8 @@ class Meetings(commands.Cog):
                            f"meeting record: {exc}")
             return
 
-        totals = meetlib.rollup(sessions, ended_at=ended_at)
+        totals = meetlib.rollup(sessions, ended_at=ended_at,
+                             granted=meeting["granted"])
         where = (f"<#{meeting['channel_id']}>" if channel is not None
                  else "a now-deleted channel")
         header = (f"✅ **Meeting ended** — `{meeting['title']}` in {where}\n"
@@ -410,6 +489,118 @@ class Meetings(commands.Cog):
             header += "\n⚠️ " + "; ".join(problems)
         header += "\nRun `/meeting last` for the full report."
         await ctx.send(header)
+
+    @meeting.command(
+        name="lock",
+        description=("Lock the running meeting: anyone who has already left "
+                     "cannot rejoin until an admin unlocks them."))
+    @commands.guild_only()
+    @require_meeting_admin()
+    async def meeting_lock(self, ctx):
+        """Deny rejoin to everyone who has left the meeting channel.
+
+        Only members who entered *and* left are locked out — they have an
+        attendance row with a ``left_at``. Anyone still in the channel (the
+        current attendees) and anyone who never joined at all are untouched.
+
+        The lock is implemented as a per-member ``connect`` deny (not a new
+        role) so it applies to exactly the people who left and evaporates
+        cleanly at ``/meeting end`` when their overwrite is deleted.
+        """
+        meeting = await self._live_meeting()
+        if meeting is None:
+            await ctx.send("⏳ No meeting is running right now.")
+            return
+        channel = (self._find_channel(int(meeting["channel_id"]))
+                   if meeting["channel_id"] else None)
+        if channel is None:
+            await ctx.send("❌ The meeting channel is gone; can't lock it.")
+            return
+
+        try:
+            sessions = await store.list_meeting_sessions(meeting["id"])
+        except StoreError as exc:
+            LOG.error("Meetings: lock could not read attendance: %s", exc)
+            await ctx.send(f"⚠️ Couldn't read the attendance log: {exc}")
+            return
+
+        targets = meetlib.lock_targets(sessions, granted=meeting["granted"])
+        if not targets:
+            anyone_left = any(s["left_at"] for s in sessions)
+            hint = (" — nobody has left the meeting yet, so there is nothing "
+                    "to lock") if not anyone_left else \
+                   " — everyone who left is still in the channel or was readmitted"
+            await ctx.send(f"🔓 Nothing to lock{hint}.")
+            return
+        if len(targets) > config.MEETING_MAX_LOCKED_OUT:
+            await ctx.send(
+                f"❌ {len(targets)} members have left — that exceeds the "
+                f"{config.MEETING_MAX_LOCKED_OUT} lockout cap (Discord allows "
+                f"100 overwrites per channel).")
+            return
+
+        locked, failed = [], []
+        async with ctx.typing():
+            for uid in targets:
+                member = ctx.guild.get_member(int(uid))
+                if member is None:
+                    # Left the server; no overwrite to write.
+                    continue
+                try:
+                    await meetlib.deny_member(
+                        channel, member, reason="Meeting lockout")
+                    locked.append(uid)
+                except (discord.NotFound, discord.Forbidden,
+                        discord.HTTPException) as exc:
+                    failed.append(f"{member.display_name} ({exc.__class__.__name__})")
+
+        if locked:
+            try:
+                await store.set_meeting_locked(meeting["id"], True)
+            except StoreError as exc:
+                LOG.error("Meetings: lock flag not saved: %s", exc)
+        names = ", ".join(f"<@{uid}>" for uid in locked[:10])
+        more = f" (+{len(locked) - 10} more)" if len(locked) > 10 else ""
+        msg = (f"🔒 Locked the meeting — {len(locked)} member(s) that left can no "
+               f"longer rejoin: {names}{more}.")
+        if failed:
+            msg += f"\n⚠️ Couldn't lock: {', '.join(failed[:5])}"
+        msg += "\nUse `/meeting unlock @member` to let anyone back in."
+        await ctx.send(msg)
+
+    @meeting.command(
+        name="unlock",
+        description="Let a member back into a locked meeting.")
+    @commands.guild_only()
+    @require_meeting_admin()
+    async def meeting_unlock(self, ctx, member: discord.Member):
+        """Clear one member's lockout so they can rejoin the running meeting."""
+        meeting = await self._live_meeting()
+        if meeting is None:
+            await ctx.send("⏳ No meeting is running right now.")
+            return
+        channel = (self._find_channel(int(meeting["channel_id"]))
+                   if meeting["channel_id"] else None)
+        if channel is None:
+            await ctx.send("❌ The meeting channel is gone; can't unlock it.")
+            return
+
+        async with ctx.typing():
+            try:
+                await meetlib.allow_member(
+                    channel, member, reason="Meeting re-entry granted by admin")
+            except (discord.NotFound, discord.Forbidden,
+                    discord.HTTPException) as exc:
+                await ctx.send(f"⚠️ Couldn't let {member.display_name} back in: {exc}")
+                return
+        try:
+            await store.grant_meeting_reentry(meeting["id"], member.id)
+        except StoreError as exc:
+            LOG.error("Meetings: could not record re-entry for %s: %s",
+                      member.id, exc)
+        await ctx.send(
+            f"✅ {member.mention} can rejoin. They're recorded as readmitted "
+            f"in the attendance report.")
 
     # ── commands: private voice rooms ────────────────────────────────
     @commands.hybrid_group(
