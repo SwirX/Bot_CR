@@ -242,5 +242,87 @@ class McLinkFlowTests(unittest.TestCase):
         self.delete.assert_awaited_once_with("pair-1")
 
 
+class McOtpFlowTests(unittest.TestCase):
+    """/mcotp resend: OTP row found → rearm → DM-first → ephemeral fallback."""
+
+    _OTP_ROW = {"$id": "otp-1", "minecraft_account": "account-1"}
+
+    def _cog(self, dm_ok: bool) -> McLink:
+        cog = McLink(None)
+        cog._configured = lambda: True
+        cog._dm = mock.AsyncMock(return_value=dm_ok)
+        return cog
+
+    def _run(self, ctx: _FakeCtx, *, dm_ok: bool = False) -> None:
+        async def go():
+            from cogs.mclink import resolve_member_lang, store
+
+            cog = self._cog(dm_ok)
+            with mock.patch("cogs.mclink.resolve_member_lang",
+                            new=mock.AsyncMock(return_value="en")), \
+                 mock.patch.object(store, "mc_otp_row_for_user",
+                                   new=mock.AsyncMock(
+                                       return_value=("Steve_Test",
+                                                     dict(self._OTP_ROW)))) as find, \
+                 mock.patch.object(store, "mc_rearm_otp",
+                                   new=mock.AsyncMock(return_value=True)) as rearm, \
+                 mock.patch.object(store, "mc_expire_otp",
+                                   new=mock.AsyncMock()) as expire:
+                await cog.mcotp.callback(cog, ctx)
+                self.find, self.rearm, self.expire = find, rearm, expire
+        asyncio.run(go())
+
+    def test_slash_dm_failure_falls_back_to_ephemeral(self):
+        ctx = _FakeCtx(interaction=_FakeInteraction())  # slash invocation
+        self._run(ctx)
+        # Closed DMs → the fresh OTP is shown ephemerally (only the invoker
+        # sees it); the row stays rearmed so the code is usable in-game.
+        self.rearm.assert_awaited_once()
+        self.expire.assert_not_awaited()
+        self.assertEqual(len(ctx.sent), 1)
+        content, kwargs = ctx.sent[0]
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertIn("otp", content)  # delivers the /otp <code> block
+        self.assertIn("Steve_Test", content)
+
+    def test_prefix_dm_failure_reexpires_row(self):
+        ctx = _FakeCtx(interaction=None)  # legacy !mcotp, no private channel
+        self._run(ctx)
+        # No private surface → expire the freshly rearmed row so the plugin
+        # re-arms on the next join, and guide the member.
+        self.rearm.assert_awaited_once()
+        self.expire.assert_awaited_once_with("otp-1")
+        self.assertEqual(len(ctx.sent), 1)
+        content, kwargs = ctx.sent[0]
+        self.assertFalse(kwargs["ephemeral"])
+        self.assertNotIn("otp ", content)
+
+    def test_dm_success_keeps_row_rearmed(self):
+        ctx = _FakeCtx(interaction=_FakeInteraction())
+        self._run(ctx, dm_ok=True)
+        self.rearm.assert_awaited_once()
+        self.expire.assert_not_awaited()
+        content, kwargs = ctx.sent[0]
+        self.assertFalse(kwargs["ephemeral"])
+        self.assertIn("📨", content)  # mcotp.sent
+
+    def test_no_pending_otp_row(self):
+        async def go():
+            from cogs.mclink import resolve_member_lang, store
+
+            cog = self._cog(dm_ok=False)
+            ctx = _FakeCtx(interaction=_FakeInteraction())
+            with mock.patch("cogs.mclink.resolve_member_lang",
+                            new=mock.AsyncMock(return_value="en")), \
+                 mock.patch.object(store, "mc_otp_row_for_user",
+                                   new=mock.AsyncMock(return_value=None)), \
+                 mock.patch.object(store, "mc_rearm_otp",
+                                   new=mock.AsyncMock()) as rearm:
+                await cog.mcotp.callback(cog, ctx)
+                self.rearm = rearm
+        asyncio.run(go())
+        self.rearm.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

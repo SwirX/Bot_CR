@@ -1463,6 +1463,63 @@ class Store:
         })
         return True
 
+    async def mc_rearm_otp(self, row_id: str, *, otp_hash: str, otp_salt: str,
+                           challenge_at: str, expires_at: str) -> bool:
+        """Force-enable an OTP row with a freshly minted hash — the /mcotp
+        resend path.
+
+        Unlike ``mc_mint_otp`` this also revives rows the watcher expired
+        (enabled=False) after its own DM failed, so a closed-DM player at the
+        login screen can pull the code through ``/mcotp`` instead of being
+        stuck waiting for a DM that never arrives. False when the row is gone.
+        """
+        if not row_id:
+            return False
+        tdb, db_id = self._raw()
+        try:
+            row = await asyncio.to_thread(
+                tdb.get_row, db_id, _T["minecraft_otp"], row_id)
+        except AppwriteException as exc:
+            if is_missing(exc):
+                return False
+            raise StoreError(f"rearm otp {row_id}: {exc}") from exc
+        await self._patch(_T["minecraft_otp"], row_id, {
+            "enabled": True,
+            "otp_hash": otp_hash,
+            "otp_salt": otp_salt,
+            "challenge_at": challenge_at,
+            "expires_at": expires_at,
+            "failed_attempts": 0,
+        })
+        return True
+
+    async def mc_otp_row_for_user(self, discord_id: int
+                                   ) -> tuple[str, dict] | None:
+        """(username, most recent minecraft_otp row) for the member's active
+        link — the row the plugin armed for their current join — or None.
+
+        The row may be pending-mint, already minted, or expired by the
+        watcher's failed DM; ``mc_rearm_otp`` makes any of those usable.
+        """
+        uid = str(discord_id)
+        links = await self._listed(
+            _T["discord_mc_links"], 25,
+            queries=[Query.equal("discord_user", uid),
+                     Query.equal("is_active", True)])
+        for link in links:
+            account_id = _rel_id(link.get("minecraft_account"))
+            if not account_id:
+                continue
+            account = await self.mc_resolve_account(account_id)
+            if account is None:
+                continue
+            rows = await self._listed(
+                _T["minecraft_otp"], 1, order_by="$createdAt",
+                queries=[Query.equal("minecraft_account", account_id)])
+            if rows:
+                return account.get("username") or "", rows[0]
+        return None
+
     async def mc_account_otp_owner(self, account_id: str
                                    ) -> tuple[str, int] | None:
         """(username, discord_id) entitled to a minted code, when the account

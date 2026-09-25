@@ -186,6 +186,71 @@ class McLink(commands.Cog):
             return
         await ctx.send(t("mclink.sent", lang))
 
+    # ── /mcotp ───────────────────────────────────────────────
+    @commands.hybrid_command(
+        name="mcotp",
+        description="Resend your current in-game login code (DMs first, private fallback).")
+    @commands.guild_only()
+    @commands.cooldown(2, 60, commands.BucketType.user)
+    async def mcotp(self, ctx: commands.Context):
+        """Pull a fresh OTP for the current join — DM-first, ephemeral
+        fallback — so a closed-DM player at the login screen isn't stuck
+        waiting for a code the watcher could never deliver.
+
+        Mirrors ``mclink``: mint a fresh code into the account's most recent
+        OTP row (re-arming rows the watcher expired after its own DM failed),
+        then deliver. The code stays one-time and expires on the same TTL.
+        """
+        lang = await self._lang(ctx)
+        if not self._configured():
+            await ctx.send(t("mc.unconfigured", lang))
+            return
+        try:
+            found = await store.mc_otp_row_for_user(ctx.author.id)
+        except StoreError:
+            await ctx.send(t("mclink.store_fail", lang))
+            return
+        if not found:
+            await ctx.send(t("mcotp.none", lang))
+            return
+        username, otp_row = found
+        code = new_link_code()
+        now = datetime.now(timezone.utc)
+        try:
+            rearmed = await store.mc_rearm_otp(
+                otp_row["$id"],
+                otp_hash=hash_otp(code),
+                otp_salt=secrets.token_hex(16),
+                challenge_at=now.isoformat(),
+                expires_at=(now + timedelta(seconds=_OTP_TTL_SECONDS)
+                            ).isoformat())
+        except StoreError:
+            await ctx.send(t("mclink.store_fail", lang))
+            return
+        if not rearmed:
+            await ctx.send(t("mcotp.none", lang))
+            return
+        minutes = max(1, _OTP_TTL_SECONDS // 60)
+        dm_text = t("mclink.dm_otp", lang, code=code, name=username,
+                    minutes=minutes)
+        if not await self._dm(ctx.author.id, dm_text):
+            if ctx.interaction is not None:
+                # DMs closed → hand the code over as an ephemeral message
+                # instead of dead-ending: only the invoker sees it, same
+                # privacy property as a DM.
+                await ctx.send(t("mclink.dm_ephemeral", lang)
+                               + "\n\n" + dm_text, ephemeral=True)
+                return
+            # DMs closed and no private channel (prefix invocation) → re-expire
+            # the row so the plugin re-arms on the next join, and guide.
+            try:
+                await store.mc_expire_otp(otp_row["$id"])
+            except StoreError:
+                pass
+            await ctx.send(t("mcotp.dm_closed", lang))
+            return
+        await ctx.send(t("mcotp.sent", lang))
+
     # ── watcher ───────────────────────────────────────────────
     async def _watch(self) -> None:
         """5 s poll loop: OTP minting, pair expiry, activation sync."""
