@@ -129,9 +129,10 @@ class McLink(commands.Cog):
         """Start the one-time pairing: this bot DMs a code typeable in-game.
 
         The code is minted UPPERCASE from the unambiguous alphabet, is valid
-        for ``MC_PAIR_KEY_TTL`` seconds and is never shown in the guild
-        channel. The Paper plugin claims it in-game (/mcverify): it creates
-        the account's session gateway and flips the pair row to
+        for ``MC_PAIR_KEY_TTL`` seconds and is never shown *publicly* — DM
+        by default, or an ephemeral (invoker-only) reply when the member has
+        DMs closed. The Paper plugin claims it in-game (/mcverify): it
+        creates the account's session gateway and flips the pair row to
         ``is_active``. Every later login needs a fresh OTP from a follow-up
         join (this bot's watcher mints and DMs it).
         """
@@ -167,7 +168,15 @@ class McLink(commands.Cog):
                    + t("mclink.dm_code", lang, code=pair_key, name=name,
                        minutes=minutes))
         if not await self._dm(ctx.author.id, dm_text):
-            # DMs closed → the code is useless; drop the pending pair row so
+            if ctx.interaction is not None:
+                # DMs closed → hand the code over as an ephemeral message
+                # instead of dead-ending: only the invoker sees it, same
+                # privacy property as a DM. The pair row stays live.
+                await ctx.send(t("mclink.dm_ephemeral", lang)
+                               + "\n\n" + dm_text, ephemeral=True)
+                return
+            # DMs closed and no private channel (prefix invocation) → the
+            # code can't be delivered safely; drop the pending pair row so
             # nothing lingers (expiry would catch it anyway).
             try:
                 await store.mc_delete_pair(link_id)

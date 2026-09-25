@@ -4,6 +4,7 @@ Run:  .venv-local/bin/python scripts/test_mclink.py
 Hermetic: no network, no Appwrite, no config import needed (unlike smoke).
 """
 
+import asyncio
 import os
 import sys
 import unittest
@@ -160,6 +161,85 @@ class ParseIsoTests(unittest.TestCase):
         self.assertIsNone(parse_iso(None))
         self.assertIsNone(parse_iso(""))
         self.assertIsNone(parse_iso("yesterday"))
+
+
+# ── /mclink DM-failure fallback (ephemeral vs prefix) ──────────────────
+from unittest import mock  # noqa: E402
+
+from cogs.mclink import McLink  # noqa: E402
+
+
+class _FakeAuthor:
+    def __init__(self, user_id: int):
+        self.id = user_id
+        self.display_name = "Steve_Test"
+        self.name = "Steve_Test"
+
+
+class _FakeInteraction:
+    def __init__(self, locale: str = "en-US"):
+        self.locale = locale
+
+
+class _FakeCtx:
+    """Records ctx.send(invoker-visible vs ephemeral) like the real one."""
+
+    def __init__(self, *, interaction):
+        self.author = _FakeAuthor(420)
+        self.interaction = interaction
+        self.sent: list[tuple[str, dict]] = []
+
+    async def send(self, content=None, *, ephemeral=False, **kwargs):
+        self.sent.append((content or "", {"ephemeral": ephemeral, **kwargs}))
+
+
+class McLinkFlowTests(unittest.TestCase):
+    def _cog(self) -> McLink:
+        cog = McLink(None)
+        cog._configured = lambda: True
+        cog._dm = mock.AsyncMock(return_value=False)  # DMs closed
+        return cog
+
+    def _run(self, ctx: _FakeCtx) -> None:
+        async def go():
+            from cogs.mclink import resolve_member_lang, store
+
+            cog = self._cog()
+            with mock.patch("cogs.mclink.resolve_member_lang",
+                            new=mock.AsyncMock(return_value="en")), \
+                 mock.patch.object(store, "mc_user_linked",
+                                   new=mock.AsyncMock(return_value=False)), \
+                 mock.patch.object(store, "mc_account_linked",
+                                   new=mock.AsyncMock(return_value=False)), \
+                 mock.patch.object(store, "mc_create_pair",
+                                   new=mock.AsyncMock(return_value="pair-1")) as create, \
+                 mock.patch.object(store, "mc_delete_pair",
+                                   new=mock.AsyncMock()) as delete:
+                await cog.mclink.callback(cog, ctx, "Steve_Test")
+                self.create, self.delete = create, delete
+        asyncio.run(go())
+
+    def test_slash_dm_failure_falls_back_to_ephemeral(self):
+        ctx = _FakeCtx(interaction=_FakeInteraction())  # slash invocation
+        self._run(ctx)
+        # The code must still be delivered privately — ephemeral reply with
+        # the pairing text, and the pair row kept alive (no delete).
+        self.assertEqual(len(ctx.sent), 1)
+        content, kwargs = ctx.sent[0]
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertIn("mcverify", content)
+        self.delete.assert_not_awaited()
+
+    def test_prefix_dm_failure_drops_pair_row(self):
+        ctx = _FakeCtx(interaction=None)  # legacy !mclink, no private channel
+        self._run(ctx)
+        # No private surface → the code can't be delivered safely; expire the
+        # pending pair and tell the member what to do instead.
+        self.assertEqual(len(ctx.sent), 1)
+        content, kwargs = ctx.sent[0]
+        self.assertFalse(kwargs["ephemeral"])
+        self.assertNotIn("mcverify", content)
+        self.delete.assert_awaited_once_with("pair-1")
 
 
 if __name__ == "__main__":
