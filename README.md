@@ -17,10 +17,19 @@ command works as both `!prefix` and `/slash`.
 - 🎂 **Birthday tracker** — birthdays are stored per member in Appwrite and
   announced in the announcements channel on the day (plus an immediate
   announcement if you set a birthday that *is* today).
-- 📈 **XP & levels** — chatting earns XP (per-user cooldown) and **voice-channel
-  time earns XP continuously** (daily cap), levels grow with `100·L²` cumulative
-  XP, level-ups are shouted in chat, and `/rank` + `/leaderboard` read straight
-  from the store.
+- 📈 **XP & levels** — chatting earns XP (per-user cooldown) with **bonus XP for
+  rich content** (🖼️ images, 🎙️ voice notes, 🔗 links and 📝 long posts stack on
+  the base roll), and **voice-channel time earns XP continuously** (daily cap).
+  Levels grow with `100·L²` cumulative XP, level-ups are shouted in chat, and
+  **level-up role rewards** (`LEVEL_ROLE_REWARDS`) auto-grant a role at
+  milestone levels — `/rank` + `/leaderboard` read straight from the store, and
+  staff catch up existing members with `/levelrewards backfill`.
+- ⏰ **Reminders** — `/remind me duration: 30m text: …` DMs you when it's due
+  (spans like `30s`, `2h`, `1d`, even `1h30m`), Appwrite-persisted so they
+  survive restarts; `/remind list` and `/remind cancel <id>` manage them.
+- 👑 **Account-age flex** — `/accountage [member]` shows a tiered flex card for
+  any Discord account's age (fresh 🍼 → certified ancient 🦴), and
+  `/accountage leaderboard` ranks the server's oldest accounts.
 - 🔥 **Daily challenges** — staff set a challenge for the day
   (`/challenge set`), members claim it once (`/challenge claim`), history is
   kept, and each day's challenge is auto-posted to announcements.
@@ -126,6 +135,11 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `hello`, `ping` | everyone | Hello / latency check |
 | `rank [member]` | everyone | Level, XP and progress bar |
 | `leaderboard` | everyone | Top 10 by XP |
+| `levelrewards backfill` | staff | Grant level reward roles to members past the thresholds |
+| `accountage [member]` | everyone | Flex card: how old is a Discord account |
+| `accountage leaderboard` | everyone | The club's oldest accounts |
+| `remind me duration: <span> text: <text>` | everyone | DM reminder (survives restarts) |
+| `remind list`, `remind cancel <id>` | everyone | Manage your reminders |
 | `challenge today` | everyone | Today's challenge + claims |
 | `challenge claim` | everyone | Claim today's challenge (once) |
 | `challenge history` | everyone | The last 7 challenges |
@@ -523,8 +537,9 @@ cogs/                     one file per feature; auto-discovered
   birthday_tracker.py     daily + immediate birthday announcements (store-backed)
   stats.py                messages / voice / presence tracking + periodic flush
   dashboard.py            persisted-counter dashboard embed
-  engagement.py           XP & levels, daily challenges
-  fun.py                  lighthearted commands (+ robot status, robotics quiz)
+  engagement.py           XP & levels, daily challenges, level-reward roles
+  reminders.py            Appwrite-persisted /remind me DM scheduler
+  fun.py                  lighthearted commands (+ robot status, quiz, account-age flex)
   moderation.py           kick/ban/timeout/warn + modlog + lock/slowmode/unlock
   welcome.py / goodbye.py join / leave messages
   rules.py                rules board
@@ -557,6 +572,10 @@ scripts/
   test_deezer_radio.py    Deezer radio feed & refill behavior
   test_jockie_nudge.py    nudge cooldowns & pitch wording
   test_mclink.py          CipherBox interop vectors + credential mint
+  test_level_roles.py     level-up reward role grants (hermetic)
+  test_reminders.py       reminder span parsing + scheduler delivery
+  test_xp_bonuses.py      content-driven XP bonus tiers
+  test_account_age.py     account-age summary + oldest-accounts ranking
   test_memberlinks.py / test_names.py / test_voice_xp.py / test_updates.py / test_mc_hub.py
                           unit checks per feature
 KeepAlive.py              Flask keep-alive on $PORT
@@ -571,14 +590,15 @@ it automatically.
 ## ✅ Quality gates
 
 `.github/workflows/ci.yml` runs on every push/PR against Python 3.12 and 3.13:
-byte-compiles every module, runs `scripts/smoke_test.py` (loads all 25 cogs,
+byte-compiles every module, runs `scripts/smoke_test.py` (loads all 26 cogs,
 asserts every command is hybrid and the custom `help` is installed), the
 hermetic `scripts/test_mclink.py` (CipherBox interop vectors + credential
 mint) and the music suite — `test_music_player.py` (skip/remove voting),
 `test_music_sources.py` (source resolution), `test_deezer_radio.py` (radio
 feed/refill) and `test_jockie_nudge.py` — plus the per-feature unit checks
-(`test_memberlinks.py`, `test_names.py`, `test_voice_xp.py`, `test_updates.py`,
-`test_mc_hub.py`).
+(`test_level_roles.py`, `test_reminders.py`, `test_xp_bonuses.py`,
+`test_account_age.py`, `test_memberlinks.py`, `test_names.py`,
+`test_voice_xp.py`, `test_updates.py`, `test_mc_hub.py`).
 
 ```bash
 python scripts/smoke_test.py   # run the same check locally
