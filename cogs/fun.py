@@ -1,4 +1,5 @@
 import random
+from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
@@ -76,6 +77,84 @@ QUOTES = [
     "The most disastrous thing that you can ever learn is your first programming language. — Alan Kay",
     "Feedback is a gift. Even when it's wrapped in an exception. 🎁",
 ]
+
+
+class _AgeSummary:
+    """Computed account-age breakdown (pure data, no Discord types)."""
+
+    __slots__ = ("years", "months", "days", "compact", "sentence", "tag")
+
+    def __init__(self, years, months, days, compact, sentence, tag):
+        self.years = years
+        self.months = months
+        self.days = days
+        self.compact = compact       # "2y 3m" — leaderboard
+        self.sentence = sentence     # "2 years, 3 months" — flex card
+        self.tag = tag               # one-line flex insult/compliment
+
+
+def age_summary(created_at, now=None) -> _AgeSummary:
+    """Break a Discord account's creation date into a flex-friendly summary.
+
+    Naive datetimes are assumed UTC (discord.py returns aware ones); a clock
+    skew / future creation degrades gracefully instead of crashing.
+    """
+    created = created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    total_seconds = (now - created).total_seconds()
+    if total_seconds <= 0:
+        return _AgeSummary(0, 0, 0, "0s", "0 seconds",
+                           "literally just created — blink and you'll miss it. 👶")
+
+    days_total = int(total_seconds // 86400)
+    years, rem = divmod(days_total, 365)
+    months, days = divmod(rem, 30)
+
+    compact_parts = []
+    if years:
+        compact_parts.append(f"{years}y")
+    if months:
+        compact_parts.append(f"{months}m")
+    if days:
+        compact_parts.append(f"{days}d")
+    compact = " ".join(compact_parts) or f"{int(total_seconds)}s"
+
+    sentence_parts = []
+    if years:
+        sentence_parts.append(f"{years} year{'s' if years != 1 else ''}")
+    if months:
+        sentence_parts.append(f"{months} month{'s' if months != 1 else ''}")
+    if days and not years:
+        sentence_parts.append(f"{days} day{'s' if days != 1 else ''}")
+    sentence = ", ".join(sentence_parts) or f"{int(total_seconds)} seconds"
+
+    if years >= 9:
+        tag = "this account predates most of the internet — certified ancient. 🦴"
+    elif years >= 6:
+        tag = "a seasoned veteran of the old internet. 🧓"
+    elif years >= 3:
+        tag = "getting properly seasoned. 🌱"
+    elif years >= 1:
+        tag = "a real one. ✅"
+    else:
+        tag = "fresh off the Discord presses! 🍼"
+
+    return _AgeSummary(years, months, days, compact, sentence, tag)
+
+
+def oldest_members(members, limit=10):
+    """Oldest real (non-bot) accounts first; bots and unknown dates excluded."""
+    ranked = [
+        m for m in members
+        if not getattr(m, "bot", False) and getattr(m, "created_at", None) is not None
+    ]
+    ranked.sort(key=lambda m: m.created_at)
+    return ranked[: max(1, min(int(limit), 25))]
 
 
 class Fun(commands.Cog):
@@ -233,6 +312,53 @@ class Fun(commands.Cog):
             f"*Ping: {round(self.bot.latency * 1000)} ms*" if hasattr(self.bot, "latency") else "",
         ]
         await ctx.send("```\n" + "\n".join(lines) + "\n```")
+
+    # ── account age flex ────────────────────────────────────
+    @commands.hybrid_group(
+        name="accountage",
+        description="Flex your Discord account age — or see the server's oldest accounts.")
+    async def accountage(self, ctx, member: discord.Member | None = None):
+        """Your (or someone's) account-age flex card."""
+        await self._accountage_flex(ctx, member or ctx.author)
+
+    @accountage.command(name="leaderboard",
+                        description="The club's oldest Discord accounts.")
+    @commands.cooldown(1, 10, commands.BucketType.channel)
+    async def accountage_leaderboard(self, ctx, limit: int = 10):
+        """Top-N oldest accounts on the server, oldest first."""
+        top = oldest_members(ctx.guild.members, limit)
+        if not top:
+            await ctx.send("📅 Nobody to flex on yet.")
+            return
+        lines = [
+            f"`{i:>2}.` **{m.display_name}** — {age_summary(m.created_at).compact} "
+            f"({m.created_at.strftime('%b %Y')})"
+            for i, m in enumerate(top, start=1)
+        ]
+        embed = discord.Embed(
+            title="👑 Oldest Discord accounts",
+            description="\n".join(lines),
+            color=discord.Color.purple(),
+        )
+        embed.set_footer(text="Age = Discord account creation, not server join")
+        await ctx.send(embed=embed)
+
+    async def _accountage_flex(self, ctx, member: discord.Member) -> None:
+        if getattr(member, "created_at", None) is None:
+            await ctx.send("📅 Couldn't determine that account's creation date.")
+            return
+        summary = age_summary(member.created_at)
+        embed = discord.Embed(
+            title=f"👑 {member.display_name}'s account",
+            description=f"{summary.sentence} old — {summary.tag}",
+            color=discord.Color.purple(),
+        )
+        embed.add_field(
+            name="Account created",
+            value=member.created_at.strftime("%b %d, %Y · %H:%M UTC"),
+        )
+        embed.add_field(name="Age", value=summary.sentence, inline=False)
+        await ctx.send(embed=embed)
 
     # ── robotics quiz ─────────────────────────────────────────
     @commands.hybrid_command(name="quiz", description="A 5-question robotics + engineering quiz.")
