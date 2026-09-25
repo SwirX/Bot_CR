@@ -23,6 +23,10 @@ Identity model
 * ``warnings`` rows (card_type="yellow" — the hub enum, used for warns) —
   one row per warning; ``get_member`` counts them so the flat record keeps
   its legacy ``warnings`` integer.
+* ``meetings`` rows — one per meeting session (voice channel + start/end), and
+  ``meeting_sessions`` rows — one per *join*, so leave-and-return is
+  reconstructable from the hub alone. The channel's pre-meeting permission
+  overwrites live in a ``bot_settings`` sidecar key ``meeting_side:{id}``.
 * freetext Discord-only mirrors that have no hub column (the ``links`` map,
   ``mc_username``, the raw cell label when no department row matches) live in
   a ``bot_settings`` sidecar key ``member_side:{uid}``.
@@ -74,6 +78,8 @@ _T = {
     "polls": "polls",
     "modlog": "modlog",
     "bot_settings": "bot_settings",
+    "meetings": "meetings",
+    "meeting_sessions": "meeting_sessions",
 }
 
 # Defaults used when a discord_data row has to be bootstrapped (REQ columns).
@@ -1644,6 +1650,240 @@ class Store:
                  "discord_user": uid,
                  "minecraft_account": username},
                 defaults={"pair_key": username, "is_active": True})
+
+    # ── Meetings ──────────────────────────────────────────────────────────
+    # A ``meetings`` row is the meeting *session* (one voice channel, one start,
+    # one end). ``meeting_sessions`` rows are the attendance log: **one row per
+    # join**, so a member who leaves and comes back gets two rows with their own
+    # joined_at / left_at pair. Attendance is therefore append-only and the CSV
+    # export is a straight projection of the session rows — no aggregation
+    # state to lose if the bot restarts mid-meeting.
+    #
+    # The channel's pre-meeting permission overwrites are *not* a hub column:
+    # they are a Discord snapshot written to a ``bot_settings`` sidecar key
+    # ``meeting_side.{id}`` (same trick as ``task_cell.{id}``), because the
+    # overwrite list is Discord-shaped and only the bot reads it back.
+    @staticmethod
+    def _meeting_out(row: dict) -> dict:
+        """Hub meeting row -> flat dict the cog works with."""
+        started = _norm_iso(_iso_text(row.get("started_at")))
+        ended = _norm_iso(_iso_text(row.get("ended_at")))
+        return {
+            "id": row["$id"],
+            "title": row.get("title") or "",
+            "channel_id": str(row.get("channel_id") or ""),
+            "channel_name": row.get("channel_name") or "",
+            "scope": str(row.get("scope") or "bureau"),
+            "started_at": started,
+            "planned_minutes": int(row.get("planned_minutes") or 0),
+            "ended_at": ended,
+            "live": bool(row.get("live", ended == "")),
+            "locked": bool(row.get("locked")),
+            # ``expected`` is the audience snapshot taken at /meeting start —
+            # resolved then, not recomputed later, so the absent list still
+            # means something after a member leaves the club.
+            "expected": _from_json(row.get("expected"), []) or [],
+            "visitors": _from_json(row.get("visitors"), []) or [],
+            "granted": _from_json(row.get("granted"), []) or [],
+            "created_by": _rel_id(row.get("created_by")),
+        }
+
+    async def create_meeting(self, payload: dict) -> str:
+        """Create a meeting session row and return its id.
+
+        ``payload`` keys: title, channel_id, channel_name, scope,
+        started_at, planned_minutes, expected, visitors, created_by.
+        """
+        meeting_id = payload.get("id") or ID.unique()
+        started = _to_iso_datetime(payload.get("started_at")) or _now_iso()
+        data = {
+            "title": str(payload.get("title") or "Meeting")[:256],
+            "channel_id": str(payload.get("channel_id") or "")[:36],
+            "channel_name": str(payload.get("channel_name") or "")[:128],
+            "scope": str(payload.get("scope") or "bureau")[:16],
+            "started_at": started,
+            "planned_minutes": int(payload.get("planned_minutes") or 0),
+            "locked": bool(payload.get("locked")),
+            "live": True,
+            "expected": _as_json(payload.get("expected") or []),
+            "visitors": _as_json(payload.get("visitors") or []),
+            "granted": _as_json(payload.get("granted") or []),
+            "source": "bot",
+        }
+        # created_by is an FK to members, which may not exist for an admin who
+        # never touched their club profile — create the stub first or TablesDB
+        # NULLs the FK on insert.
+        if payload.get("created_by"):
+            await self._ensure_members_row(str(payload["created_by"]))
+            data["created_by"] = str(payload["created_by"])
+        await self._create(_T["meetings"], meeting_id, data)
+        return meeting_id
+
+    async def get_meeting(self, meeting_id: str) -> dict | None:
+        row = await self._get(_T["meetings"], str(meeting_id))
+        return self._meeting_out(row) if row else None
+
+    async def list_meetings(self, limit: int = 25, *,
+                            live: bool | None = None) -> list[dict]:
+        """Meetings newest-first, optionally filtered to live/finished ones."""
+        queries = [Query.order_desc("started_at")]
+        if live is not None:
+            queries.insert(0, Query.equal("live", bool(live)))
+        rows = await self._listed(_T["meetings"], max(1, limit), queries=queries)
+        return [self._meeting_out(r) for r in rows]
+
+    async def get_live_meeting(self) -> dict | None:
+        """The single in-progress meeting, or None.
+
+        Ties are broken by ``started_at`` desc (applied inside ``_listed``) so
+        two accidental starts still resolve to the newest one.
+        """
+        live = await self.list_meetings(1, live=True)
+        return live[0] if live else None
+
+    async def get_live_meeting_for_channel(self, channel_id: int) -> dict | None:
+        """The live meeting running in ``channel_id``, or None.
+
+        The voice-state listener hits this on *every* transition in the guild,
+        so the filter is pushed down to the hub rather than listing all
+        meetings and filtering in Python.
+        """
+        rows = await self._listed(
+            _T["meetings"], 1,
+            queries=[Query.equal("live", True),
+                     Query.equal("channel_id", str(channel_id))])
+        return self._meeting_out(rows[0]) if rows else None
+
+    async def latest_meeting(self) -> dict | None:
+        """Newest meeting of any kind — backs ``/meeting last``."""
+        rows = await self.list_meetings(1)
+        return rows[0] if rows else None
+
+    async def update_meeting(self, meeting_id: str, data: dict) -> None:
+        """Patch the whitelisted, bot-owned columns of a meeting row."""
+        allowed = {"title", "planned_minutes", "locked", "live", "ended_at",
+                   "expected", "visitors", "granted"}
+        patch = {k: v for k, v in (data or {}).items() if k in allowed}
+        if "ended_at" in patch:
+            patch["ended_at"] = _to_iso_datetime(patch["ended_at"]) or _now_iso()
+        for key in ("expected", "visitors", "granted"):
+            if key in patch:
+                patch[key] = _as_json(patch[key])
+        if not patch:
+            return
+        await self._patch(_T["meetings"], str(meeting_id), patch)
+
+    async def end_meeting(self, meeting_id: str, *, at=None) -> None:
+        """Stamp ``ended_at`` and flip ``live`` off in one patch."""
+        await self.update_meeting(meeting_id, {
+            "ended_at": _iso_text(at) or _now_iso(), "live": False,
+        })
+
+    async def set_meeting_locked(self, meeting_id: str, locked: bool) -> None:
+        await self.update_meeting(meeting_id, {"locked": bool(locked)})
+
+    async def grant_meeting_reentry(self, meeting_id: str, discord_id: int) -> None:
+        """Record that an admin let ``discord_id`` back into a locked meeting."""
+        meeting = await self.get_meeting(meeting_id)
+        if meeting is None:
+            raise StoreError(f"unknown meeting {meeting_id}")
+        granted = [str(g) for g in meeting["granted"]]
+        uid = str(discord_id)
+        if uid not in granted:
+            granted.append(uid)
+        await self.update_meeting(meeting_id, {"granted": granted})
+
+    # ── Meeting attendance ────────────────────────────────────────────────
+    @staticmethod
+    def _session_out(row: dict) -> dict:
+        return {
+            "id": row["$id"],
+            "meeting": _rel_id(row.get("meeting")),
+            "discord_user": str(row.get("discord_user") or ""),
+            "display_name": row.get("display_name") or "",
+            # How the attendee qualified for this meeting: bureau / cells / all /
+            # visitor (explicitly tagged) — drives the per-group rollup.
+            "scope_note": str(row.get("scope_note") or ""),
+            "joined_at": _norm_iso(_iso_text(row.get("joined_at"))),
+            "left_at": _norm_iso(_iso_text(row.get("left_at"))),
+            "open": bool(row.get("open", not row.get("left_at"))),
+        }
+
+    async def record_meeting_join(self, meeting_id: str, discord_id: int,
+                                  display_name: str = "", *,
+                                  scope_note: str = "",
+                                  admitted_by: int | None = None) -> str:
+        """Open an attendance row for a join; returns the new row id.
+
+        Append-only on purpose: one row per join is what makes "left, then came
+        back 20 minutes later" reconstructable without any in-memory state.
+        """
+        data = {
+            "discord_user": str(discord_id)[:36],
+            "display_name": str(display_name or "")[:128],
+            "scope_note": str(scope_note or "")[:16],
+            "joined_at": _now_iso(),
+            "open": True,
+            "meeting": str(meeting_id),
+        }
+        if admitted_by:
+            await self._ensure_members_row(str(admitted_by))
+            data["admitted_by"] = str(admitted_by)
+        # Best-effort club FK: an unlinked Discord account has no members row,
+        # and ``member`` is nullable, so a miss is fine.
+        try:
+            link = await self.discord_member_link(discord_id)
+        except StoreError:
+            link = None
+        if link and link.get("member"):
+            data["member"] = _rel_id(link.get("member"))
+        row_id = await self._create(_T["meeting_sessions"], ID.unique(), data)
+        return row_id
+
+    async def close_meeting_session(self, meeting_id: str, discord_id: int,
+                                    *, at=None) -> bool:
+        """Stamp ``left_at`` on the attendee's open row; True if one was open.
+
+        Guarded on ``open=True`` so a duplicate voice event can't close an
+        already-closed row and shorten someone's recorded attendance.
+        """
+        rows = await self._listed(
+            _T["meeting_sessions"], 1,
+            queries=[Query.equal("meeting", str(meeting_id)),
+                     Query.equal("discord_user", str(discord_id)),
+                     Query.equal("open", True)])
+        if not rows:
+            return False
+        await self._patch(_T["meeting_sessions"], rows[0]["$id"], {
+            "left_at": _to_iso_datetime(at) or _now_iso(), "open": False,
+        })
+        return True
+
+    async def list_meeting_sessions(self, meeting_id: str, *,
+                                    open_only: bool = False) -> list[dict]:
+        """Attendance rows for one meeting, oldest join first."""
+        queries = [Query.equal("meeting", str(meeting_id)),
+                   Query.order_asc("joined_at")]
+        if open_only:
+            queries.append(Query.equal("open", True))
+        rows = await self._listed(_T["meeting_sessions"], 500, queries=queries)
+        return [self._session_out(r) for r in rows]
+
+    # ── Meeting channel-permission snapshot (bot_settings sidecar) ────────
+    async def save_meeting_channel_state(self, meeting_id: str,
+                                         snapshot: dict) -> None:
+        """Persist the channel's pre-meeting overwrites for ``/meeting end``."""
+        await self.set_setting(f"meeting_side.{meeting_id}",
+                               _as_json(snapshot or {}))
+
+    async def meeting_channel_state(self, meeting_id: str) -> dict:
+        """The pre-meeting overwrite snapshot, or ``{}`` when unavailable."""
+        try:
+            raw = await self.get_setting(f"meeting_side.{meeting_id}")
+        except StoreError:
+            return {}
+        side = _from_json(raw, {})
+        return side if isinstance(side, dict) else {}
 
 
 store = Store()
