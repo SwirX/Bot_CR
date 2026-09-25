@@ -33,7 +33,7 @@ EXPECTED_COMMANDS = {
     "hug", "joke", "kick", "language", "leaderboard", "levelrewards", "link", "linkmc", "linkmember", "list", "lock", "loop", "lyrics",
     "mc", "mclink", "mcrestart", "mcsession", "mcstart", "mcstop", "meeting", "meme", "minecraft", "modlog", "mute", "notifications", "nowplaying",
     "online_members", "overdue", "pause", "ping", "play", "poll", "profile", "queue",
-    "quiz", "quote", "rank", "removerole", "resume", "results", "reverse", "roast",
+    "quiz", "quote", "rank", "remind", "removerole", "resume", "results", "reverse", "roast",
     "robot", "roles", "rps", "set", "setlead", "setprofile", "settings", "ship", "skip",
     "slap", "slowmode", "spacex", "stop", "task", "tasks", "timeout", "today",
     "total_messages", "total_voice_time", "unban", "unlink", "unlinkmember", "unlock", "unmute",

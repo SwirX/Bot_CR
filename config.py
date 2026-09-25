@@ -91,6 +91,8 @@ LEADER_ROLES = [s.strip() for s in _env(
 
 # ── Behaviour ──────────────────────────────────────────────────────────
 DASHBOARD_REFRESH_SECONDS = _env("DASHBOARD_REFRESH_SECONDS", 60, cast=int)
+# How often the reminder scheduler wakes up to deliver due DMs (seconds).
+REMINDER_POLL_SECONDS = _env("REMINDER_POLL_SECONDS", 30, cast=int)
 XP_COOLDOWN_SECONDS = _env("XP_COOLDOWN_SECONDS", 60, cast=int)
 XP_MIN = _env("XP_MIN", 4, cast=int)
 XP_MAX = _env("XP_MAX", 12, cast=int)
