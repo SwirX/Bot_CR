@@ -37,7 +37,7 @@ _DECORATION = re.compile(
     "「」『』\\[\\]()|·・\\-_~*"
     "\U00002500-\U0000257f"               # box drawing (the club's role dividers)
     "\U00002300-\U000023ff"               # ⎝ ⎠ misc technical, used in dividers
-    "]+|\s+"
+    r"]+|\s+"
 )
 
 # Roles that are never meeting audience, matched on **word boundaries**. A plain
