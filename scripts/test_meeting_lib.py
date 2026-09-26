@@ -271,6 +271,15 @@ def main() -> int:
     check("Mgr closed out", total["1"]["in_channel"], False)
     check("Cell still in channel", total["2"]["in_channel"], True)
     check("Cell visits", total["2"]["visits"], 1)
+    # For a *running* meeting an open row measures to now, which is what
+    # makes a live report useful. For a *finished* one it must measure to the
+    # meeting's end -- otherwise a report read a week later credits a week of
+    # presence to whoever never left the row open.
+    finished = ml.rollup(sessions, ended_at=iso(minutes=90))
+    check("a finished meeting clamps the open row to its end (joined +5, ended +90)",
+          finished["2"]["time_present"], 85 * 60)
+    check("the closed rows are unaffected by the clamp",
+          finished["1"]["time_present"], 2400)
     check("Mgr first_join", total["1"]["first_join"], iso(minutes=0))
     check("Mgr last_join", total["1"]["last_join"], iso(minutes=50))
 
@@ -321,6 +330,146 @@ def main() -> int:
     check("minutes", ml.format_duration(125), "2m 05s")
     check("hours", ml.format_duration(3900), "1h 05m")
     check("negative clamps", ml.format_duration(-5), "0s")
+
+    # ── presentation ────────────────────────────────────────────
+    print("\nfriendly_time() renders absolute UTC, never relative")
+    check("ISO offset normalised to UTC",
+          ml.friendly_time("2026-09-25T20:00:00+02:00"), "2026-09-25 18:00 UTC")
+    check("naive ISO is treated as UTC",
+          ml.friendly_time("2026-09-25T18:00:00"), "2026-09-25 18:00 UTC")
+    check("missing timestamp", ml.friendly_time(""), "—")
+    check("garbage timestamp", ml.friendly_time("not-a-date"), "—")
+
+    print("\nmeeting_length() prefers actual over planned")
+    live = {"started_at": iso(), "ended_at": "", "live": True,
+            "planned_minutes": 60}
+    check("a running meeting says so", ml.meeting_length(live), "in progress")
+    check("no end and no plan", ml.meeting_length({"started_at": iso()}),
+          "—")
+    check("no end but planned",
+          ml.meeting_length({"started_at": iso(), "planned_minutes": 45}),
+          "45 min planned")
+    check("ended 90 min later",
+          ml.meeting_length({"started_at": iso(),
+                             "ended_at": iso(minutes=90)}), "1h 30m")
+
+    print("\ncsv_filename() is sortable and filesystem-safe")
+    check("name derives from the start time",
+          ml.csv_filename({"started_at": iso(), "title": "Bureau meeting"}),
+          "meeting-2026-09-25-1800-bureau-meeting.csv")
+    check("punctuation in the title is stripped",
+          ml.csv_filename({"started_at": iso(), "title": "Q3 /  Budget!"}),
+          "meeting-2026-09-25-1800-q3-budget.csv")
+    check("a missing title still yields a name",
+          ml.csv_filename({"started_at": iso()}).endswith(".csv"), True)
+
+    print("\ncsv_file() is an uploadable File with the rows in it")
+    f = ml.csv_file(meeting, sessions, totals=total,
+                    absentees_list=ml.absentee_ids(meeting, sessions))
+    check("is a discord.File", isinstance(f, discord.File), True)
+    check("filename matches csv_filename()", f.filename,
+          ml.csv_filename(meeting))
+    # aiohttp's FormData reads fp as binary; a text stream would only fail here.
+    check("fp is binary, as aiohttp requires", isinstance(f.fp.read(), bytes),
+          True)
+    f.fp.seek(0)
+    payload = f.fp.read()
+    check("seekable and non-empty, so File.reset() works on a retry",
+          (f.fp.seekable(), payload != b""), (True, True))
+    body = payload.decode()
+    check("header survived the upload path", "discord_id," in body, True)
+    check("non-ASCII display names survive the encode",
+          "ümlaut" in ml.csv_file(meeting, [
+              {"discord_user": "1", "display_name": "ümlaut",
+               "joined_at": iso(), "left_at": ""}]).fp.read().decode(),
+          True)
+
+    print("\nstats_embed() answers when / where / how many")
+    # `meeting` has ended_at, so roll up against it rather than against the
+    # wall clock -- otherwise the still-open row dominates the presence total.
+    finished_total = ml.rollup(sessions, ended_at=meeting["ended_at"])
+    stats = ml.stats_embed(meeting, finished_total, ["3"])
+    fields = {f.name: f.value for f in stats.fields}
+    check("title is emoji-led", stats.title.startswith("📊"), True)
+    check("navigable pages are blurple", stats.color, ml.BLURPLE)
+    check("when field names the start", "2026-09-25 18:00 UTC" in fields["🗓️ When"], True)
+    check("where field names the channel",
+          "<#1336692513460977746>" in fields["📍 Where"], True)
+    check("where field names the audience", "Bureau" in fields["📍 Where"], True)
+    check("headcount is stated", "**2**" in fields["👥 Attendance"], True)
+    # Mgr 30m + 10m = 40m, Cell +5 to the meeting's end at +60 = 55m. Total 95m.
+    check("time present is stated", "1h 35m" in fields["👥 Attendance"], True)
+    check("visits counted across rejoins", "3 visit(s)" in fields["👥 Attendance"], True)
+    check("attendance rows are listed by mention",
+          "<@1>" in fields["📋 Who was there"], True)
+    check("footer is lowercase per convention",
+          stats.footer.text == stats.footer.text.lower(), True)
+
+    print("\nstats_embed() survives a meeting nobody joined")
+    empty = ml.stats_embed(meeting, {}, ["1", "2"])
+    empty_fields = {f.name: f.value for f in empty.fields}
+    check("headcount is zero", "**0**" in empty_fields["👥 Attendance"], True)
+    check("says so plainly", "Nobody joined" in empty_fields["📋 Who was there"], True)
+
+    print("\nstats_embed() notes a lockout, and one meeting only")
+    locked = ml.stats_embed({**meeting, "locked": True, "granted": ["1"]},
+                            ml.rollup(sessions, granted=["1"]), [])
+    check("locked flag is in the footer", "locked partway" in locked.footer.text, True)
+    check("readmitted member is flagged in the list",
+          "🔑" in {f.name: f.value for f in locked.fields}["📋 Who was there"], True)
+    check("readmitted count is stated",
+          "1 readmitted" in {f.name: f.value for f in locked.fields}["👥 Attendance"], True)
+    many = ml.rollup([{"discord_user": str(100 + i), "display_name": f"M{i}",
+                       "joined_at": iso(), "left_at": iso(minutes=1)}
+                      for i in range(20)])
+    check("a 20-member meeting truncates the visible list",
+          "more (see the CSV)" in {f.name: f.value
+                                   for f in ml.stats_embed(meeting, many, []).fields}["📋 Who was there"],
+          True)
+    check("truncation stays inside Discord's 4096-char embed limit",
+          len(ml.stats_embed(meeting, many, []).description or "") + sum(
+              len(f.value or "") for f in ml.stats_embed(meeting, many, []).fields)
+          < 4096, True)
+
+    print("\nabsentees_embed() is its own page, not part of the stats page")
+    absent = ml.absentees_embed(meeting, ["3"], {"3": "Third"})
+    check("separate title", absent.title.startswith("🚫 Absent"), True)
+    check("its own colour, so it reads as a different page",
+          absent.color, ml.WARNING)
+    check("names the absent member", "<@3>" in (absent.description or ""), True)
+    check("counts them", "**1**" in (absent.description or ""), True)
+    check("the stats page never lists absentees inline",
+          "<@3>" in "".join(f.value for f in stats.fields), False)
+
+    print("\nabsentees_embed() has a clean state when everyone came")
+    clean = ml.absentees_embed(meeting, [], {})
+    check("no yellow-card prompt", "never joined" in (clean.description or ""), False)
+    check("says everyone turned up", "Everyone who was invited" in clean.description, True)
+    check("no member list to page through", "<@" in clean.description, False)
+
+    print("\nabsentees_embed() truncates a long list instead of overrunning")
+    crowd = ml.absentees_embed(meeting, [str(i) for i in range(40)], {})
+    check("keeps the first 25", crowd.description.count("<@") , 25)
+    check("says how many were dropped", "and 15 more" in crowd.description, True)
+    check("stays inside the embed limit", len(crowd.description) < 4096, True)
+
+    print("\nattended_count() is the complement of the absent list")
+    check("one absent of three", ml.attended_count(meeting, ["3"]), 2)
+    check("clamped at zero for an empty audience",
+          ml.attended_count({"expected": []}, ["1"]), 0)
+
+    print("\nlist_embed() frames the dropdown")
+    recent = [meeting, {**meeting, "id": "m0", "live": True, "ended_at": "",
+                        "locked": True}]
+    pick = ml.list_embed(recent, live_id="m0")
+    check("emoji-led title", pick.title.startswith("📚"), True)
+    check("counts what is on record", "**2** meeting(s)" in pick.description, True)
+    body = {f.name: f.value for f in pick.fields}["Recent"]
+    check("live meeting is flagged", "🔴 running" in body, True)
+    check("locked meeting is flagged", "🔒 locked" in body, True)
+    check("points at the dropdown", "dropdown" in pick.footer.text, True)
+    check("no meetings yet is not an error page",
+          "No meetings recorded yet" in ml.list_embed([]).description, True)
 
     if failures:
         print(f"\n✗ {len(failures)} FAILURE(S)")

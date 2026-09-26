@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import datetime, timezone
 
 import discord
@@ -305,11 +306,20 @@ def _parse(iso: str) -> datetime | None:
         return None
 
 
-def _dur_seconds(start: str, end: str) -> int:
+def _dur_seconds(start: str, end: str, until: datetime | None = None) -> int:
+    """Seconds between two ISO stamps, clamped at ``until``.
+
+    An unclosed session is measured against ``until`` when one is given and
+    against *now* only as a last resort. That distinction matters: a report run
+    days after a meeting would otherwise credit an attendee with weeks of
+    presence, because the row is still ``open`` in the log if nobody closed it.
+    """
     a, b = _parse(start), _parse(end or "")
     if a is None:
         return 0
-    return max(0, int(((b or datetime.now(timezone.utc)) - a).total_seconds()))
+    if b is None:
+        b = until or datetime.now(timezone.utc)
+    return max(0, int((b - a).total_seconds()))
 
 
 def rollup(sessions: list[dict], *, ended_at: str = "",
@@ -320,11 +330,15 @@ def rollup(sessions: list[dict], *, ended_at: str = "",
     entry for the same member. Totals are ``time_present`` (sum of the
     intervals), ``visits`` (join count) and ``first_join``/``last_join``.
 
+    ``ended_at`` is both the clamp for still-open sessions and the signal to
+    stop reporting anyone as ``in_channel``.
+
     ``admitted`` is set for anyone in ``granted`` (the members an admin let back
     in after a lockout) who actually turned up — that's the flag the report uses
     to show "was let back in" separately from "was here the whole time".
     """
     readmitted = {str(uid) for uid in (granted or [])}
+    until = _parse(ended_at or "")
     out: dict[str, dict] = {}
     for row in sessions or []:
         uid = str(row.get("discord_user") or "")
@@ -343,7 +357,8 @@ def rollup(sessions: list[dict], *, ended_at: str = "",
         })
         entry["visits"] += 1
         entry["time_present"] += _dur_seconds(row.get("joined_at") or "",
-                                              row.get("left_at") or "")
+                                              row.get("left_at") or "",
+                                              until=until)
         entry["last_join"] = row.get("joined_at") or entry["last_join"]
         if row.get("left_at"):
             entry["in_channel"] = False
@@ -420,6 +435,215 @@ def format_duration(seconds: int) -> str:
     return f"{secs}s"
 
 
+# ── presentation ────────────────────────────────────────────────────────
+# Embed colours follow the bot's convention: blurple for a page you can
+# navigate away from, amber for a warning, grey for an empty result.
+BLURPLE = discord.Color.blurple()
+# "orange" rather than "amber" or "yellow": the absentee page is a warning, but
+# a saturated yellow embed is unreadable with the default light-theme text.
+WARNING = discord.Color.orange()
+MUTED = discord.Color.greyple()
+SUCCESS = discord.Color.green()
+
+
+def friendly_time(iso: str, *, ended_at: str = "") -> str:
+    """``2026-09-25T18:00:00+00:00`` -> ``2026-09-25 18:00 UTC``.
+
+    Deliberately absolute and UTC rather than a relative "2 hours ago": a
+    meeting log is read weeks later, and a relative timestamp on an archived
+    record is meaningless. The store keeps ISO-8601 with an offset, so the
+    rendered value can differ from the raw column by an hour depending on the
+    server's timezone setting.
+    """
+    parsed = _parse(iso or "")
+    if parsed is None:
+        return "—"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def meeting_length(meeting: dict) -> str:
+    """Actual elapsed time of a meeting, or the planned length if it ran on."""
+    start, end = _parse(meeting.get("started_at") or ""), _parse(
+        meeting.get("ended_at") or "")
+    if start is None:
+        return "—"
+    if end is None:
+        if meeting.get("live"):
+            return "in progress"
+        planned = meeting.get("planned_minutes")
+        return f"{planned} min planned" if planned else "—"
+    return format_duration(int((end - start).total_seconds()))
+
+
+def stats_embed(meeting: dict, totals: dict[str, dict],
+                absent: list[str]) -> discord.Embed:
+    """The meeting's main stats page.
+
+    Carries the four things the club asks for -- when, where, how many, and the
+    per-member attendance -- plus the two buttons' destinations. The absent list
+    itself is deliberately *not* on this page; it is one button away, so a long
+    absentee list can't push the attendance table off the embed's 4096-char
+    limit.
+    """
+    attended = len(totals)
+    expected = len(meeting.get("expected") or [])
+    total_seconds = sum(e["time_present"] for e in totals.values())
+    reads = sum(e["visits"] for e in totals.values())
+    readmitted = sum(1 for e in totals.values() if e["admitted"])
+
+    embed = discord.Embed(
+        title=f"📊 {meeting.get('title') or 'Meeting'}",
+        color=BLURPLE,
+    )
+    where = (f"<#{meeting['channel_id']}>" if meeting.get("channel_id")
+             else "a now-deleted channel")
+    embed.add_field(name="🗓️ When", value=(
+        f"Started {friendly_time(meeting.get('started_at'))}\n"
+        f"Length **{meeting_length(meeting)}**"
+        + (f" · planned {meeting['planned_minutes']} min"
+           if meeting.get("planned_minutes") else "")), inline=False)
+    embed.add_field(name="📍 Where", value=(
+        f"{where}\nAudience **{scope_label(meeting.get('scope') or '')}**"),
+        inline=False)
+    summary = (f"**{attended}** of {expected} invited"
+               if expected else f"**{attended}** attended")
+    embed.add_field(name="👥 Attendance", value=(
+        f"{summary} · {format_duration(total_seconds)} of presence · "
+        f"{reads} visit(s)"
+        + (f"\n{readmitted} readmitted after a lockout" if readmitted else "")),
+        inline=False)
+
+    # Top attendees first; the full list is in the CSV the button exports.
+    ranked = sorted(totals.values(),
+                    key=lambda e: (-e["time_present"], e["display_name"].lower()))
+    if ranked:
+        lines = []
+        for entry in ranked[:12]:
+            flag = " 🔑" if entry["admitted"] else ""
+            visits = f" · {entry['visits']}×" if entry["visits"] > 1 else ""
+            lines.append(
+                f"<@{entry['discord_user']}> — "
+                f"{format_duration(entry['time_present'])}{visits}{flag}")
+        if len(ranked) > 12:
+            lines.append(f"…and {len(ranked) - 12} more (see the CSV)")
+        embed.add_field(name="📋 Who was there", value="\n".join(lines),
+                        inline=False)
+    else:
+        embed.add_field(name="📋 Who was there",
+                        value="_Nobody joined the channel._", inline=False)
+
+    # Lowercase throughout: the bot's footers read as captions, not sentences.
+    footer = "the csv button has every join and leave with exact timestamps"
+    if meeting.get("locked"):
+        footer = "🔒 this meeting was locked partway through · " + footer
+    embed.set_footer(text=footer)
+    return embed
+
+
+def absentees_embed(meeting: dict, absent: list[str],
+                    names: dict[str, str]) -> discord.Embed:
+    """The absentee page: who was invited and never turned up.
+
+    Kept separate from :func:`stats_embed` on purpose -- a bureau meeting with
+    three absentees and an "all members" meeting with forty are very different
+    densities of list, and one yellow-card button per absentee only makes sense
+    once the reader has decided they care about this page.
+    """
+    invited = len(meeting.get("expected") or [])
+    present = attended_count(meeting, absent)
+    embed = discord.Embed(
+        title=f"🚫 Absent — {meeting.get('title') or 'Meeting'}",
+        color=WARNING,
+    )
+    if not absent:
+        embed.description = (
+            f"Everyone who was invited turned up — **{present}** of "
+            f"**{invited}** attended "
+            f"{friendly_time(meeting.get('started_at'))}.")
+        embed.set_footer(text="no yellow cards needed")
+        return embed
+
+    lines = [f"<@{uid}>" + (f" — {names[uid]}" if names.get(uid) else "")
+             for uid in absent]
+    embed.description = (
+        f"**{len(absent)}** of **{invited}** invited members never joined "
+        f"{friendly_time(meeting.get('started_at'))}.\n\n"
+        + "\n".join(lines[:25])
+        + (f"\n…and {len(lines) - 25} more" if len(lines) > 25 else ""))
+    embed.set_footer(text=(
+        "a yellow card records the absence on their profile — "
+        "use ◀️ to go back"))
+    return embed
+
+
+def attended_count(meeting: dict, absent: list[str]) -> int:
+    """How many of the invited audience actually showed up."""
+    return max(0, len(meeting.get("expected") or []) - len(absent))
+
+
+def list_embed(meetings: list[dict], *, live_id: str | None = None) -> discord.Embed:
+    """The ``/meeting list`` picker page.
+
+    The dropdown itself does the selecting, so this is the context around it:
+    how many meetings are on record and what the newest one was.
+    """
+    embed = discord.Embed(title="📚 Meeting history", color=BLURPLE)
+    if not meetings:
+        embed.description = ("No meetings recorded yet. Start one with "
+                             "`/meeting start`.")
+        return embed
+    newest = meetings[0]
+    embed.description = (
+        f"**{len(meetings)}** meeting(s) on record. Newest: "
+        f"**{newest.get('title') or '—'}** on "
+        f"{friendly_time(newest.get('started_at'))}.")
+    lines = []
+    for m in meetings[:10]:
+        flags = []
+        if m.get("live"):
+            flags.append("🔴 running")
+        if m.get("locked"):
+            flags.append("🔒 locked")
+        lines.append(
+            f"`{friendly_time(m.get('started_at'))}` — "
+            f"{m.get('title') or '—'} · {meeting_length(m)}"
+            + (f" · {' '.join(flags)}" if flags else ""))
+    if len(meetings) > 10:
+        lines.append(f"…and {len(meetings) - 10} older ones in the dropdown")
+    embed.add_field(name="Recent", value="\n".join(lines), inline=False)
+    embed.set_footer(text="pick a meeting from the dropdown to see its report")
+    return embed
+
+
+def csv_filename(meeting: dict) -> str:
+    """A stable, sortable attachment name: ``meeting-2026-09-25-1800-bureau.csv``."""
+    stamp = (_parse(meeting.get("started_at") or "")
+             or datetime(1970, 1, 1, tzinfo=timezone.utc))
+    slug = re.sub(r"[^a-z0-9]+", "-", (meeting.get("title") or "meeting").lower())
+    return (f"meeting-{stamp.strftime('%Y-%m-%d-%H%M')}-"
+            f"{slug.strip('-') or 'meeting'}.csv")
+
+
+def csv_file(meeting: dict, sessions: list[dict], *,
+             totals: dict[str, dict] | None = None,
+             absentees_list: list[str] | None = None) -> discord.File:
+    """:func:`attendance_csv` wrapped as an uploadable :class:`discord.File`.
+
+    The text buffer is encoded into a ``BytesIO`` rather than passed through.
+    ``discord.File`` hands ``fp`` straight to aiohttp's ``FormData``, which
+    reads it as *binary*; a ``StringIO`` returns ``str`` from ``read()`` and the
+    upload fails at send time with a ``TypeError`` rather than at construction,
+    which is the worst place to find out. ``BytesIO`` is also seekable with a
+    known length, so ``File.reset()`` works when a send is retried.
+    """
+    buf = attendance_csv(meeting, sessions, totals=totals,
+                         absentees_list=absentees_list)
+    return discord.File(io.BytesIO(buf.getvalue().encode("utf-8")),
+                        filename=csv_filename(meeting))
+
+
 def attendance_csv(meeting: dict, sessions: list[dict], *,
                    totals: dict[str, dict] | None = None,
                    absentees_list: list[str] | None = None) -> io.StringIO:
@@ -446,6 +670,9 @@ def attendance_csv(meeting: dict, sessions: list[dict], *,
 
     writer.writerow(["discord_id", "display_name", "scope", "joined_at",
                      "left_at", "minutes_present"])
+    # Same clamp as rollup(): an unclosed row in a finished meeting is measured
+    # to the meeting's end, not to whenever the export happens to run.
+    until = _parse(meeting.get("ended_at") or "")
     for row in sessions or []:
         writer.writerow([
             row.get("discord_user") or "",
@@ -454,7 +681,7 @@ def attendance_csv(meeting: dict, sessions: list[dict], *,
             row.get("joined_at") or "",
             row.get("left_at") or "",
             round(_dur_seconds(row.get("joined_at") or "",
-                               row.get("left_at") or "") / 60, 2),
+                               row.get("left_at") or "", until=until) / 60, 2),
         ])
     writer.writerow([])
 

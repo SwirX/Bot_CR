@@ -28,7 +28,8 @@ from discord.ext import commands
 
 import config
 from cogs import _meetings as meetlib
-from cogs._perms import require_meeting_admin
+from cogs._perms import is_meeting_admin, require_meeting_admin
+from cogs._ui import OwnerView, close_panel, select_value
 from data.store import store
 from data.store import StoreError
 
@@ -37,9 +38,347 @@ LOG = logging.getLogger("bot.meetings")
 SETTINGS_KEY = "meetings"
 MAX_MEMBERS = 15  # sane cap on tagged members per private room
 
+# Rows the absentee card grid may occupy. Discord allows five buttons per row
+# and 25 components per view, so two rows leaves room for the pager and the
+# back/close pair below them.
+_CARD_ROWS = 2
+
+
+class MeetingListView(OwnerView, discord.ui.View):
+    """``/meeting list``: a dropdown over meeting ids that opens the report.
+
+    The dropdown carries up to :data:`config.MEETING_MAX_PICKER_OPTIONS`
+    entries because Discord rejects an app command with more than 25 options
+    and silently breaks the whole command if you try.
+    """
+
+    def __init__(self, cog: "Meetings", meetings: list[dict], *,
+                 user: discord.abc.User, timeout: float = 300.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.meetings = cog, meetings
+        self.user_id = user.id
+        self.embed = meetlib.list_embed(meetings)
+        self.by_id = {str(m["id"]): m for m in meetings}
+
+        limit = max(1, config.MEETING_MAX_PICKER_OPTIONS)
+        options = []
+        for m in meetings[:limit]:
+            when = meetlib.friendly_time(m.get("started_at"))
+            flags = "🔴 " if m.get("live") else ""
+            flags += "🔒 " if m.get("locked") else ""
+            options.append(discord.SelectOption(
+                value=str(m["id"]),
+                label=f"{flags}{m.get('title') or 'Meeting'}"[:100],
+                description=f"{when} · {meetlib.meeting_length(m)}"[:100],
+            ))
+        picker = discord.ui.Select(
+            placeholder="🔎 Pick a meeting to see its attendance…",
+            min_values=1, max_values=1, options=options, row=0)
+        picker.callback = self._on_pick
+        self.add_item(picker)
+
+    def _owner_deny_message(self, _interaction) -> str:
+        return ("🔒 This list belongs to the command author — run "
+                "`/meeting list` yourself to use it.")
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        if not await self._owned(interaction):
+            return
+        meeting = self.by_id.get(select_value(interaction))
+        if meeting is None:
+            # The row is gone from the hub between the panel being sent and the
+            # pick -- a deleted meeting, not a broken command.
+            await interaction.response.send_message(
+                "⚠️ That meeting is no longer on record.", ephemeral=True)
+            return
+        view = MeetingStatsView(self.cog, meeting, user=interaction.user,
+                                back=self)
+        embed, view = await view.interaction_setup()
+        try:
+            await interaction.response.edit_message(embed=embed, view=view)
+        except discord.HTTPException as exc:
+            LOG.error("Meetings: report drill-down failed: %s", exc)
+
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction,
+                    _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        await close_panel(interaction, text="✖️ closed.")
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+class MeetingStatsView(OwnerView, discord.ui.View):
+    """The report hub: stats, the CSV, and the way to the absentee page.
+
+    Owner-scoped, like the other panels in the bot — a meeting report names
+    absentees and invites yellow cards, so it should not be a shared panel in a
+    public channel. :attr:`return_to` is set by ``/meeting list`` so the back
+    button lands on the picker instead of closing.
+    """
+
+    def __init__(self, cog: "Meetings", meeting: dict, *,
+                 user: discord.abc.User, back: discord.ui.View | None = None,
+                 timeout: float = 300.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.meeting = cog, meeting
+        self.user_id = user.id
+        self.return_to = back
+        self.absent_button.label = "🚫 Absentees (0)"
+
+    def _owner_deny_message(self, _interaction) -> str:
+        return ("🔒 This report belongs to the command author — run "
+                "`/meeting last` yourself to see it.")
+
+    async def interaction_setup(self) -> tuple[discord.Embed, "MeetingStatsView"]:
+        """Build the stats page and size the absentee button from real data."""
+        meeting = self.meeting
+        sessions = await self.cog._sessions(meeting["id"])
+        totals = meetlib.rollup(sessions, ended_at=meeting.get("ended_at") or "",
+                                granted=meeting.get("granted") or [])
+        absent = meetlib.absentee_ids(meeting, sessions)
+        self.absent_button.label = f"🚫 Absentees ({len(absent)})"
+        # Nobody absent means there is nothing on the page to act on.
+        self.absent_button.disabled = not absent
+        return meetlib.stats_embed(meeting, totals, absent), self
+
+    @discord.ui.button(emoji="📄", style=discord.ButtonStyle.primary,
+                       label="Attendance CSV")
+    async def csv_button(self, interaction: discord.Interaction,
+                         _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        meeting = self.meeting
+        sessions = await self.cog._sessions(meeting["id"])
+        totals = meetlib.rollup(sessions, ended_at=meeting.get("ended_at") or "",
+                                granted=meeting.get("granted") or [])
+        absent = meetlib.absentee_ids(meeting, sessions)
+        attachment = meetlib.csv_file(meeting, sessions, totals=totals,
+                                      absentees_list=absent)
+        try:
+            await interaction.response.send_message(
+                f"📄 Attendance CSV for **{meeting.get('title') or 'the meeting'}** "
+                f"— one row per join, plus per-member totals.",
+                file=attachment, ephemeral=True)
+        except discord.HTTPException as exc:
+            LOG.error("Meetings: CSV send failed for %s: %s", meeting["id"], exc)
+            await self._notify(interaction, f"⚠️ Couldn't build the CSV: {exc}")
+
+    @discord.ui.button(emoji="🚫", style=discord.ButtonStyle.secondary,
+                       label="🚫 Absentees (0)")
+    async def absent_button(self, interaction: discord.Interaction,
+                            _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        # A separate page on purpose: the yellow-card buttons are one per
+        # absentee and don't fit alongside the stats embed.
+        view = MeetingAbsenteesView(self.cog, self.meeting,
+                                    user=interaction.user, back=self)
+        embed = await self.cog._absentees_embed(self.meeting, view)
+        try:
+            await interaction.response.edit_message(embed=embed, view=view)
+        except discord.HTTPException as exc:
+            LOG.error("Meetings: absentee page failed: %s", exc)
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        if self.return_to is None:
+            await self._notify(interaction, "↩️ Use `/meeting list` to pick a meeting.")
+            return
+        try:
+            await interaction.response.edit_message(
+                embed=self.return_to.embed, view=self.return_to)
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction,
+                    _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        await close_panel(interaction, text="✖️ closed.")
+
+    async def _notify(self, interaction: discord.Interaction, text: str) -> None:
+        """Ephemeral notice for a failure that must not replace the page."""
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+class MeetingAbsenteesView(OwnerView, discord.ui.View):
+    """The absentee page: one 🟨 yellow-card button per expected-but-absent member.
+
+    Paged at :data:`config.MEETING_ABSENTEE_PAGE_SIZE` because a club-wide
+    meeting can have forty absentees and Discord allows five buttons per row.
+    Issuance goes through the same ``warnings`` write as ``/warn``, so a card
+    issued here and one issued by hand are the same record and both show up on
+    the member's profile.
+    """
+
+    def __init__(self, cog: "Meetings", meeting: dict, *,
+                 user: discord.abc.User, back: MeetingStatsView,
+                 timeout: float = 300.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.meeting, self.stats_view = cog, meeting, back
+        self.user_id = user.id
+        self.page = 0
+        self.page_size = min(max(1, config.MEETING_ABSENTEE_PAGE_SIZE),
+                             _CARD_ROWS * 5)
+        self.issued: set[int] = set()
+        self._grid: list[discord.ui.Button] = []
+
+    def _owner_deny_message(self, _interaction) -> str:
+        return ("🔒 This list belongs to the command author — run "
+                "`/meeting last` yourself to use it.")
+
+    def build_grid(self, uids: list[str], names: dict[str, str]) -> None:
+        """(Re)build the card buttons for the current page.
+
+        Rows are explicit rather than left to discord.py's auto-placement:
+        auto-placement packs five per row silently and only raises once the view
+        exceeds 25 items, so a 10-card page plus 5 navigation buttons sits
+        exactly on that ceiling and a slightly larger page fails at send time
+        instead of here. Assigning ``row = i // 5`` keeps the cards above the
+        pager rows no matter how the page size is configured.
+
+        ``MEETING_ABSENTEE_PAGE_SIZE`` is clamped to :data:`_CARD_ROWS * 5` so a
+        misconfigured value degrades to fewer absentees per page rather than to
+        a command that fails to send.
+        """
+        for button in self._grid:
+            self.remove_item(button)
+        self._grid = []
+
+        size = min(max(1, config.MEETING_ABSENTEE_PAGE_SIZE), _CARD_ROWS * 5)
+        self.page_size = size
+        start = self.page * size
+        for offset, uid in enumerate(uids[start:start + size]):
+            label = (names.get(uid) or f"Member {uid}")[:80]
+            button = discord.ui.Button(
+                style=discord.ButtonStyle.danger,
+                label=f"🟨 {label}"[:80],
+                disabled=int(uid) in self.issued,
+                custom_id=f"card:{uid}",
+                row=offset // 5,
+            )
+            button.callback = self._make_card_callback(int(uid), label)
+            self.add_item(button)
+            self._grid.append(button)
+
+        self._sync_pager(len(uids))
+
+    def _sync_pager(self, total: int) -> None:
+        pages = max(1, -(-total // self.page_size))
+        self.page = min(self.page, pages - 1)
+        self.prev_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= pages - 1
+        self.page_label.label = f"{self.page + 1}/{pages}"
+
+    def _make_card_callback(self, uid: int, label: str):
+        async def callback(interaction: discord.Interaction, button: discord.ui.Button):
+            if not await self._owned(interaction):
+                return
+            issued, error = await self.cog._issue_yellow_card(
+                uid, interaction.user, self.meeting.get("title") or "")
+            if error:
+                await self._ephemeral(interaction, f"⚠️ {error}")
+                return
+            self.issued.add(uid)
+            # Disable just this card rather than re-rendering: the rest of the
+            # page is unchanged and a rebuild would drop the user's scroll.
+            button.disabled = True
+            button.label = f"✅ {label}"[:80]
+            try:
+                await interaction.response.edit_message(view=self)
+            except discord.HTTPException:
+                pass
+            await self._ephemeral(
+                interaction,
+                f"🟨 Yellow card issued to **{label}** for missing "
+                f"**{self.meeting.get('title') or 'the meeting'}**.")
+
+        return callback
+
+    async def _ephemeral(self, interaction: discord.Interaction, text: str) -> None:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=3)
+    async def prev_page(self, interaction: discord.Interaction,
+                        _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        self.page = max(0, self.page - 1)
+        await self._rerender(interaction)
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary, label="1/1",
+                       disabled=True, row=3)
+    async def page_label(self, _interaction: discord.Interaction,
+                         _button: discord.ui.Button):
+        pass
+
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary, row=3)
+    async def next_page(self, interaction: discord.Interaction,
+                        _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        self.page += 1
+        await self._rerender(interaction)
+
+    @discord.ui.button(emoji="📊", style=discord.ButtonStyle.secondary, row=4)
+    async def back(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        """◀️ back to the stats page — the absentee page is a child of it."""
+        if not await self._owned(interaction):
+            return
+        embed, view = await self.stats_view.interaction_setup()
+        try:
+            await interaction.response.edit_message(embed=embed, view=view)
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=4)
+    async def close(self, interaction: discord.Interaction,
+                    _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        await close_panel(interaction, text="✖️ closed.")
+
+    async def _rerender(self, interaction: discord.Interaction) -> None:
+        uids, names = await self.cog._absent_entries(self.meeting)
+        self.build_grid(uids, names)
+        embed = meetlib.absentees_embed(self.meeting, uids, names)
+        try:
+            await interaction.response.edit_message(embed=embed, view=self)
+        except discord.HTTPException:
+            pass
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
 
 class Meetings(commands.Cog):
-    """Private voice rooms that clean themselves up."""
+    """Club meetings with attendance tracking, plus private voice rooms."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -131,6 +470,94 @@ class Meetings(commands.Cog):
             )
 
     # ── tracked-meeting helpers ─────────────────────────────────────
+    async def _sessions(self, meeting_id: str) -> list[dict]:
+        """Attendance rows for a meeting; a read failure reads as empty.
+
+        A report that shows "nobody came" because the hub was unreachable is
+        worse than one that says it could not read the log, so the caller gets
+        an empty list and the command's own warning covers it.
+        """
+        try:
+            return await store.list_meeting_sessions(meeting_id)
+        except StoreError as exc:
+            LOG.error("Meetings: could not read attendance for %s: %s",
+                      meeting_id, exc)
+            return []
+
+    async def _absent_entries(self, meeting: dict) -> tuple[list[str], dict[str, str]]:
+        """``(ids, {id: display_name})`` for the absentee page.
+
+        Names come from the guild where available and fall back to the name
+        recorded on their attendance row, so an absentee who left the server
+        still shows as a name rather than a bare id.
+        """
+        sessions = await self._sessions(meeting["id"])
+        uids = meetlib.absentee_ids(meeting, sessions)
+        recorded = {str(r.get("discord_user")): r.get("display_name")
+                    for r in sessions if r.get("discord_user")}
+        guild = self._guild()
+        names: dict[str, str] = {}
+        for uid in uids:
+            member = guild.get_member(int(uid)) if guild else None
+            names[uid] = (member.display_name if member
+                          else recorded.get(uid) or f"Member {uid}")
+        return uids, names
+
+    async def _absentees_embed(self, meeting: dict, view: "MeetingAbsenteesView"):
+        """Build the absentee page: embed plus the card grid for page 1."""
+        uids, names = await self._absent_entries(meeting)
+        view.build_grid(uids, names)
+        return meetlib.absentees_embed(meeting, uids, names)
+
+    def _guild(self) -> discord.Guild | None:
+        """The first guild the bot is in -- the club server.
+
+        The bot is single-guild in practice, so the first one is the club.
+        Returning None rather than raising keeps the report working in a
+        multi-guild deployment instead of failing on a lookup.
+        """
+        guilds = getattr(self.bot, "guilds", None) or []
+        return guilds[0] if guilds else None
+
+    async def _issue_yellow_card(self, member_id: int, issuer: discord.abc.User,
+                                 title: str = ""):
+        """Write a yellow ``warnings`` row; returns ``(issued, error)``.
+
+        Same write as ``/warn`` so the card is a real record on the member's
+        profile, not a message that scrolls away. Members who left the server
+        still get a row -- the absence is the fact being recorded, and the
+        profile it lands on still exists in the hub.
+
+        ``title`` is the meeting's, passed in rather than read off ``self``:
+        ``self.meeting`` on the cog is the *private room* registry, a different
+        feature that happens to share the attribute name, so reading it here
+        would put a HybridGroup into an f-string the first time anyone pressed
+        a card button.
+        """
+        guild = self._guild()
+        member = guild.get_member(member_id) if guild else None
+        name = member.name if member else str(member_id)
+        try:
+            await store.increment_member(member_id, "warnings", 1,
+                                        bootstrap={"username": name})
+        except StoreError as exc:
+            LOG.error("Meetings: yellow card for %s failed: %s", member_id, exc)
+            return False, f"Couldn't record the yellow card: {exc}"
+        if guild is not None:
+            try:
+                await store.log_moderation(
+                    action="yellow_card",
+                    target_id=member_id,
+                    moderator_id=issuer.id,
+                    moderator_name=issuer.display_name,
+                    reason=f"Absent from {title or 'a meeting'}")
+            except StoreError as exc:
+                # The card is recorded; a missing modlog line must not make the
+                # issuer think it failed and press the button again.
+                LOG.error("Meetings: modlog write for card on %s failed: %s",
+                          member_id, exc)
+        return True, None
+
     async def _live_meeting(self) -> dict | None:
         """The running meeting, or None.
 
@@ -601,6 +1028,45 @@ class Meetings(commands.Cog):
         await ctx.send(
             f"✅ {member.mention} can rejoin. They're recorded as readmitted "
             f"in the attendance report.")
+
+    @meeting.command(
+        name="last",
+        description="Attendance stats for the most recent meeting.")
+    @commands.guild_only()
+    async def meeting_last(self, ctx):
+        """Show the last meeting's report: stats, CSV and the absentee list."""
+        try:
+            meeting = await store.latest_meeting()
+        except StoreError as exc:
+            LOG.error("Meetings: /meeting last failed: %s", exc)
+            await ctx.send(f"⚠️ Couldn't read the meeting log: {exc}")
+            return
+        if meeting is None:
+            await ctx.send("🗓️ No meetings recorded yet. Start one with "
+                           "`/meeting start`.")
+            return
+        view = MeetingStatsView(self, meeting, user=ctx.author)
+        embed, view = await view.interaction_setup()
+        await ctx.send(embed=embed, view=view)
+
+    @meeting.command(
+        name="list",
+        description="Browse past meetings and open their attendance reports.")
+    @commands.guild_only()
+    async def meeting_list(self, ctx):
+        """Pick a meeting from the dropdown to see its attendance."""
+        try:
+            meetings = await store.list_meetings(25)
+        except StoreError as exc:
+            LOG.error("Meetings: /meeting list failed: %s", exc)
+            await ctx.send(f"⚠️ Couldn't read the meeting log: {exc}")
+            return
+        if not meetings:
+            await ctx.send("🗓️ No meetings recorded yet. Start one with "
+                           "`/meeting start`.")
+            return
+        view = MeetingListView(self, meetings, user=ctx.author)
+        await ctx.send(embed=meetlib.list_embed(meetings), view=view)
 
     # ── commands: private voice rooms ────────────────────────────────
     @commands.hybrid_group(
