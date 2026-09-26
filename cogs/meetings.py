@@ -28,7 +28,8 @@ from discord.ext import commands
 
 import config
 from cogs import _meetings as meetlib
-from cogs._perms import require_meeting_admin
+from cogs._perms import is_meeting_admin, require_meeting_admin
+from cogs._ui import OwnerView, close_panel, select_value
 from data.store import store
 from data.store import StoreError
 
@@ -38,8 +39,84 @@ SETTINGS_KEY = "meetings"
 MAX_MEMBERS = 15  # sane cap on tagged members per private room
 
 
+class MeetingStatsView(OwnerView, discord.ui.View):
+    """The report hub: the stats embed plus the CSV export.
+
+    Owner-scoped, like the other panels in the bot — a meeting report names
+    absentees and invites yellow cards, so it should not be a shared panel in a
+    public channel.
+    """
+
+    def __init__(self, cog: "Meetings", meeting: dict, *,
+                 user: discord.abc.User, timeout: float = 300.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.meeting = cog, meeting
+        self.user_id = user.id
+
+    def _owner_deny_message(self, _interaction) -> str:
+        return ("🔒 This report belongs to the command author — run "
+                "`/meeting last` yourself to see it.")
+
+    async def interaction_setup(self) -> tuple[discord.Embed, "MeetingStatsView"]:
+        """Build the stats page from the meeting's attendance log.
+
+        Returned as a pair because the embed is only available after the
+        attendance read, which is async — the command cannot build it up front
+        and hand the view a pre-made message.
+        """
+        meeting = self.meeting
+        sessions = await self.cog._sessions(meeting["id"])
+        totals = meetlib.rollup(sessions, ended_at=meeting.get("ended_at") or "",
+                                granted=meeting.get("granted") or [])
+        absent = meetlib.absentee_ids(meeting, sessions)
+        return meetlib.stats_embed(meeting, totals, absent), self
+
+    @discord.ui.button(emoji="📄", style=discord.ButtonStyle.primary,
+                       label="Attendance CSV")
+    async def csv_button(self, interaction: discord.Interaction,
+                         _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        meeting = self.meeting
+        sessions = await self.cog._sessions(meeting["id"])
+        totals = meetlib.rollup(sessions, ended_at=meeting.get("ended_at") or "",
+                                granted=meeting.get("granted") or [])
+        absent = meetlib.absentee_ids(meeting, sessions)
+        attachment = meetlib.csv_file(meeting, sessions, totals=totals,
+                                      absentees_list=absent)
+        try:
+            await interaction.response.send_message(
+                f"📄 Attendance CSV for **{meeting.get('title') or 'the meeting'}** "
+                f"— one row per join, plus per-member totals.",
+                file=attachment, ephemeral=True)
+        except discord.HTTPException as exc:
+            LOG.error("Meetings: CSV send failed for %s: %s", meeting["id"], exc)
+            await self._notify(interaction, f"⚠️ Couldn't build the CSV: {exc}")
+
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction,
+                    _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        await close_panel(interaction, text="✖️ closed.")
+
+    async def _notify(self, interaction: discord.Interaction, text: str) -> None:
+        """Ephemeral notice for a failure that must not replace the page."""
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
 class Meetings(commands.Cog):
-    """Private voice rooms that clean themselves up."""
+    """Club meetings with attendance tracking, plus private voice rooms."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -131,6 +208,20 @@ class Meetings(commands.Cog):
             )
 
     # ── tracked-meeting helpers ─────────────────────────────────────
+    async def _sessions(self, meeting_id: str) -> list[dict]:
+        """Attendance rows for a meeting; a read failure reads as empty.
+
+        A report that shows "nobody came" because the hub was unreachable is
+        worse than one that says it could not read the log, so the caller gets
+        an empty list and the command's own warning covers it.
+        """
+        try:
+            return await store.list_meeting_sessions(meeting_id)
+        except StoreError as exc:
+            LOG.error("Meetings: could not read attendance for %s: %s",
+                      meeting_id, exc)
+            return []
+
     async def _live_meeting(self) -> dict | None:
         """The running meeting, or None.
 
@@ -601,6 +692,26 @@ class Meetings(commands.Cog):
         await ctx.send(
             f"✅ {member.mention} can rejoin. They're recorded as readmitted "
             f"in the attendance report.")
+
+    @meeting.command(
+        name="last",
+        description="Attendance stats for the most recent meeting.")
+    @commands.guild_only()
+    async def meeting_last(self, ctx):
+        """Show the last meeting's report: stats, CSV and the absentee list."""
+        try:
+            meeting = await store.latest_meeting()
+        except StoreError as exc:
+            LOG.error("Meetings: /meeting last failed: %s", exc)
+            await ctx.send(f"⚠️ Couldn't read the meeting log: {exc}")
+            return
+        if meeting is None:
+            await ctx.send("🗓️ No meetings recorded yet. Start one with "
+                           "`/meeting start`.")
+            return
+        view = MeetingStatsView(self, meeting, user=ctx.author)
+        embed, view = await view.interaction_setup()
+        await ctx.send(embed=embed, view=view)
 
     # ── commands: private voice rooms ────────────────────────────────
     @commands.hybrid_group(

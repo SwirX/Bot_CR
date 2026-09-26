@@ -30,7 +30,7 @@ import discord  # noqa: E402
 
 from cogs import _meetings as ml  # noqa: E402
 import cogs.meetings as meetings_mod  # noqa: E402
-from cogs.meetings import Meetings  # noqa: E402
+from cogs.meetings import Meetings, MeetingStatsView  # noqa: E402
 
 import config  # noqa: E402
 
@@ -204,6 +204,24 @@ def drive(cog, store, member, before_id, after_id):
     return asyncio.run(_go())
 
 
+def _view_children_ok(view, *, label, check):
+    """Assert a view fits Discord's component limits.
+
+    ``to_components()`` is the exact payload Discord receives: a list of action
+    rows, each holding at most five components, 25 overall. A view that breaks
+    either limit raises inside ``send``/``edit_message`` -- after the code that
+    built it ran and often after the user pressed a button -- so it is checked
+    here instead.
+    """
+    rows = view.to_components()
+    flat = [c for row in rows for c in row["components"]]
+    check(f"{label}: within Discord's 25-component limit",
+          len(flat) <= 25, True)
+    check(f"{label}: no row exceeds 5 components",
+          max((len(row["components"]) for row in rows), default=0) <= 5, True)
+    return flat
+
+
 def main() -> int:
     for var in ("BOT_TOKEN", "APPWRITE_API_KEY"):
         if not os.getenv(var):
@@ -320,6 +338,36 @@ def main() -> int:
     check("attendee perms granted",
           all(kw.get(k) is True for k in ml.ATTENDEE_PERMS), True)
 
+    # ── report views ───────────────────────────────────────────────
+    print("\nreport views fit Discord's component limits")
+    cog = build_cog(_FakeStore(), [])
+    meeting = {"id": "m1", "title": "Bureau meeting",
+               "channel_id": str(CHANNEL), "channel_name": "Bureau",
+               "scope": "bureau", "started_at": iso(), "ended_at": iso(minutes=60),
+               "planned_minutes": 60, "locked": False, "live": False,
+               "expected": ["1", "2"], "visitors": [], "granted": []}
+    stats = MeetingStatsView(cog, meeting, user=mgr)
+    _view_children_ok(stats, label="stats", check=check)
+
+    print("\nreport views fit Discord's component limits")
+    cog = build_cog(_FakeStore(), [])
+    meeting = {"id": "m1", "title": "Bureau meeting",
+               "channel_id": str(CHANNEL), "channel_name": "Bureau",
+               "scope": "bureau", "started_at": iso(), "ended_at": iso(minutes=60),
+               "planned_minutes": 60, "locked": False, "live": False,
+               "expected": ["1", "2"], "visitors": [], "granted": []}
+    stats = MeetingStatsView(cog, meeting, user=mgr)
+    _view_children_ok(stats, label="stats", check=check)
+
+    print("\nthe stats page has no per-member card button")
+    card_buttons = [c for c in stats.children
+                    if isinstance(c, discord.ui.Button)
+                    and str(c.custom_id or "").startswith("card:")]
+    check("no per-member card button on the stats page", card_buttons, [])
+    check("csv button is present",
+          any("CSV" in str(getattr(c, "label", "")) for c in stats.children), True)
+    check("only csv and close so far — the picker and the absentee page are "
+          "later commits", len(stats.children), 2)
     if failures:
         print(f"\n✗ {len(failures)} FAILURE(S)")
         for line in failures:
