@@ -135,6 +135,9 @@ MEETING_ABSENTEE_PAGE_SIZE = _env("MEETING_ABSENTEE_PAGE_SIZE", 10, cast=int)
 # Cap on per-member "you already left" deny-overwrites a lock may create.
 # Discord allows 100 overwrites per channel, so the bot stays well clear of it.
 MEETING_MAX_LOCKED_OUT = _env("MEETING_MAX_LOCKED_OUT", 60, cast=int)
+# How many meetings the /meeting list dropdown offers. Discord rejects an app
+# command with more than 25 options, so this stays at or below that.
+MEETING_MAX_PICKER_OPTIONS = _env("MEETING_MAX_PICKER_OPTIONS", 25, cast=int)
 
 # ── Behaviour ──────────────────────────────────────────────────────────
 DASHBOARD_REFRESH_SECONDS = _env("DASHBOARD_REFRESH_SECONDS", 60, cast=int)

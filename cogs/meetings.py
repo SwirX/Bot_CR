@@ -39,31 +39,96 @@ SETTINGS_KEY = "meetings"
 MAX_MEMBERS = 15  # sane cap on tagged members per private room
 
 
+class MeetingListView(OwnerView, discord.ui.View):
+    """``/meeting list``: a dropdown over meeting ids that opens the report.
+
+    The dropdown carries up to :data:`config.MEETING_MAX_PICKER_OPTIONS`
+    entries because Discord rejects an app command with more than 25 options
+    and silently breaks the whole command if you try.
+    """
+
+    def __init__(self, cog: "Meetings", meetings: list[dict], *,
+                 user: discord.abc.User, timeout: float = 300.0):
+        super().__init__(timeout=timeout)
+        self.cog, self.meetings = cog, meetings
+        self.user_id = user.id
+        self.embed = meetlib.list_embed(meetings)
+        self.by_id = {str(m["id"]): m for m in meetings}
+
+        limit = max(1, config.MEETING_MAX_PICKER_OPTIONS)
+        options = []
+        for m in meetings[:limit]:
+            when = meetlib.friendly_time(m.get("started_at"))
+            flags = "🔴 " if m.get("live") else ""
+            flags += "🔒 " if m.get("locked") else ""
+            options.append(discord.SelectOption(
+                value=str(m["id"]),
+                label=f"{flags}{m.get('title') or 'Meeting'}"[:100],
+                description=f"{when} · {meetlib.meeting_length(m)}"[:100],
+            ))
+        picker = discord.ui.Select(
+            placeholder="🔎 Pick a meeting to see its attendance…",
+            min_values=1, max_values=1, options=options, row=0)
+        picker.callback = self._on_pick
+        self.add_item(picker)
+
+    def _owner_deny_message(self, _interaction) -> str:
+        return ("🔒 This list belongs to the command author — run "
+                "`/meeting list` yourself to use it.")
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        if not await self._owned(interaction):
+            return
+        meeting = self.by_id.get(select_value(interaction))
+        if meeting is None:
+            # The row is gone from the hub between the panel being sent and the
+            # pick -- a deleted meeting, not a broken command.
+            await interaction.response.send_message(
+                "⚠️ That meeting is no longer on record.", ephemeral=True)
+            return
+        view = MeetingStatsView(self.cog, meeting, user=interaction.user,
+                                back=self)
+        embed, view = await view.interaction_setup()
+        try:
+            await interaction.response.edit_message(embed=embed, view=view)
+        except discord.HTTPException as exc:
+            LOG.error("Meetings: report drill-down failed: %s", exc)
+
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction,
+                    _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        await close_panel(interaction, text="✖️ closed.")
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
 class MeetingStatsView(OwnerView, discord.ui.View):
-    """The report hub: the stats embed plus the CSV export.
+    """The report hub: stats, the CSV, and the way to the absentee page.
 
     Owner-scoped, like the other panels in the bot — a meeting report names
     absentees and invites yellow cards, so it should not be a shared panel in a
-    public channel.
+    public channel. :attr:`return_to` is set by ``/meeting list`` so the back
+    button lands on the picker instead of closing.
     """
 
     def __init__(self, cog: "Meetings", meeting: dict, *,
-                 user: discord.abc.User, timeout: float = 300.0):
+                 user: discord.abc.User, back: discord.ui.View | None = None,
+                 timeout: float = 300.0):
         super().__init__(timeout=timeout)
         self.cog, self.meeting = cog, meeting
         self.user_id = user.id
+        self.return_to = back
 
     def _owner_deny_message(self, _interaction) -> str:
         return ("🔒 This report belongs to the command author — run "
                 "`/meeting last` yourself to see it.")
 
     async def interaction_setup(self) -> tuple[discord.Embed, "MeetingStatsView"]:
-        """Build the stats page from the meeting's attendance log.
-
-        Returned as a pair because the embed is only available after the
-        attendance read, which is async — the command cannot build it up front
-        and hand the view a pre-made message.
-        """
+        """Build the stats page and size the absentee button from real data."""
         meeting = self.meeting
         sessions = await self.cog._sessions(meeting["id"])
         totals = meetlib.rollup(sessions, ended_at=meeting.get("ended_at") or "",
@@ -92,6 +157,20 @@ class MeetingStatsView(OwnerView, discord.ui.View):
         except discord.HTTPException as exc:
             LOG.error("Meetings: CSV send failed for %s: %s", meeting["id"], exc)
             await self._notify(interaction, f"⚠️ Couldn't build the CSV: {exc}")
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction,
+                   _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        if self.return_to is None:
+            await self._notify(interaction, "↩️ Use `/meeting list` to pick a meeting.")
+            return
+        try:
+            await interaction.response.edit_message(
+                embed=self.return_to.embed, view=self.return_to)
+        except discord.HTTPException:
+            pass
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction,
@@ -221,6 +300,16 @@ class Meetings(commands.Cog):
             LOG.error("Meetings: could not read attendance for %s: %s",
                       meeting_id, exc)
             return []
+
+    def _guild(self) -> discord.Guild | None:
+        """The first guild the bot is in -- the club server.
+
+        The bot is single-guild in practice, so the first one is the club.
+        Returning None rather than raising keeps the report working in a
+        multi-guild deployment instead of failing on a lookup.
+        """
+        guilds = getattr(self.bot, "guilds", None) or []
+        return guilds[0] if guilds else None
 
     async def _live_meeting(self) -> dict | None:
         """The running meeting, or None.
@@ -712,6 +801,25 @@ class Meetings(commands.Cog):
         view = MeetingStatsView(self, meeting, user=ctx.author)
         embed, view = await view.interaction_setup()
         await ctx.send(embed=embed, view=view)
+
+    @meeting.command(
+        name="list",
+        description="Browse past meetings and open their attendance reports.")
+    @commands.guild_only()
+    async def meeting_list(self, ctx):
+        """Pick a meeting from the dropdown to see its attendance."""
+        try:
+            meetings = await store.list_meetings(25)
+        except StoreError as exc:
+            LOG.error("Meetings: /meeting list failed: %s", exc)
+            await ctx.send(f"⚠️ Couldn't read the meeting log: {exc}")
+            return
+        if not meetings:
+            await ctx.send("🗓️ No meetings recorded yet. Start one with "
+                           "`/meeting start`.")
+            return
+        view = MeetingListView(self, meetings, user=ctx.author)
+        await ctx.send(embed=meetlib.list_embed(meetings), view=view)
 
     # ── commands: private voice rooms ────────────────────────────────
     @commands.hybrid_group(

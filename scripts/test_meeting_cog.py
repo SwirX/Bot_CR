@@ -30,7 +30,8 @@ import discord  # noqa: E402
 
 from cogs import _meetings as ml  # noqa: E402
 import cogs.meetings as meetings_mod  # noqa: E402
-from cogs.meetings import Meetings, MeetingStatsView  # noqa: E402
+from cogs.meetings import MeetingListView, Meetings  # noqa: E402
+from cogs.meetings import MeetingStatsView  # noqa: E402
 
 import config  # noqa: E402
 
@@ -366,8 +367,30 @@ def main() -> int:
     check("no per-member card button on the stats page", card_buttons, [])
     check("csv button is present",
           any("CSV" in str(getattr(c, "label", "")) for c in stats.children), True)
-    check("only csv and close so far — the picker and the absentee page are "
-          "later commits", len(stats.children), 2)
+    check("csv, back and close on the hub", len(stats.children), 3)
+    print("\nthe stats page's back button targets the picker it came from")
+    listing = MeetingListView(cog, [meeting, dict(meeting, id="m0")], user=mgr)
+    from_list = MeetingStatsView(cog, meeting, user=mgr, back=listing)
+    check("return_to is the picker view", from_list.return_to is listing, True)
+    lone = MeetingStatsView(cog, meeting, user=mgr)
+    check("with no picker, back is None and the button explains itself",
+          lone.return_to, None)
+
+    print("\n/meeting list caps the dropdown at Discord's 25 options")
+    many = [dict(meeting, id=f"m{i}") for i in range(40)]
+    over = MeetingListView(cog, many, user=mgr)
+    picker_items = [c for c in over.children if isinstance(c, discord.ui.Select)]
+    check("exactly one dropdown", len(picker_items), 1)
+    check("capped at 25 -- Discord rejects an app command with more",
+          len(picker_items[0].options), 25)
+    check("the newest meeting is the first option (store sorts desc)",
+          picker_items[0].options[0].value, "m0")
+    check("the picker is owner-scoped", over.user_id, mgr.id)
+    _view_children_ok(over, label="list picker (40 meetings)", check=check)
+    check("40 meetings still renders, it just cannot offer all of them",
+          "older ones in the dropdown" in
+          {f.name: f.value for f in over.embed.fields}["Recent"], True)
+
     if failures:
         print(f"\n✗ {len(failures)} FAILURE(S)")
         for line in failures:
