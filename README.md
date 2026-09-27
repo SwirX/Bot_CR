@@ -74,8 +74,15 @@ command works as both `!prefix` and `/slash`.
 - 🔁 **JockieMusic migration nudge** — members who still type `m!` get a
   friendly pitch for `/play` and `/queue auto` (once per user, rarely per
   channel), so the old music bot converts without ever feeling like spam.
+- 🗣 **Club meetings with attendance** — `/meeting start #channel 60 bureau`
+  scopes a voice channel to the invited audience, records every join and leave
+  as it happens, and hands back an attendance report: headcount, time present,
+  a CSV of the full timeline, and a paged absentee list with a yellow-card
+  button per absence. `/meeting lock` denies re-entry to leavers until an admin
+  calls `/meeting unlock @member` by name. See
+  [Meetings](#-meetings-meeting-start--end) below.
 - 🤖 **Private meeting rooms** — `/meeting create @a @b [name]` spins up a
-  private VC (auto-deleted when empty), `/meeting end` cleans it up.
+  private VC (auto-deleted when empty), `/meeting endroom` cleans it up.
 - 🔐 **Club permission scopes** — an authorization layer instead of scattered
   role checks: every club command is gated on a scope (`tasks.create`,
   `members.manage`, `competitions.manage`, …) resolved from the member's
@@ -173,7 +180,13 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `keep` | everyone | Vote against an open skip/remove vote (the requester's keep vetoes) |
 | `radio <station>` | everyone | Stream any live internet radio station by name |
 | `stop`, `loop`, `volume <1-100>`, `nowplaying` | everyone | Music control |
-| `meeting create <@members...> [name]`, `meeting end` | everyone | Private VC room |
+| `meeting create <@members...> [name]`, `meeting endroom` | everyone | Private VC room (aliases: `closeroom`) |
+| `meeting start <#channel> <minutes> [audience] [@members...]` | meeting admin | Start a tracked meeting and scope the channel to its audience |
+| `meeting end` | meeting admin | End the meeting and restore the channel's permissions |
+| `meeting lock` | meeting admin | Deny re-entry to everyone who joined and left |
+| `meeting unlock <@member>` | meeting admin | Let one locked-out member back in |
+| `meeting list` | everyone | Browse past meetings and open their reports |
+| `meeting last` | everyone | Attendance report for the most recent meeting |
 | `link <club-id> [real-name]`, `unlink` | everyone | Link/unlink your club account |
 | `profile [member]` | everyone | Identity hub: Overview · Minecraft link · Robotics (soon) tabs |
 | `roles` | everyone | What your club role can do (scopes) |
@@ -493,6 +506,106 @@ ref `/bot update` pulls) — fetch is cached 120 s — and shows:
 
 ---
 
+## 🗣 Meetings (`/meeting start` → `end`)
+
+A tracked meeting is an **event with a report**. The admin opens one in an
+existing voice channel, the bot scopes that channel to the invited audience for
+the duration, every join and leave is written to the hub as it happens, and
+ending the meeting produces an attendance report.
+
+### 🚪 Who can run it
+
+Meeting commands are gated on a tier of their own, separate from general bot
+staff: **Archon, President, Vice President, Manager**, plus anyone in
+`MEETING_ADMIN_USER_IDS`. The four bureau offices are matched on role *name*
+keywords (`BUREAU_OFFICE_KEYWORDS`), so a rename to `「👸」President` or
+`President of Robotics` still resolves. Bot Developer and Server Developer are
+deliberately **not** included — use `MEETING_ADMIN_USER_IDS` to add anyone.
+
+### ▶️ Starting a meeting
+
+```
+/meeting start channel:#⦿Bureau⦿ minutes:60 audience:bureau
+```
+
+The meeting begins immediately; `minutes` is how long it is *planned* to run
+(the report shows planned vs actual). `channel` is the voice channel to scope,
+and `audience` is one of:
+
+| Audience | Who can join |
+| --- | --- |
+| `bureau` | Archon, President, VP, Manager **and** the Chief/Lead/Head of every unit |
+| `cells` | everything in `bureau`, plus every member of any cell |
+| `all` | every club member |
+
+Extra members can be tagged on top of the resolved audience (capped by
+`MEETING_MAX_EXTRA_MEMBERS`). Resolution reads role names, not ids, so a
+promotion between meetings is picked up automatically — and the **expected
+list is snapshotted at start**, so the absentee report describes who the
+meeting was for on the day rather than re-resolving the club org chart later.
+Managed integration roles and bot accounts are excluded.
+
+### 🔒 Lockouts
+
+`/meeting lock` denies **re-entry** to everyone who entered and left. Someone who
+left and came back is left alone — denying them would disconnect the person
+running the meeting from their own channel — and someone who never joined is not
+denied either, which would invent an absence they did not make and then report
+them absent on a meeting they were locked out of.
+
+Locking is a per-member `connect` deny on the channel, not a new Discord role:
+it targets exactly the people who left and evaporates at `/meeting end` when the
+overwrite is deleted, so there is no role to un-assign afterwards.
+`view_channel` is left alone on purpose, so a locked-out member can still see the
+channel and read why they cannot join instead of finding it silently missing.
+`/meeting unlock <@member>` clears one person's deny and flags them as
+**readmitted** in the report.
+
+### 📊 The report
+
+`/meeting last` opens the most recent meeting; `/meeting list` sends a dropdown
+of meeting history that drills into the same page. Both are owner-scoped, and
+the report answers when it ran, in what channel, and how many of the invited
+audience attended:
+
+- **the stats page** — headcount, total presence, visit counts (a leave and
+  return is two visits, not one averaged row), and 🔑 for anyone readmitted
+  after a lockout;
+- **📄 Attendance CSV** — one row per join with exact timestamps, plus a
+  per-member totals block, as an attachment;
+- **🚫 Absentees** — a **separate page** listing who was invited and never
+  joined, one 🟨 button each. Pressing one writes a yellow card through the
+  same path as `/warn`, so it lands on the member's profile as a real record
+  and is mirrored to the modlog with the meeting as the reason.
+
+The absentee list is its own page on purpose: a club-wide meeting can have
+forty absentees, which is eight rows of buttons, and Discord caps a view at 25
+components. Inline on the stats embed it would push the attendance table off
+the embed limit and give the whole server a shared penalty menu.
+
+An unclosed attendance row is measured to the meeting's end rather than to
+"now", so a report read a week later does not credit a week of presence.
+
+### 🔁 Private rooms (older feature)
+
+`/meeting create <@members...> [name]` still spins up a throwaway voice channel
+only the creator and the tagged members can see, and it deletes itself the
+moment it empties. Its `end` subcommand is `/meeting endroom` (alias
+`closeroom`) — `end` was claimed by meeting tracking, and the two features
+share the group because a private room is a *place* while a tracked meeting is
+an *event with a report*.
+
+### 🗄 Storage
+
+Two Appwrite tables, `meetings` and `meeting_sessions`. `meeting_sessions` is
+**append-only, one row per join**, so a leave-and-return is reconstructable with
+no in-memory state and the bot can restart mid-meeting without losing the
+timeline. CSVs are generated on demand rather than stored. The channel's
+permission snapshot is kept in a `bot_settings` sidecar (`meeting_side.<id>`),
+which is the only place `/meeting end` reads to restore what it changed.
+
+---
+
 ## 🌐 Languages (`/settings`, `/language`)
 
 The bot speaks **English, French and Arabic**. Which language you see depends
@@ -548,7 +661,9 @@ cogs/                     one file per feature; auto-discovered
   music_sources/          providers: YouTube, Deezer (+ ARL gateway), Audius, world radio
   minecraft.py            MC server control/power + linked-player session pings
   mclink.py               MC↔Discord account linking (CipherBox handshake)
-  meetings.py             private voice-meeting rooms
+  meetings.py             tracked meetings (attendance, lockouts, reports) + private VC rooms
+  _meetings.py            meeting helper lib — audience resolution, permission snapshot, attendance rollup
+  _perms.py               permission tiers incl. the meeting-admin tier
   apis.py                 weather / dictionary / meme / crypto / spacex / github / advice / lyrics
   settings.py             guild settings + language switch (AR/EN/FR)
   bot_admin.py            /bot status · update · restart (ff-only pull + relaunch)
@@ -598,7 +713,12 @@ mint) and the music suite — `test_music_player.py` (skip/remove voting),
 feed/refill) and `test_jockie_nudge.py` — plus the per-feature unit checks
 (`test_level_roles.py`, `test_reminders.py`, `test_xp_bonuses.py`,
 `test_account_age.py`, `test_memberlinks.py`, `test_names.py`,
-`test_voice_xp.py`, `test_updates.py`, `test_mc_hub.py`).
+`test_voice_xp.py`, `test_updates.py`, `test_mc_hub.py`) and the meeting
+suites — `test_meeting_perms.py` (role → audience tier), `test_meeting_lib.py`
+(audience resolution, permission snapshot, rollup, CSV, absentee list) and
+`test_meeting_cog.py` (voice-state attendance, lockout rules, report view
+layout). `test_meeting_store.py` round-trips the real Appwrite tables and
+needs live credentials.
 
 ```bash
 python scripts/smoke_test.py   # run the same check locally
