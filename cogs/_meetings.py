@@ -180,6 +180,33 @@ def snapshot_overwrites(channel: discord.abc.GuildChannel) -> dict:
     return out
 
 
+# Reserved key inside a meeting's ``meeting_side.<id>`` sidecar. The sidecar is
+# otherwise a flat ``target-id -> overwrite`` map, so this is the one entry that
+# is metadata *about* the snapshot rather than part of it. ``/meeting end`` skips
+# it when replaying and reads it to decide between restoring a channel's
+# permissions and deleting a channel the bot created.
+CHANNEL_CREATED_KEY = "__bot_created__"
+
+
+def channel_was_created(snapshot: dict) -> bool:
+    """True when the sidecar describes a channel the bot created for this meeting.
+
+    Separate from "the snapshot is empty" on purpose: an empty snapshot is also
+    what a *missing* sidecar looks like, and treating that as "delete" would
+    have ``/meeting end`` remove a channel it was simply unable to record.
+    """
+    return bool((snapshot or {}).get(CHANNEL_CREATED_KEY))
+
+
+def meeting_channel_name(scope: str) -> str:
+    """Name for a voice channel the bot creates for a meeting.
+
+    Derived from the audience so two meetings running side by side are
+    distinguishable at a glance in the channel list.
+    """
+    return f"📣 {scope_label(scope)} Meeting"
+
+
 def overwrite_from_snapshot(entry: dict) -> discord.PermissionOverwrite:
     """Rebuild a :class:`PermissionOverwrite` from a snapshot entry."""
     perms = dict(entry.get("perms") or {})
@@ -208,6 +235,11 @@ def restore_plan(snapshot: dict, *, granted: set[int]) -> dict[str, dict]:
     """
     plan: dict[str, dict] = {}
     for oid, entry in (snapshot or {}).items():
+        # ``CHANNEL_CREATED_KEY`` is snapshot metadata, not an overwrite; it is
+        # read by /meeting end to choose between restoring and deleting, and
+        # replaying it as a target would raise on a missing "perms".
+        if oid == CHANNEL_CREATED_KEY:
+            continue
         plan[str(oid)] = {"type": entry.get("type") or "member",
                           "overwrite": entry}
     for mid in granted:

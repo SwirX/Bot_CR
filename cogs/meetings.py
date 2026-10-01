@@ -558,6 +558,49 @@ class Meetings(commands.Cog):
                           member_id, exc)
         return True, None
 
+    async def _make_meeting_channel(self, ctx, scope: str) -> discord.VoiceChannel | None:
+        """Create the meeting's own voice channel, or ``None`` after explaining.
+
+        Placed in the same category as wherever the command was run, because in
+        this guild the text and voice channels that matter share categories and
+        a meeting channel at the guild root is harder to find than it should be.
+        Falls back to the root when the invoking channel has no category.
+
+        Returns ``None`` rather than raising so the caller can keep its one
+        error path; every failure here is a Discord-side one worth reporting in
+        the user's language rather than a traceback.
+        """
+        name = meetlib.meeting_channel_name(scope)
+        kwargs: dict = {"name": name, "reason": f"Meeting room for {scope}"}
+        category = getattr(getattr(ctx, "channel", None), "category", None)
+        if category is not None:
+            kwargs["category"] = category
+        try:
+            return await ctx.guild.create_voice_channel(**kwargs)
+        except discord.Forbidden:
+            await ctx.send(
+                "❌ I can't create a voice channel here. Pick an existing "
+                "channel for `/meeting start`, or give me **Manage Channels** "
+                f"in {category.mention if category else 'this server'}.")
+        except discord.HTTPException as exc:
+            LOG.error("Meetings: could not create a meeting channel: %s", exc)
+            await ctx.send(f"⚠️ Couldn't create a meeting channel: {exc}")
+        return None
+
+    async def _discard_channel(self, channel: discord.VoiceChannel) -> None:
+        """Delete a channel the bot created for a meeting that failed to start.
+
+        Best-effort by design: every caller is already reporting a different,
+        more important failure, and a channel that outlives a failed start is
+        clutter rather than damage. A member currently in it would lose their
+        call, but the meeting never began so there is no call to lose.
+        """
+        try:
+            await channel.delete(reason="Meeting never started — cleaned up")
+        except (discord.Forbidden, discord.NotFound,
+                discord.HTTPException) as exc:
+            LOG.info("Meetings: could not remove %s: %s", channel.id, exc)
+
     async def _live_meeting(self) -> dict | None:
         """The running meeting, or None.
 
@@ -718,17 +761,21 @@ class Meetings(commands.Cog):
     # ── commands: tracked meetings ───────────────────────────────────
     @meeting.command(
         name="start",
-        description=("Start a tracked meeting in a voice channel, restricted to "
-                     "an audience of members."))
+        description=("Start a tracked meeting. Pick a voice channel to scope, "
+                     "or leave it blank and the bot makes one."))
     @commands.guild_only()
     @require_meeting_admin()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True,
                                   connect=True, move_members=True)
-    async def meeting_start(self, ctx, channel: discord.VoiceChannel, *,
+    async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
                             audience: str = "bureau",
                             minutes: int | None = None,
                             also: commands.Greedy[discord.Member] = None):
         """Start a meeting and track who attends.
+
+        **channel** is optional. Pick an existing voice channel to scope it to
+        the audience for the meeting; leave it blank and the bot creates a
+        dedicated one, which it deletes again at `/meeting end`.
 
         `audience` is one of:
         **bureau** — the bureau offices (Archon, President, Vice President,
@@ -767,31 +814,48 @@ class Meetings(commands.Cog):
                 f"⏳ A meeting is already running in {where} "
                 f"(`{existing['title']}`). End it with `/meeting end` first.")
             return
-        # Starting a meeting in the same channel the running one uses would
-        # clobber the live snapshot; the check above catches it, but be explicit
-        # about the channel too in case the live lookup missed it.
-        clash = await self._live_meeting_for_channel(channel.id)
-        if clash is not None:
-            await ctx.send(
-                f"⏳ A meeting is already running in <#{channel.id}>. "
-                f"End it with `/meeting end` first.")
-            return
+
+        created = False
+        if channel is None:
+            channel = await self._make_meeting_channel(ctx, scope)
+            if channel is None:
+                return  # the helper already explained itself
+            created = True
+        else:
+            # Starting a meeting in the same channel the running one uses would
+            # clobber the live snapshot; the check above catches it, but be
+            # explicit about the channel too in case the live lookup missed it.
+            clash = await self._live_meeting_for_channel(channel.id)
+            if clash is not None:
+                await ctx.send(
+                    f"⏳ A meeting is already running in <#{channel.id}>. "
+                    f"End it with `/meeting end` first.")
+                return
 
         try:
             audience_members = await meetlib.resolve_audience(
                 ctx.guild, scope, extra=extras)
         except ValueError as exc:
             await ctx.send(f"❌ {exc}")
+            if created:
+                await self._discard_channel(channel)
             return
         if not audience_members:
             await ctx.send(
                 "❌ Nobody matched that audience — check the role names in "
                 "`.env` (or tag members with `also:`).")
+            if created:
+                await self._discard_channel(channel)
             return
 
         async with ctx.typing():
-            # Snapshot *before* the first write; /meeting end restores from this.
-            snapshot = meetlib.snapshot_overwrites(channel)
+            # A channel the bot just made has no prior state to restore, so its
+            # snapshot is empty *and* flagged. The flag is what stops
+            # `/meeting end` reading "no snapshot" as a reason to leave the
+            # channel alone — the right move for a created one is to delete it.
+            snapshot = {} if created else meetlib.snapshot_overwrites(channel)
+            if created:
+                snapshot[meetlib.CHANNEL_CREATED_KEY] = True
             meeting_id = None
             try:
                 meeting_id = await store.create_meeting({
@@ -819,6 +883,8 @@ class Meetings(commands.Cog):
                 # Roll the channel back: a half-started meeting with a narrowed
                 # channel and no live row is the worst possible state.
                 await self._restore_quietly(channel, snapshot, set())
+                if created:
+                    await self._discard_channel(channel)
                 if meeting_id:
                     await self._discard_meeting(meeting_id)
                 await ctx.send(f"⚠️ Couldn't start the meeting: {exc}")
@@ -826,6 +892,8 @@ class Meetings(commands.Cog):
             except discord.HTTPException as exc:
                 LOG.error("Meetings: /meeting start permission write failed: %s", exc)
                 await self._restore_quietly(channel, snapshot, set())
+                if created:
+                    await self._discard_channel(channel)
                 if meeting_id:
                     await self._discard_meeting(meeting_id)
                 await ctx.send(f"⚠️ Couldn't narrow the channel: {exc}")
@@ -834,7 +902,9 @@ class Meetings(commands.Cog):
         visitors = [m for m in extras
                       if m.id not in {a.id for a in audience_members}]
         lines = [
-            f"🔔 **Meeting started** in <#{channel.id}>",
+            (f"🔔 **Meeting started** in {channel.mention}"
+             + (" — the bot made this channel for it."
+                if created else "")),
             f"Audience: **{meetlib.scope_label(scope)}** "
             f"({meetlib.SCOPE_SUMMARY[scope]}) — "
             f"{len(audience_members)} member(s).",
@@ -844,7 +914,11 @@ class Meetings(commands.Cog):
         if visitors:
             lines.append("Also invited: "
                          + ", ".join(m.mention for m in visitors) + ".")
-        lines.append(f"Attendance ID: `{meeting_id}`")
+        if created:
+            lines.append(f"This channel is deleted automatically by "
+                         f"`/meeting end`. Attendance ID: `{meeting_id}`")
+        else:
+            lines.append(f"Attendance ID: `{meeting_id}`")
         await ctx.send("\n".join(lines))
 
     @meeting.command(name="end", aliases=["finish"],

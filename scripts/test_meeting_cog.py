@@ -459,6 +459,42 @@ def main() -> int:
     check("absentee view rejects other users", absent_view.user_id, mgr.id)
     check("list view rejects other users", listing.user_id, mgr.id)
 
+    # ── optional meeting channel ─────────────────────────────────
+    print("\nmeeting_channel_name() marks a bot-made channel and names the scope")
+    check("named after the audience", ml.meeting_channel_name("bureau"),
+          "📣 Bureau Meeting")
+    check("cells scope reads differently", ml.meeting_channel_name("cells"),
+          "📣 Cell members Meeting")
+
+    print("\nCHANNEL_CREATED_KEY survives a JSON round trip through the sidecar")
+    import json as _json
+    created_snap = {ml.CHANNEL_CREATED_KEY: True}
+    check("reads back as created",
+          ml.channel_was_created(_json.loads(_json.dumps(created_snap))), True)
+    check("an existing channel's snapshot is not 'created'",
+          ml.channel_was_created({"11": {"type": "role",
+                                         "perms": {"connect": True}}}), False)
+    check("a missing sidecar is not 'created' — /meeting end must not delete",
+          ml.channel_was_created({}), False)
+    check("a hand-edited sidecar that lost the flag is not 'created'",
+          ml.channel_was_created({"1333113498594574506": {"type": "role",
+                                                          "perms": {}}}), False)
+
+    print("\nrestore_plan() skips the created flag instead of replaying it")
+    plan = ml.restore_plan(created_snap, granted=set())
+    check("no plan at all — the channel gets deleted, not restored", plan, {})
+    real_snap = {"11": {"type": "role", "perms": {"connect": True}},
+                 ml.CHANNEL_CREATED_KEY: True}
+    check("real overwrites still restore, flag ignored",
+          sorted(ml.restore_plan(real_snap, granted=set())), ["11"])
+
+    print("\nrestore_plan() tolerates a sidecar entry with no perms")
+    # The flag is exactly this shape once stored through a JSON layer that
+    # drops the dict-ness; it must not raise ValueError out of PermissionOverwrite.
+    check("flag-shaped entry cannot crash the plan",
+          isinstance(ml.restore_plan({ml.CHANNEL_CREATED_KEY: True},
+                                     granted=set()), dict), True)
+
     print("\n_issue_yellow_card writes the same row /warn does")
     written = {}
 
