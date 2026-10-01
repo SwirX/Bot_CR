@@ -400,46 +400,89 @@ def main() -> int:
     # Mgr 30m + 10m = 40m, Cell +5 to the meeting's end at +60 = 55m. Total 95m.
     check("time present is stated", "1h 35m" in fields["👥 Attendance"], True)
     check("visits counted across rejoins", "3 visit(s)" in fields["👥 Attendance"], True)
-    check("attendance rows are listed by mention",
-          "<@1>" in fields["📋 Who was there"], True)
     check("footer is lowercase per convention",
           stats.footer.text == stats.footer.text.lower(), True)
+
+    print("\nstats_embed() shows the audience as three lists that add up")
+    check("stayed row counts the late audience",
+          fields["🟢 Stayed to the end (2)"].count("<@"), 2)
+    check("Mgr — who left and came back — stayed",
+          "<@1>" in fields["🟢 Stayed to the end (2)"], True)
+    check("and his second visit is marked", "2×" in fields["🟢 Stayed to the end (2)"], True)
+    # Cell's row was never closed by a disconnect: /meeting end is what ended
+    # it. Reading that as "left early" would call the most present member of
+    # the meeting someone who walked out.
+    check("Cell — closed by the end, not by leaving — also stayed",
+          "<@2>" in fields["🟢 Stayed to the end (2)"], True)
+    check("nobody is invented into the left-early row",
+          fields["🚪 Left early (0)"], "_nobody_")
+    check("the absentee is named", fields["🚫 Absent (1)"], "<@3>")
+    check("the three row counts equal the invited audience",
+          2 + 0 + 1 == len(meeting["expected"]), True)
+
+    print("\nstats_embed() says 'in the channel now' while a meeting runs")
+    running = ml.stats_embed({**meeting, "ended_at": "", "live": True},
+                             ml.rollup(sessions), ["3"])
+    run_fields = {f.name: f.value for f in running.fields}
+    check("the stayed row is worded for a running meeting",
+          "🟢 In the channel now (1)" in run_fields, True)
+    check("only Cell is actually in the channel",
+          "<@2>" in run_fields["🟢 In the channel now (1)"], True)
+    check("Mgr is listed as having left", "<@1>" in run_fields["🚪 Left (not back in) (1)"], True)
 
     print("\nstats_embed() survives a meeting nobody joined")
     empty = ml.stats_embed(meeting, {}, ["1", "2"])
     empty_fields = {f.name: f.value for f in empty.fields}
     check("headcount is zero", "**0**" in empty_fields["👥 Attendance"], True)
-    check("says so plainly", "Nobody joined" in empty_fields["📋 Who was there"], True)
+    check("no-one-stayed says so plainly",
+          empty_fields["🟢 Stayed to the end (0)"], "_nobody_")
+    check("and no-one-left says so too",
+          empty_fields["🚪 Left early (0)"], "_nobody_")
+    check("everyone is on the absent row",
+          sorted(empty_fields["🚫 Absent (2)"].split()),
+          ["<@1>", "<@2>"])
 
     print("\nstats_embed() notes a lockout, and one meeting only")
     locked = ml.stats_embed({**meeting, "locked": True, "granted": ["1"]},
                             ml.rollup(sessions, granted=["1"]), [])
+    lock_fields = {f.name: f.value for f in locked.fields}
     check("locked flag is in the footer", "locked partway" in locked.footer.text, True)
     check("readmitted member is flagged in the list",
-          "🔑" in {f.name: f.value for f in locked.fields}["📋 Who was there"], True)
+          "🔑" in lock_fields["🟢 Stayed to the end (2)"], True)
     check("readmitted count is stated",
-          "1 readmitted" in {f.name: f.value for f in locked.fields}["👥 Attendance"], True)
+          "1 readmitted" in lock_fields["👥 Attendance"], True)
+
+    print("\na big meeting truncates each row and stays inside Discord's limit")
     many = ml.rollup([{"discord_user": str(100 + i), "display_name": f"M{i}",
                        "joined_at": iso(), "left_at": iso(minutes=1)}
                       for i in range(20)])
-    check("a 20-member meeting truncates the visible list",
-          "more (see the CSV)" in {f.name: f.value
-                                   for f in ml.stats_embed(meeting, many, []).fields}["📋 Who was there"],
-          True)
-    check("truncation stays inside Discord's 4096-char embed limit",
-          len(ml.stats_embed(meeting, many, []).description or "") + sum(
-              len(f.value or "") for f in ml.stats_embed(meeting, many, []).fields)
+    big = ml.stats_embed(meeting, many, [str(200 + i) for i in range(30)])
+    big_fields = {f.name: f.value for f in big.fields}
+    check("20 who left early truncate to the row cap",
+          "more in the csv" in big_fields["🚪 Left early (20)"], True)
+    check("and only 10 are actually listed",
+          big_fields["🚪 Left early (20)"].count("<@"), ml._ROW_NAMES)
+    check("30 absentees point at the absentees page instead of the csv",
+          "see the absentees page" in big_fields["🚫 Absent (30)"], True)
+    check("full attendance stays under Discord's 4096-char embed limit",
+          len(big.description or "") + sum(len(f.value or "") for f in big.fields)
           < 4096, True)
 
-    print("\nabsentees_embed() is its own page, not part of the stats page")
+    print("\nabsentees_embed() is its own page for the yellow cards")
     absent = ml.absentees_embed(meeting, ["3"], {"3": "Third"})
     check("separate title", absent.title.startswith("🚫 Absent"), True)
     check("its own colour, so it reads as a different page",
           absent.color, ml.WARNING)
     check("names the absent member", "<@3>" in (absent.description or ""), True)
     check("counts them", "**1**" in (absent.description or ""), True)
-    check("the stats page never lists absentees inline",
-          "<@3>" in "".join(f.value for f in stats.fields), False)
+    # The name belongs on the stats page now -- "who didn't come" is one of the
+    # three things the report is for. What stays behind the button is the
+    # *paging* of them and the yellow-card action, which only make sense once a
+    # reader has decided that page is worth opening.
+    check("the stats page does name absentees now",
+          "<@3>" in fields["🚫 Absent (1)"], True)
+    check("and still only shows a capped number of them",
+          big_fields["🚫 Absent (30)"].count("<@"), ml._ROW_NAMES)
 
     print("\nabsentees_embed() has a clean state when everyone came")
     clean = ml.absentees_embed(meeting, [], {})

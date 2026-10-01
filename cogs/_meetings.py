@@ -437,6 +437,12 @@ def rollup(sessions: list[dict], *, ended_at: str = "",
         for entry in out.values():
             if entry["in_channel"]:
                 entry["in_channel"] = False
+                # The row was closed by the meeting ending, not by the member
+                # walking out, so stamp it as leaving at that moment. Without
+                # this the row has no ``last_leave`` at all and the "left early"
+                # split reads it as someone who got up and went home, which is
+                # the one thing they definitely did not do.
+                entry["last_leave"] = ended_at
     return out
 
 
@@ -587,15 +593,52 @@ def meeting_length(meeting: dict) -> str:
     return format_duration(int((end - start).total_seconds()))
 
 
+# How many names one of the three attendance rows shows before deferring to the
+# CSV. Ten is roughly 200 characters, so three rows plus the four fields above
+# stay well inside the embed's 4096-char budget even when every row is full.
+_ROW_NAMES = 10
+
+
+def _name_list(entries: list[dict], *, empty: str) -> str:
+    """One line per member: mention, time present, and the oddities worth seeing.
+
+    ``🔑`` marks someone an admin had to readmit after a lockout, and ``2×``
+    marks a member who left and came back -- neither is visible anywhere else on
+    the page, and both change how the number should be read.
+    """
+    if not entries:
+        return empty
+    lines = []
+    for entry in entries[:_ROW_NAMES]:
+        flag = " 🔑" if entry.get("admitted") else ""
+        visits = f" · {entry['visits']}×" if entry.get("visits", 1) > 1 else ""
+        lines.append(
+            f"<@{entry['discord_user']}> — "
+            f"{format_duration(entry.get('time_present', 0))}{visits}{flag}")
+    return "\n".join(lines)
+
+
+def _id_list(ids: list[str], *, empty: str) -> str:
+    """One line per Discord id — used for absentees, who have no session row.
+
+    Mentions rather than display names: an absentee never joined, so there is no
+    recorded name to show, and a cached one could be years out of date.
+    """
+    if not ids:
+        return empty
+    return "\n".join(f"<@{uid}>" for uid in ids[:_ROW_NAMES])
+
+
 def stats_embed(meeting: dict, totals: dict[str, dict],
                 absent: list[str]) -> discord.Embed:
     """The meeting's main stats page.
 
-    Carries the four things the club asks for -- when, where, how many, and the
-    per-member attendance -- plus the two buttons' destinations. The absent list
-    itself is deliberately *not* on this page; it is one button away, so a long
-    absentee list can't push the attendance table off the embed's 4096-char
-    limit.
+    Carries what the club asks for -- when, where, how many, and who was
+    actually there -- as three lists that partition the invited audience:
+    stayed to the end, came and left early, and never showed up. The absentees
+    *page* (with its yellow cards) is still one button away: a club-wide meeting
+    has forty absentees, and the count here is enough to decide whether to go
+    and look.
     """
     attended = len(totals)
     expected = len(meeting.get("expected") or [])
@@ -617,6 +660,9 @@ def stats_embed(meeting: dict, totals: dict[str, dict],
     embed.add_field(name="📍 Where", value=(
         f"{where}\nAudience **{scope_label(meeting.get('scope') or '')}**"),
         inline=False)
+
+    parts = attendance_split(totals, meeting, absent=absent)
+    stayed, left = parts["stayed"], parts["left"]
     summary = (f"**{attended}** of {expected} invited"
                if expected else f"**{attended}** attended")
     embed.add_field(name="👥 Attendance", value=(
@@ -625,24 +671,31 @@ def stats_embed(meeting: dict, totals: dict[str, dict],
         + (f"\n{readmitted} readmitted after a lockout" if readmitted else "")),
         inline=False)
 
-    # Top attendees first; the full list is in the CSV the button exports.
-    ranked = sorted(totals.values(),
-                    key=lambda e: (-e["time_present"], e["display_name"].lower()))
-    if ranked:
-        lines = []
-        for entry in ranked[:12]:
-            flag = " 🔑" if entry["admitted"] else ""
-            visits = f" · {entry['visits']}×" if entry["visits"] > 1 else ""
-            lines.append(
-                f"<@{entry['discord_user']}> — "
-                f"{format_duration(entry['time_present'])}{visits}{flag}")
-        if len(ranked) > 12:
-            lines.append(f"…and {len(ranked) - 12} more (see the CSV)")
-        embed.add_field(name="📋 Who was there", value="\n".join(lines),
-                        inline=False)
-    else:
-        embed.add_field(name="📋 Who was there",
-                        value="_Nobody joined the channel._", inline=False)
+    # The three lists the club actually asks for, side by side. Names are
+    # truncated per row rather than the list being dropped, because "who was
+    # there" is the question this page exists to answer and an invite-only
+    # channel makes that the least visible thing in the server.
+    live = bool(meeting.get("live"))
+    stayed_name = "🟢 In the channel now" if live else "🟢 Stayed to the end"
+    left_name = "🚪 Left early" if not live else "🚪 Left (not back in)"
+    embed.add_field(
+        name=f"{stayed_name} ({len(stayed)})",
+        value=_name_list(stayed, empty="_nobody_") +
+        (f"\n…{len(stayed) - _ROW_NAMES} more in the csv"
+         if len(stayed) > _ROW_NAMES else ""),
+        inline=False)
+    embed.add_field(
+        name=f"{left_name} ({len(left)})",
+        value=_name_list(left, empty="_nobody_") +
+        (f"\n…{len(left) - _ROW_NAMES} more in the csv"
+         if len(left) > _ROW_NAMES else ""),
+        inline=False)
+    embed.add_field(
+        name=f"🚫 Absent ({len(parts['absent'])})",
+        value=_id_list(parts["absent"], empty="_nobody_") +
+        (f"\n…{len(parts['absent']) - _ROW_NAMES} more — see the absentees page"
+         if len(parts["absent"]) > _ROW_NAMES else ""),
+        inline=False)
 
     # Lowercase throughout: the bot's footers read as captions, not sentences.
     footer = "the csv button has every join and leave with exact timestamps"
