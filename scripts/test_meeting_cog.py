@@ -536,6 +536,96 @@ def main() -> int:
           or "gone" in ml.end_plan(real_snap, channel_exists=False,
                                    granted=set())["problem"], True)
 
+    # ── who stayed / who left / who never came ────────────────────────
+    print("\nattendance_split() partitions the audience into three lists")
+    # Mgr joins at the start and /meeting end closes their row at ended_at.
+    # Cell joins late and leaves ten minutes before the end.
+    # Late joins at the very end and is closed by the end itself.
+    # Ghost never connects at all.
+    split_sessions = [
+        {"discord_user": "1", "display_name": "Mgr", "joined_at": iso(),
+         "left_at": iso(minutes=60)},
+        {"discord_user": "2", "display_name": "Cell",
+         "joined_at": iso(minutes=5), "left_at": iso(minutes=50)},
+        {"discord_user": "4", "display_name": "Late",
+         "joined_at": iso(minutes=58), "left_at": iso(minutes=60)},
+    ]
+    done = {**meeting, "ended_at": iso(minutes=60), "live": False,
+            "expected": ["1", "2", "3", "4"]}
+    parts = ml.attendance_split(
+        ml.rollup(split_sessions, ended_at=done["ended_at"]), done, absent=["3"])
+    check("who was there at the end (Mgr 60m outranks Late 2m)",
+          [e["discord_user"] for e in parts["stayed"]], ["1", "4"])
+    check("who came and went early",
+          [e["discord_user"] for e in parts["left"]], ["2"])
+    check("who never came", parts["absent"], ["3"])
+    check("the three lists together cover the audience exactly once",
+          sorted([e["discord_user"] for e in parts["stayed"]]
+                 + [e["discord_user"] for e in parts["left"]] + parts["absent"]),
+          ["1", "2", "3", "4"])
+
+    print("\nattendance_split() does not call the late audience 'left early'")
+    # A row closed by /meeting end carries the store's now(), a moment after
+    # ended_at was stamped. Without the tolerance every one of them reads as
+    # having walked out seconds early.
+    stamp_drift = [{"discord_user": "1", "display_name": "Mgr",
+                    "joined_at": iso(), "left_at": iso(minutes=60, seconds=45)}]
+    drifted = ml.attendance_split(
+        ml.rollup(stamp_drift, ended_at=iso(minutes=60)), done, absent=[])
+    check("45s of clock drift still counts as staying",
+          [e["discord_user"] for e in drifted["stayed"]], ["1"])
+    check("and nobody is invented into the left list", drifted["left"], [])
+
+    print("\nattendance_split() still separates a genuine early departure")
+    real_early = [{"discord_user": "1", "display_name": "Mgr",
+                   "joined_at": iso(), "left_at": iso(minutes=30)}]
+    check("30 minutes before the end is 'left'",
+          [e["discord_user"] for e in ml.attendance_split(
+              ml.rollup(real_early, ended_at=iso(minutes=60)), done)["left"]],
+          ["1"])
+
+    print("\na member who left and came back is one entry, not two")
+    rejoined = [
+        {"discord_user": "1", "display_name": "Mgr", "joined_at": iso(),
+         "left_at": iso(minutes=20)},
+        {"discord_user": "1", "display_name": "Mgr", "joined_at": iso(minutes=40),
+         "left_at": iso(minutes=60)},
+    ]
+    back = ml.attendance_split(ml.rollup(rejoined, ended_at=iso(minutes=60)),
+                              done)
+    check("listed once", [e["discord_user"] for e in back["stayed"]], ["1"])
+    check("and counted as two visits", back["stayed"][0]["visits"], 2)
+
+    print("\na running meeting splits on who is in the channel right now")
+    live_meeting = {**meeting, "ended_at": "", "live": True}
+    live_rows = [
+        {"discord_user": "1", "display_name": "Mgr", "joined_at": iso(),
+         "left_at": ""},
+        {"discord_user": "2", "display_name": "Cell", "joined_at": iso(),
+         "left_at": iso(minutes=10)},
+    ]
+    running = ml.attendance_split(ml.rollup(live_rows), live_meeting)
+    check("in the channel now counts as stayed",
+          [e["discord_user"] for e in running["stayed"]], ["1"])
+    check("anyone else who came is 'left'", 
+          [e["discord_user"] for e in running["left"]], ["2"])
+
+    print("\nattendance_split() orders each list by time present")
+    crowd = [{"discord_user": str(10 + i), "display_name": f"M{i}",
+              "joined_at": iso(), "left_at": iso(minutes=60 - i)}
+             for i in range(6)]
+    ordered = ml.attendance_split(ml.rollup(crowd, ended_at=iso(minutes=60)),
+                                  done)
+    check("longest present first",
+          [e["time_present"] for e in ordered["left"]],
+          sorted((e["time_present"] for e in ordered["left"]), reverse=True))
+
+    print("\nattendance_split() handles an empty meeting")
+    empty = ml.attendance_split({}, done, absent=["1", "2"])
+    check("nothing stayed", empty["stayed"], [])
+    check("nothing left", empty["left"], [])
+    check("everyone is absent", empty["absent"], ["1", "2"])
+
     print("\nend_plan() deletes every grant the bot made")
     p = ml.end_plan({"11": {"type": "role", "perms": {"connect": True}}},
                     channel_exists=True, granted={99, 98})
