@@ -25,7 +25,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import discord
 
@@ -413,6 +413,7 @@ def rollup(sessions: list[dict], *, ended_at: str = "",
             "time_present": 0,
             "first_join": row.get("joined_at") or "",
             "last_join": row.get("joined_at") or "",
+            "last_leave": "",
             "in_channel": False,
             "admitted": uid in readmitted,
         })
@@ -423,6 +424,7 @@ def rollup(sessions: list[dict], *, ended_at: str = "",
         entry["last_join"] = row.get("joined_at") or entry["last_join"]
         if row.get("left_at"):
             entry["in_channel"] = False
+            entry["last_leave"] = row["left_at"]
         else:
             entry["in_channel"] = True
     # Prefer the most recent name: a member may have renamed mid-meeting.
@@ -436,6 +438,53 @@ def rollup(sessions: list[dict], *, ended_at: str = "",
             if entry["in_channel"]:
                 entry["in_channel"] = False
     return out
+
+
+# Grace period for deciding someone "stayed to the end". ``/meeting end`` closes
+# the rows of people still in the channel with the store's own ``now()``, which
+# is stamped a moment *after* the meeting's ``ended_at``, so an exact comparison
+# would report the entire late audience as having left seconds early. Two
+# minutes is far below the gap it is papering over and far above the slop
+# between two timestamps taken milliseconds apart.
+_STAYED_TOLERANCE = timedelta(minutes=2)
+
+
+def attendance_split(totals: dict[str, dict], meeting: dict,
+                     *, absent: list[str] | None = None) -> dict[str, list]:
+    """Split a rollup into the three lists a report is expected to show.
+
+    ``stayed``  joined and was still in the channel when it ended (or is in it
+                now, while the meeting is live).
+    ``left``    joined, then left before the meeting ended — including people
+                who left and came back more than once.
+    ``absent``  was in the invited audience and never joined at all.
+
+    The three are a genuine partition of the audience, which is why they can be
+    shown as three lists that add up: every expected member appears exactly
+    once. Entries are sorted by time present, longest first, so a truncated
+    list still leads with the members who were there longest.
+    """
+    ended = _parse(meeting.get("ended_at") or "")
+    stayed: list[dict] = []
+    left: list[dict] = []
+    for entry in totals.values():
+        if entry.get("in_channel"):
+            stayed.append(entry)
+            continue
+        leave = _parse(entry.get("last_leave") or "")
+        if ended is not None and leave is not None and (
+                leave >= ended - _STAYED_TOLERANCE):
+            # Closed by /meeting end rather than by the member disconnecting.
+            stayed.append(entry)
+        else:
+            left.append(entry)
+
+    def _rank(entries: list[dict]) -> list[dict]:
+        return sorted(entries,
+                      key=lambda e: (-e["time_present"], e["display_name"].lower()))
+
+    return {"stayed": _rank(stayed), "left": _rank(left),
+            "absent": list(absent or [])}
 
 
 def absentee_ids(meeting: dict, sessions: list[dict]) -> list[str]:
