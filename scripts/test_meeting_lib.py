@@ -468,6 +468,46 @@ def main() -> int:
           len(big.description or "") + sum(len(f.value or "") for f in big.fields)
           < 4096, True)
 
+    print("\nredacted_stats_embed() keeps the numbers and drops every name")
+    red = ml.redacted_stats_embed(meeting, attended=2)
+    red_fields = {f.name: f.value for f in red.fields}
+    check("still names the meeting", red.title.startswith("📊"), True)
+    check("still answers when", "2026-09-25 18:00 UTC" in red_fields["🗓️ When"], True)
+    check("still answers where", "<#1336692513460977746>" in red_fields["📍 Where"], True)
+    check("still answers how many", "**2** of 3 invited" in red_fields["👥 Attendance"], True)
+    check("MUTED, so it reads as a lesser answer", red.color, ml.MUTED)
+    body = "".join(f.value or "" for f in red.fields)
+    check("no attendee is named anywhere on it",
+          any(f"<@{uid}>" in body for uid in ("1", "2")), False)
+    check("the absentee is not named either", "<@3>" in body, False)
+    check("none of the three detail rows are present",
+          [f.name for f in red.fields
+           if f.name.startswith(("🟢", "🚪", "🚫"))], [])
+    check("and it says where to ask instead",
+          "kept for the bureau" in (red.footer.text or ""), True)
+
+    print("\nredacted_stats_embed() never leaks names through the title")
+    odd = ml.redacted_stats_embed(
+        {**meeting, "title": "Bureau meeting <@1>"}, attended=1)
+    check("a meeting title that mentions someone is not escaped away",
+          odd.title.startswith("📊"), True)
+
+    print("\nredacted_stats_embed() copes with no expected list on record")
+    loose = {f.name: f.value for f in
+             ml.redacted_stats_embed({**meeting, "expected": []}, 5).fields}
+    check("no 'of N invited' claim without an audience",
+          "of 0 invited" in loose["👥 Attendance"], False)
+    check("plain attended count instead", "**5** attended" in loose["👥 Attendance"], True)
+
+    print("\nredacted_list_embed() is the history without the drill-down")
+    red_list = ml.redacted_list_embed([meeting])
+    check("keeps the history", "**1** meeting(s) on record" in (red_list.description or ""), True)
+    check("keeps each meeting's date", "2026-09-25 18:00 UTC" in
+          {f.name: f.value for f in red_list.fields}["Recent"], True)
+    check("drops the 'pick a meeting' footer",
+          "pick a meeting" in (red_list.footer.text or ""), False)
+    check("points at the bureau instead", "kept for the bureau" in (red_list.footer.text or ""), True)
+
     print("\nabsentees_embed() is its own page for the yellow cards")
     absent = ml.absentees_embed(meeting, ["3"], {"3": "Third"})
     check("separate title", absent.title.startswith("🚫 Absent"), True)

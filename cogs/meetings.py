@@ -84,6 +84,14 @@ class MeetingListView(OwnerView, discord.ui.View):
     async def _on_pick(self, interaction: discord.Interaction):
         if not await self._owned(interaction):
             return
+        # The dropdown is only ever attached for the bureau, so this should be
+        # unreachable — but it is the one place the redaction in /meeting last
+        # could be walked around, and three lines here is cheaper than relying on
+        # every future caller of MeetingListView to remember.
+        if not is_meeting_admin(interaction.user):
+            await interaction.response.send_message(
+                "🔒 Attendance reports are kept for the bureau.", ephemeral=True)
+            return
         meeting = self.by_id.get(select_value(interaction))
         if meeting is None:
             # The row is gone from the hub between the panel being sent and the
@@ -1121,42 +1129,76 @@ class Meetings(commands.Cog):
 
     @meeting.command(
         name="last",
-        description="Attendance stats for the most recent meeting.")
+        description="Stats for the most recent meeting. Bureau sees the "
+                    "full report; everyone else sees the headline.")
     @commands.guild_only()
     async def meeting_last(self, ctx):
-        """Show the last meeting's report: stats, CSV and the absentee list."""
+        """Show the last meeting's stats.
+
+        Always answered privately, never in the channel: a report that names who
+        attended and who didn't is not something to post where the whole server
+        can scroll back through.
+
+        The bureau (and the whitelisted operators) additionally get the per-member
+        breakdown, the CSV, and the absentee page. Everyone else gets when,
+        where and how many — which is the part that is any member's business.
+        """
         try:
             meeting = await store.latest_meeting()
         except StoreError as exc:
             LOG.error("Meetings: /meeting last failed: %s", exc)
-            await ctx.send(f"⚠️ Couldn't read the meeting log: {exc}")
+            await ctx.send(f"⚠️ Couldn't read the meeting log: {exc}",
+                           ephemeral=True)
             return
         if meeting is None:
             await ctx.send("🗓️ No meetings recorded yet. Start one with "
-                           "`/meeting start`.")
+                           "`/meeting start`.", ephemeral=True)
             return
+
+        if not is_meeting_admin(ctx.author):
+            sessions = await self._sessions(meeting["id"])
+            attended = meetlib.attended_count(
+                meeting, meetlib.absentee_ids(meeting, sessions))
+            await ctx.send(embed=meetlib.redacted_stats_embed(meeting,
+                                                              attended=attended),
+                           ephemeral=True)
+            return
+
         view = MeetingStatsView(self, meeting, user=ctx.author)
         embed, view = await view.interaction_setup()
-        await ctx.send(embed=embed, view=view)
+        await ctx.send(embed=embed, view=view, ephemeral=True)
 
     @meeting.command(
         name="list",
-        description="Browse past meetings and open their attendance reports.")
+        description="Browse past meetings. Bureau can open each report.")
     @commands.guild_only()
     async def meeting_list(self, ctx):
-        """Pick a meeting from the dropdown to see its attendance."""
+        """Pick a meeting from the dropdown to see its attendance.
+
+        Answered privately. The dropdown is only attached for the bureau — it is
+        the door to the per-member report, so handing it to everyone would make
+        the redaction above theatre.
+        """
         try:
             meetings = await store.list_meetings(25)
         except StoreError as exc:
             LOG.error("Meetings: /meeting list failed: %s", exc)
-            await ctx.send(f"⚠️ Couldn't read the meeting log: {exc}")
+            await ctx.send(f"⚠️ Couldn't read the meeting log: {exc}",
+                           ephemeral=True)
             return
         if not meetings:
             await ctx.send("🗓️ No meetings recorded yet. Start one with "
-                           "`/meeting start`.")
+                           "`/meeting start`.", ephemeral=True)
             return
+
+        if not is_meeting_admin(ctx.author):
+            await ctx.send(embed=meetlib.redacted_list_embed(meetings),
+                           ephemeral=True)
+            return
+
         view = MeetingListView(self, meetings, user=ctx.author)
-        await ctx.send(embed=meetlib.list_embed(meetings), view=view)
+        await ctx.send(embed=meetlib.list_embed(meetings), view=view,
+                       ephemeral=True)
 
     # ── commands: private voice rooms ────────────────────────────────
     @commands.hybrid_group(

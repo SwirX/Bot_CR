@@ -780,6 +780,58 @@ def list_embed(meetings: list[dict], *, live_id: str | None = None) -> discord.E
     return embed
 
 
+def redacted_stats_embed(meeting: dict, attended: int) -> discord.Embed:
+    """The stats page with every per-member detail removed.
+
+    What a non-bureau member is allowed to know about a meeting that happened:
+    that it happened, when, where, and roughly how many turned up. Not who came,
+    who left early, or who didn't come — that list is a performance record about
+    named individuals, and publishing it in a channel anyone can read is how a
+    club ends up with a monthly attendance league table nobody agreed to.
+
+    The counts are kept on purpose. "Twelve of fifteen came" leaks less than the
+    names do and is what most people actually want to know.
+    """
+    embed = discord.Embed(
+        title=f"📊 {meeting.get('title') or 'Meeting'}", color=MUTED)
+    where = (f"<#{meeting['channel_id']}>" if meeting.get("channel_id")
+             else "a now-deleted channel")
+    embed.add_field(name="🗓️ When", value=(
+        f"Started {friendly_time(meeting.get('started_at'))}\n"
+        f"Length **{meeting_length(meeting)}**"), inline=False)
+    embed.add_field(name="📍 Where", value=(
+        f"{where}\nAudience **{scope_label(meeting.get('scope') or '')}**"),
+        inline=False)
+    expected = len(meeting.get("expected") or [])
+    embed.add_field(
+        name="👥 Attendance",
+        value=(f"**{attended}** of {expected} invited" if expected
+               else f"**{attended}** attended")
+        + (f", {len(meeting.get('visitors') or [])} guest(s)"
+           if meeting.get("visitors") else ""),
+        inline=False)
+    embed.set_footer(text=(
+        "per-member attendance is kept for the bureau — ask them for the report"))
+    return embed
+
+
+def redacted_list_embed(meetings: list[dict]) -> discord.Embed:
+    """The meeting history with no drill-down.
+
+    Same history everyone can already infer from the channel, minus the
+    attendance figures that sit behind the dropdown. Keeping the history is
+    deliberate: "has the club been meeting?" is not sensitive, and a bot that
+    says "no" to an ordinary question trains people to reach for someone who
+    *can* answer.
+    """
+    embed = list_embed(meetings)
+    embed.colour = MUTED
+    embed.set_footer(text=(
+        "attendance per meeting is kept for the bureau — "
+        "ask them for the report"))
+    return embed
+
+
 def csv_filename(meeting: dict) -> str:
     """A stable, sortable attachment name: ``meeting-2026-09-25-1800-bureau.csv``."""
     stamp = (_parse(meeting.get("started_at") or "")

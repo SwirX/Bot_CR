@@ -115,6 +115,7 @@ class _FakeStore:
         self.grants: list[tuple[str, int]] = []
         self.locks: list[tuple[str, bool]] = []
         self.ended: list[str] = []
+        self.history: list[dict] = []
         self.fail_next = None
         self._clock = 0
 
@@ -136,6 +137,16 @@ class _FakeStore:
 
     async def get_live_meeting(self):
         return next(iter(self.live_by_channel.values()), None)
+
+    async def latest_meeting(self):
+        if self.fail_next == "latest":
+            raise meetings_mod.StoreError("hub is down")
+        return self.history[0] if self.history else None
+
+    async def list_meetings(self, limit=25):
+        if self.fail_next == "list":
+            raise meetings_mod.StoreError("hub is down")
+        return list(self.history[:limit])
 
     async def list_meeting_sessions(self, meeting_id, *, open_only=False):
         rows = self.sessions.get(meeting_id, [])
@@ -217,6 +228,60 @@ def drive(cog, store, member, before_id, after_id):
         finally:
             meetings_mod.store = real
     return asyncio.run(_go())
+
+
+class _Ctx:
+    """Just enough Context to call a command body: an author, and a send()."""
+
+    def __init__(self, author, guild=None):
+        self.author = author
+        self.guild = guild
+        self.sent: list[dict] = []
+
+    async def send(self, content=None, *, embed=None, view=None,
+                   ephemeral=False):
+        self.sent.append({"content": content, "embed": embed, "view": view,
+                          "ephemeral": ephemeral})
+
+
+def run_command(cog, store, ctx, name):
+    """Call one hybrid command's body, with the fake store patched in.
+
+    ``cog.meeting_last`` is the command object rather than a plain coroutine, so
+    the decorated callback underneath it is what gets invoked -- the same entry
+    point Discord reaches, minus the interaction plumbing. That callback is
+    unbound, hence the explicit ``cog``.
+    """
+    async def _go():
+        real = meetings_mod.store
+        meetings_mod.store = store
+        try:
+            await getattr(cog, name).callback(cog, ctx)
+        finally:
+            meetings_mod.store = real
+    asyncio.run(_go())
+    return ctx.sent
+
+
+def as_admin(*role_names):
+    """Run a block with MEETING_ADMIN_ROLES set to ``role_names``.
+
+    The tier is env-driven, so a test run with dummy credentials would otherwise
+    have nobody in it — and "the admin path" is precisely the path worth
+    exercising.
+    """
+    import contextlib
+    import config
+
+    @contextlib.contextmanager
+    def _swap():
+        real = config.MEETING_ADMIN_ROLES
+        config.MEETING_ADMIN_ROLES = set(role_names)
+        try:
+            yield
+        finally:
+            config.MEETING_ADMIN_ROLES = real
+    return _swap()
 
 
 def _view_children_ok(view, *, label, check):
@@ -633,6 +698,81 @@ def main() -> int:
           {k: v["overwrite"] for k, v in p["plan"].items()},
           {"11": {"type": "role", "perms": {"connect": True}},
            "99": None, "98": None})
+
+    # ── /meeting list and /meeting last are private, and tiered ────
+    # One meeting on record: Mgr attended it, member 2 was invited and never
+    # showed up. That is enough to tell a full report from a redacted one.
+    store.history = [{**store.meeting(scope="bureau", live=False),
+                      "ended_at": iso(minutes=60)}]
+    store.history[0]["expected"] = ["1", "2"]
+    store.sessions["m1"] = [
+        {"id": "s1", "meeting": "m1", "discord_user": "1",
+         "display_name": "Mgr", "scope_note": "bureau",
+         "joined_at": iso(), "left_at": iso(minutes=60), "open": False},
+    ]
+
+    print("\n/meeting last answers a regular member privately, without names")
+    plain = _Member("Cell", 7, "Member of IT Unit")
+    archon = _Member("Archon", 3, "「🏴」Archon of Robotics Club")
+    priv = _Ctx(plain, guild=chan.guild)
+    sent = run_command(cog, store, priv, "meeting_last")
+    check("one reply", len(sent), 1)
+    check("ephemeral, so a public channel shows nothing",
+          sent[0]["ephemeral"], True)
+    check("and no interactive panel is attached",
+          sent[0]["view"], None)
+    body = "".join(f.value or "" for f in (sent[0]["embed"] or
+                                           discord.Embed()).fields)
+    check("the headcount is still there", "**1** of 2 invited" in body, True)
+    check("but nobody is named",
+          any(f"<@{uid}>" in body for uid in (1, 2, 3, 7)), False)
+
+    print("\n/meeting last gives the bureau the full report, still privately")
+    with as_admin("「🏴」Archon of Robotics Club"):
+        boss = _Ctx(archon, guild=chan.guild)
+        sent = run_command(cog, store, boss, "meeting_last")
+    check("ephemeral too — the report is never posted for the channel",
+          sent[0]["ephemeral"], True)
+    check("a full stats view is attached", sent[0]["view"] is not None, True)
+    full = "".join(f.value or "" for f in sent[0]["embed"].fields)
+    check("the attendee is named", "<@1>" in full, True)
+    check("and so is the absentee", "<@2>" in full, True)
+
+    print("\n/meeting list gives a regular member the history and no dropdown")
+    priv = _Ctx(plain, guild=chan.guild)
+    sent = run_command(cog, store, priv, "meeting_list")
+    check("ephemeral", sent[0]["ephemeral"], True)
+    check("no dropdown — it is the door to the per-member report",
+          sent[0]["view"], None)
+    check("the history itself is still shown",
+          "meeting(s) on record" in (sent[0]["embed"].description or ""), True)
+
+    print("\n/meeting list gives the bureau the dropdown")
+    with as_admin("「🏴」Archon of Robotics Club"):
+        boss = _Ctx(archon, guild=chan.guild)
+        sent = run_command(cog, store, boss, "meeting_list")
+    check("ephemeral", sent[0]["ephemeral"], True)
+    check("with a view", sent[0]["view"] is not None, True)
+    _view_children_ok(sent[0]["view"], label="/meeting list picker", check=check)
+
+    print("\nno meetings recorded answers privately too")
+    empty_store = _FakeStore()
+    for cmd in ("meeting_last", "meeting_list"):
+        sent = run_command(cog, empty_store, _Ctx(archon, guild=chan.guild), cmd)
+        check(f"{cmd} says nothing is on record",
+              "No meetings recorded" in (sent[0]["content"] or ""), True)
+        check(f"{cmd} says so privately", sent[0]["ephemeral"], True)
+
+    print("\na store failure is reported privately, not as a public error")
+    store.fail_next = "latest"
+    sent = run_command(cog, store, _Ctx(archon, guild=chan.guild), "meeting_last")
+    check("the failure text is shown", "Couldn't read" in (sent[0]["content"] or ""), True)
+    check("and it is ephemeral", sent[0]["ephemeral"], True)
+    store.fail_next = "list"
+    sent = run_command(cog, store, _Ctx(archon, guild=chan.guild), "meeting_list")
+    check("same for /meeting list",
+          "Couldn't read" in (sent[0]["content"] or ""), True)
+    check("ephemeral too", sent[0]["ephemeral"], True)
 
     print("\n_issue_yellow_card writes the same row /warn does")
     written = {}
