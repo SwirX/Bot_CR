@@ -76,6 +76,20 @@ class _Channel:
         self.writes.append((getattr(target, "id", None), kw))
 
 
+class _DeletableChannel(_Channel):
+    """A _Channel that also records deletion, for the bot-created path."""
+
+    def __init__(self, channel_id=CHANNEL, **kw):
+        super().__init__(channel_id, **kw)
+        self.deleted = False
+        self.delete_error = None
+
+    async def delete(self, reason=None):
+        if self.delete_error:
+            raise self.delete_error
+        self.deleted = True
+
+
 class _GuildStub:
     def __init__(self):
         self._members = {}
@@ -494,6 +508,41 @@ def main() -> int:
     check("flag-shaped entry cannot crash the plan",
           isinstance(ml.restore_plan({ml.CHANNEL_CREATED_KEY: True},
                                      granted=set()), dict), True)
+
+    print("\nend_plan() picks delete, restore or skip — and never mixes them up")
+    real_snap = {"11": {"type": "role", "perms": {"connect": True}}}
+    p = ml.end_plan(real_snap, channel_exists=True, granted=set())
+    check("an existing channel is restored", p["action"], "restore")
+    check("and its overwrite is in the plan", sorted(p["plan"]), ["11"])
+    check("nothing to warn about", p["problem"], "")
+
+    p = ml.end_plan({ml.CHANNEL_CREATED_KEY: True}, channel_exists=True,
+                    granted={1, 2})
+    check("a bot-created channel is deleted", p["action"], "delete")
+    check("and nothing is restored onto it", p["plan"], {})
+    check("deletion is not a problem to report", p["problem"], "")
+
+    p = ml.end_plan({}, channel_exists=True, granted={1})
+    check("a missing snapshot is never treated as 'delete'", p["action"], "skip")
+    check("and it says why", "left as-is" in p["problem"], True)
+    p = ml.end_plan({}, channel_exists=False, granted=set())
+    check("a vanished channel is skipped", p["action"], "skip")
+    check("even if its sidecar says bot-created",
+          ml.end_plan({ml.CHANNEL_CREATED_KEY: True}, channel_exists=False,
+                      granted=set())["action"], "skip")
+    check("and reported as already gone",
+          "already gone" in ml.end_plan(real_snap, channel_exists=False,
+                                        granted=set())["problem"]
+          or "gone" in ml.end_plan(real_snap, channel_exists=False,
+                                   granted=set())["problem"], True)
+
+    print("\nend_plan() deletes every grant the bot made")
+    p = ml.end_plan({"11": {"type": "role", "perms": {"connect": True}}},
+                    channel_exists=True, granted={99, 98})
+    check("granted-but-absent targets are removed",
+          {k: v["overwrite"] for k, v in p["plan"].items()},
+          {"11": {"type": "role", "perms": {"connect": True}},
+           "99": None, "98": None})
 
     print("\n_issue_yellow_card writes the same row /warn does")
     written = {}

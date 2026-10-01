@@ -951,23 +951,35 @@ class Meetings(commands.Cog):
         for uid in [s["discord_user"] for s in sessions if s["open"]]:
             await self._close_session(meeting["id"], int(uid))
 
-        if channel is None:
-            problems.append("the channel is gone, so permissions couldn't be restored")
-        else:
+        created = False
+        snapshot: dict = {}
+        if channel is not None:
             snapshot = await store.meeting_channel_state(meeting["id"])
-            if not snapshot:
+        created = meetlib.channel_was_created(snapshot)
+
+        # Every member the bot granted is expected + visitors; targets that
+        # already existed are rewritten from the snapshot, and the rest are
+        # deleted so no grant outlives the meeting.
+        granted = {*(meeting["expected"] or []), *(meeting["visitors"] or [])}
+        decision = meetlib.end_plan(snapshot, channel_exists=channel is not None,
+                                    granted=set(granted))
+        if decision["problem"]:
+            problems.append(decision["problem"])
+        if decision["action"] == "delete" and channel is not None:
+            # A channel the bot made for this meeting has no previous state to
+            # return to; leaving it behind would just be clutter nobody owns.
+            try:
+                await channel.delete(reason="Meeting ended")
+            except (discord.Forbidden, discord.NotFound,
+                    discord.HTTPException) as exc:
+                LOG.info("Meetings: could not remove %s: %s", channel.id, exc)
                 problems.append(
-                    "no saved permission snapshot for this meeting, so the "
-                    "channel was left as-is")
-            else:
-                # Every member the bot granted is expected + visitors; targets that
-                # already existed are rewritten from the snapshot, and the rest
-                # are deleted so no grant outlives the meeting.
-                granted = {*(meeting["expected"] or []),
-                           *(meeting["visitors"] or [])}
-                failures = await self._restore_quietly(
-                    channel, snapshot, set(granted))
-                problems.extend(f"couldn't restore {who}" for who in failures)
+                    f"couldn't delete the meeting channel <#{channel.id}> — "
+                    "delete it by hand")
+        elif decision["action"] == "restore" and channel is not None:
+            failures = await self._restore_quietly(
+                channel, snapshot, set(granted))
+            problems.extend(f"couldn't restore {who}" for who in failures)
 
         try:
             await store.end_meeting(meeting["id"], at=ended_at)
@@ -980,8 +992,12 @@ class Meetings(commands.Cog):
 
         totals = meetlib.rollup(sessions, ended_at=ended_at,
                              granted=meeting["granted"])
-        where = (f"<#{meeting['channel_id']}>" if channel is not None
-                 else "a now-deleted channel")
+        if channel is None:
+            where = "a now-deleted channel"
+        elif created:
+            where = f"{channel.mention} (deleted)"
+        else:
+            where = channel.mention
         header = (f"✅ **Meeting ended** — `{meeting['title']}` in {where}\n"
                   f"{len(totals)} member(s) attended.")
         if meeting["planned_minutes"]:

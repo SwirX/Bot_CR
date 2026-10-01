@@ -354,6 +354,35 @@ def _dur_seconds(start: str, end: str, until: datetime | None = None) -> int:
     return max(0, int((b - a).total_seconds()))
 
 
+def end_plan(snapshot: dict, *, channel_exists: bool,
+             granted: set[int]) -> dict:
+    """What ``/meeting end`` should do with the meeting's channel.
+
+    Three mutually exclusive outcomes, and picking the wrong one is expensive in
+    both directions — deleting a channel the club owns, or leaving a permanent
+    ``connect`` deny on a channel that will never be cleaned up again — so the
+    decision is named and testable rather than a branch buried in the command:
+
+    ``delete``  the bot created this channel for the meeting, so there is no
+                prior state to return it to.
+    ``restore`` an existing channel: replay the snapshot and delete the grants
+                the bot added.
+    ``skip``    nothing to do, or nothing safe to do. ``problem`` carries the
+                sentence the user is shown; empty when there is nothing to say.
+    """
+    if not channel_exists:
+        return {"action": "skip", "plan": {}, "problem":
+                "the channel is gone, so permissions couldn't be restored"}
+    if channel_was_created(snapshot):
+        return {"action": "delete", "plan": {}, "problem": ""}
+    if not snapshot:
+        return {"action": "skip", "plan": {}, "problem":
+                "no saved permission snapshot for this meeting, so the channel "
+                "was left as-is"}
+    return {"action": "restore", "plan": restore_plan(snapshot, granted=granted),
+            "problem": ""}
+
+
 def rollup(sessions: list[dict], *, ended_at: str = "",
            granted: list[str] | None = None) -> dict[str, dict]:
     """Attendance rows -> one summary per member.
