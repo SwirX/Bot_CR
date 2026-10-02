@@ -5,9 +5,11 @@ roles (plus server admins) can run every staff command, regardless of Discord
 guild permissions. Regular members must still hold the required permission.
 
 Meeting administration is the one deliberate exception: ``/meeting start|end|
-lock|unlock`` runs on :func:`require_meeting_admin`, a *narrower* allowlist
-(the bureau offices) rather than bot staff, because starting a meeting rewrites
-a real channel's permissions and rewrites the club's attendance record.
+lock|unlock`` and the per-member half of the reports run on
+:func:`require_meeting_admin`, a narrower allowlist (the bureau offices, the bot
+developer, and any explicitly listed id) rather than all of bot staff, because
+starting a meeting rewrites a real channel's permissions and rewrites the club's
+attendance record.
 """
 
 import re
@@ -149,16 +151,20 @@ def meeting_tier(member: discord.Member) -> str | None:
 
 
 def is_meeting_admin(member: discord.Member) -> bool:
-    """True for the bureau offices or a whitelisted operator id.
+    """True for the meeting tier: the bureau, the bot developer, or a whitelisted id.
 
-    Deliberately *only* those two sources — Archon, President, Vice President,
-    Manager (``MEETING_ADMIN_ROLES``) and the ids in
-    ``MEETING_ADMIN_USER_IDS``. Bot staff are intentionally **not** folded in:
-    :func:`is_bot_admin` is a separate, much wider tier (server admins, the
-    developer roles), and running a meeting is not a developer action. If the
-    club ever wants a developer able to recover a channel mid-meeting, add
-    that id to ``MEETING_ADMIN_USER_IDS`` rather than widening this gate —
-    that keeps the escape hatch explicit and auditable in ``.env``.
+    Two sources, and only those two — the roles in ``MEETING_ADMIN_ROLES``
+    (Archon, President, Vice President, Manager, Bot Developer) and the ids in
+    ``MEETING_ADMIN_USER_IDS``. The rest of bot staff is intentionally *not*
+    folded in: :func:`is_bot_admin` is a separate, much wider tier (server
+    admins, the developer roles), and running a meeting is not a developer
+    action.
+
+    The developer role that *is* here is on the reports as much as the commands:
+    the per-member breakdown names individuals and can write a yellow card to
+    their profile, so that is not something to decide without whoever maintains
+    the bot in the room. Anyone else can be added by id instead of widening the
+    role list — that keeps the escape hatch explicit and auditable in ``.env``.
     """
     if member.id in config.MEETING_ADMIN_USER_IDS:
         return True
