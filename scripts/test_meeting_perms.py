@@ -111,10 +111,11 @@ def main() -> int:
         else:
             print(f"  ✓ {label} = {got!r}")
 
-    print("configured admin tier is exactly the four bureau offices")
+    print("configured admin tier is the four bureau offices plus the developer")
     tier = {role_key(name) for name in config.MEETING_ADMIN_ROLES}
     check("MEETING_ADMIN_ROLES", tier, {"manager", "president",
-                                        "vice president", "archon of robotics club"})
+                                        "vice president", "archon of robotics club",
+                                        "bot developer"})
     check("operator id whitelisted", SWIRX in config.MEETING_ADMIN_USER_IDS, True)
 
     print("\nrole_key() strips the club's glyph decoration and folds case")
@@ -155,7 +156,7 @@ def main() -> int:
           meeting_tier(_Member("「✨」New Member", "「👸」Manager")), "bureau")
     check("only decorations + level", meeting_tier(_Member("🌿 | LVL 05+")), None)
 
-    print("\nis_meeting_admin() — the four bureau offices plus the operator")
+    print("\nis_meeting_admin() — the bureau, the developer, and the operator")
     check("whitelisted operator", is_meeting_admin(_Member("「✨」New Member", uid=SWIRX)), True)
     check("operator outranks a plain role set",
           is_meeting_admin(_Member("🌿 | LVL 01+", uid=SWIRX)), True)
@@ -163,6 +164,9 @@ def main() -> int:
     check("President", is_meeting_admin(_Member("「👸」President")), True)
     check("Vice President", is_meeting_admin(_Member("「👸」Vice President")), True)
     check("Manager", is_meeting_admin(_Member("「👸」Manager")), True)
+    # The reports name individuals and can write a yellow card to a profile, so
+    # whoever maintains the bot is in on deciding that.
+    check("Bot Developer", is_meeting_admin(_Member("「👨‍💻」Bot Developer")), True)
 
     print("\n...and nobody else, including the wider bot-staff tier")
     # Unit heads run their unit's work but are audience, not organisers.
@@ -170,9 +174,13 @@ def main() -> int:
     check("cell member", is_meeting_admin(_Member("「🔧」Member of Technical Unit")), False)
     check("plain member", is_meeting_admin(_Member("「✨」New Member", uid=999)), False)
     check("stranger", is_meeting_admin(_Member("🌿 | LVL 01+", uid=999)), False)
-    # Bot staff are a separate tier and must NOT leak into meeting admin.
+    # Bot staff are a separate tier: only the Bot Developer is pulled across,
+    # and the Server Developer must NOT leak in with it.
     check("server developer", is_meeting_admin(_Member("「👨‍💻」Server Developer")), False)
-    check("bot developer", is_meeting_admin(_Member("「👨‍💻」Bot Developer")), False)
+    # The .env stores the developer role without the ZWJ the server uses; the
+    # comparison must not care, or the developer silently loses access.
+    check("developer role as written in .env, no ZWJ",
+          is_meeting_admin(_Member("「👨💻」Bot Developer")), True)
     # An office holder is an admin by role, Discord permission or not.
     admin = _Member("「👸」Manager")
     admin.guild_permissions.administrator = True

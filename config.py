@@ -90,24 +90,35 @@ LEADER_ROLES = [s.strip() for s in _env(
     "LEADER_ROLES", "Lead,Vice President,President").split(",") if s.strip()]
 
 # ── Meeting admin / audience roles ─────────────────────────────────────
-# /meeting start, /meeting end, /meeting lock and /meeting unlock are gated on
-# MEETING_ADMIN_ROLES plus MEETING_ADMIN_USER_IDS. These are EXACT Discord role
-# display names (emoji prefixes included) — the bot matches role names
-# literally, so a stale name here silently drops an admin.
+# /meeting start, /meeting end, /meeting lock, /meeting unlock and the per-member
+# half of /meeting list and /meeting last are gated on MEETING_ADMIN_ROLES plus
+# MEETING_ADMIN_USER_IDS. These are EXACT Discord role display names (emoji
+# prefixes included) — the bot matches role names literally, so a stale name here
+# silently drops an admin. Matched through _perms.role_key, which strips emoji
+# and brackets, so "👨‍💻" and "👨💻" compare equal and a glyph mismatch cannot
+# quietly exclude the developer.
 #
-# Note this is deliberately *narrower* than bot staff: the Manager role is a
-# meeting admin, and the Cell Chiefs are not — they are the audience, not the
-# organisers. The bot operator stays covered through
-# MEETING_ADMIN_USER_IDS so a role reshuffle can't lock the club out of its own
-# meeting log.
+# The Bot Developer is here because the reports name individuals and carry a
+# button that writes to their profile: keeping someone with the technical
+# details out of the room where that is decided is how it gets misused. The
+# *other* bot-staff roles (server admins, the Server Developer) stay out — the
+# audience's organisers are still not the whole staff team. An individual can be
+# added to MEETING_ADMIN_USER_IDS instead of widening this list.
+#
+# The bot operator is covered through MEETING_ADMIN_USER_IDS so a role reshuffle
+# can't lock the club out of its own meeting log.
 ROLE_MANAGER = _env("ROLE_MANAGER", "「👸」Manager")
 MEETING_ADMIN_ROLES = frozenset(
     r.strip() for r in _env(
         "MEETING_ADMIN_ROLES",
-        f"{ROLE_ARCHON},{ROLE_PRESIDENT},{ROLE_VICE_PRESIDENT},{ROLE_MANAGER}",
+        f"{ROLE_ARCHON},{ROLE_PRESIDENT},{ROLE_VICE_PRESIDENT},"
+        f"{ROLE_MANAGER},{ROLE_BOT_DEVELOPER}",
     ).split(",") if r.strip()
 )
-# Discord user ids that may always run the /meeting admin commands.
+# Discord user ids that may always run the /meeting admin commands, whether or
+# not they hold any of the roles above. Set this explicitly rather than relying
+# on the BOT_ADMIN_USER_IDS fallback when a named person needs an override that
+# survives losing (or never having) the Archon role.
 MEETING_ADMIN_USER_IDS = frozenset(
     int(i) for i in _env("MEETING_ADMIN_USER_IDS", _env("BOT_ADMIN_USER_IDS", ""))
     .split(",") if i.strip().isdigit()
