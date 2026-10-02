@@ -467,9 +467,10 @@ class Meetings(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.send(
                 "🔒 **Meetings**\n"
-                "`/meeting start` — start a tracked meeting in a voice channel\n"
+                "`/meeting start` — start a tracked meeting; leave the channel\n"
+                "                         blank and the bot makes one\n"
                 "`/meeting end` — end the running meeting\n"
-                "`/meeting list` — browse past meetings and their attendance\n"
+                "`/meeting list` — browse past meetings\n"
                 "`/meeting last` — stats for the most recent meeting\n"
                 "`/meeting lock` / `/meeting unlock` — manage the lockout\n"
                 "\n**Private voice rooms**\n"
@@ -1210,9 +1211,10 @@ class Meetings(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.send(
                 "🔒 **Meetings**\n"
-                "`/meeting start` — start a tracked meeting in a voice channel\n"
+                "`/meeting start` — start a tracked meeting; leave the channel\n"
+                "                         blank and the bot makes one\n"
                 "`/meeting end` — end the running meeting\n"
-                "`/meeting list` — browse past meetings and their attendance\n"
+                "`/meeting list` — browse past meetings\n"
                 "`/meeting last` — stats for the most recent meeting\n"
                 "`/meeting lock` / `/meeting unlock` — manage the lockout\n"
                 "\n**Private voice rooms**\n"
