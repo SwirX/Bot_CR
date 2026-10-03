@@ -1349,28 +1349,14 @@ class Meetings(commands.Cog):
                        ephemeral=True)
 
     # ── commands: private voice rooms ────────────────────────────────
-    @commands.hybrid_group(
-        name="meeting",
-        description="Club meetings with attendance tracking, and private voice rooms.")
-    @commands.guild_only()
-    async def meeting(self, ctx):
-        """Parent group — prints usage when invoked without a subcommand."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send(
-                "🔒 **Meetings**\n"
-                "`/meeting start` — start a tracked meeting; leave the channel\n"
-                "                         blank and the bot makes one, and pick\n"
-                "                         the audience from the dropdown\n"
-                "`/meeting end` — end the running meeting\n"
-                "`/meeting list` — browse past meetings\n"
-                "`/meeting last` — stats for the most recent meeting\n"
-                "`/meeting lock` / `/meeting unlock` — manage the lockout\n"
-                "\n**Private voice rooms**\n"
-                "`/meeting create [name]` — spin up a private VC, then "
-                "pick who gets in\n"
-                "`/meeting endroom` — end your room early"
-            )
-
+    # No second `meeting` group here. Two `hybrid_group(name="meeting")`
+    # definitions used to sit in this class, and the subcommands below bound to
+    # whichever one was nearest — so the class attribute was the second group
+    # while `start`/`end`/`lock`/`unlock`/`list`/`last` hung off the first. It
+    # appeared to work only because discord.py merges same-named groups when
+    # they are added to the tree, which is not something to rely on: the
+    # serialised command is what Discord actually sees, and a merge that stopped
+    # happening would silently drop every subcommand of one group.
     @meeting.command(name="create",
                      description="Create a private voice room with you + the picked members.")
     @commands.guild_only()
