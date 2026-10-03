@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import discord  # noqa: E402
+from discord.ext import commands  # noqa: E402
 
 from cogs import _meetings as ml  # noqa: E402
 import cogs.meetings as meetings_mod  # noqa: E402
@@ -429,6 +430,49 @@ def _view_children_ok(view, *, label, check):
     check(f"{label}: no row exceeds 5 components",
           max((len(row["components"]) for row in rows), default=0) <= 5, True)
     return flat
+
+
+def _check_command_tree(*, check) -> None:
+    """Assert /meeting is one group holding every subcommand.
+
+    Two things are checked, because only the first one can actually fail: how
+    the subcommands are *parented*, and what Discord ends up receiving.
+
+    This cog used to carry two ``@commands.hybrid_group(name="meeting")``
+    definitions, with ``start``/``end``/``lock``/``unlock``/``list``/``last``
+    bound to the first and ``create``/``endroom`` to the second. Nothing looked
+    wrong from the outside, because the app-command tree merges same-named
+    groups on the way in and the serialised command held all eight. That merge
+    is the only reason it worked, so the parent count -- two before, one now --
+    is asserted directly rather than inferred from the tree.
+    """
+    parents = {}
+    for command in Meetings.__cog_commands__:
+        name = getattr(command, "qualified_name", command.name)
+        parent = getattr(command, "parent", None)
+        if name.startswith("meeting ") and parent is not None:
+            parents.setdefault(id(parent), []).append(name)
+    check("every /meeting subcommand shares one parent group", len(parents), 1)
+
+    async def _build():
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        await bot.add_cog(Meetings(bot))
+        return bot
+
+    bot = asyncio.run(_build())
+
+    roots = [c for c in bot.tree.get_commands() if c.name == "meeting"]
+    check("one /meeting root in the tree", len(roots), 1)
+    if len(roots) != 1:
+        return
+
+    want = {"start", "end", "lock", "unlock", "last", "list", "create",
+            "endroom"}
+    check("every subcommand hangs off it",
+          {c.name for c in roots[0].commands}, want)
+    payload = roots[0].to_dict(bot.tree)
+    check("and all of them reach Discord",
+          {o["name"] for o in payload.get("options", [])}, want)
 
 
 def main() -> int:
@@ -1130,6 +1174,15 @@ def main() -> int:
     ok, err = asyncio.run(_issue(cog2, _CardOkStore(), 1))
     check("the card still counts as issued", ok, True)
     check("and no error is shown to the user", err, None)
+
+    print("\nthe cog registers exactly one /meeting group, holding every subcommand")
+    # This used to be two `hybrid_group(name="meeting")` definitions, with the
+    # subcommands split across them. It *looked* fine because discord.py merges
+    # same-named groups on the way into the tree -- which is exactly the sort of
+    # accident that should not be load-bearing, since the serialised command is
+    # what Discord sees. Pinning the structure here means a re-split fails loudly
+    # instead of silently depending on that merge.
+    _check_command_tree(check=check)
 
     if failures:
         print(f"\n✗ {len(failures)} FAILURE(S)")
