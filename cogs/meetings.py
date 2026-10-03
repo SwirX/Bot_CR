@@ -29,7 +29,7 @@ from discord.ext import commands
 import config
 from cogs import _meetings as meetlib
 from cogs._perms import is_meeting_admin, require_meeting_admin
-from cogs._ui import OwnerView, close_panel, select_value
+from cogs._ui import MemberPickerView, OwnerView, close_panel, select_value
 from data.store import store
 from data.store import StoreError
 
@@ -445,6 +445,67 @@ class Meetings(commands.Cog):
         await channel.set_permissions(
             member, view_channel=True, connect=True, speak=True
         )
+
+    async def _delete_room_quietly(self, channel: discord.VoiceChannel) -> None:
+        """Drop a half-built private room, leaving nothing behind.
+
+        Used on the paths where the room exists but is not usable — a failed
+        lockdown in particular, since a room the whole server can walk into is
+        worse than no room at all.
+        """
+        self.meetings.pop(channel.id, None)
+        await self._save_meetings()
+        try:
+            await channel.delete(reason="Private room setup failed")
+        except (discord.Forbidden, discord.NotFound,
+                discord.HTTPException) as exc:
+            LOG.info("Meetings: could not remove failed room %s: %s",
+                     channel.id, exc)
+
+    async def _room_invite_picker(self, ctx, channel: discord.VoiceChannel):
+        """Offer a member dropdown for adding people to a fresh private room.
+
+        The slash form of ``/meeting create`` cannot carry a list of members —
+        Discord has no such command option — so this is how a room gets its
+        invitees from the Discord UI. Only members who can already be seen are
+        offered; the room's owner is excluded because they are in it by
+        definition.
+        """
+        candidates = sorted(
+            (m for m in ctx.guild.members
+             if not m.bot and m.id != ctx.author.id),
+            key=lambda m: (m.display_name or m.name).lower())
+        if not candidates:
+            return None
+
+        async def _added(interaction, picked):
+            added = []
+            for member in picked:
+                try:
+                    await self._grant_access(channel, member)
+                except discord.HTTPException as exc:
+                    LOG.error("Meetings: invite failed for %s: %s",
+                              member.id, exc)
+                    continue
+                registry = self.meetings.get(channel.id)
+                if registry is not None and member.id not in registry["members"]:
+                    registry["members"].append(member.id)
+                added.append(member.mention)
+            await self._save_meetings()
+            try:
+                await interaction.followup.send(
+                    f"🔓 Added {len(added)} to `{channel.name}`."
+                    + (f" Invited: {', '.join(added)}." if added else "")
+                    + " Anyone not listed still can't get in.",
+                    ephemeral=True)
+            except discord.HTTPException:
+                pass
+
+        view = MemberPickerView(
+            candidates, on_confirm=_added, user=ctx.author,
+            page_size=config.MEMBER_PICKER_PAGE_SIZE,
+            placeholder="➕ Pick people to let in…")
+        return view
 
     async def _destroy_meeting(self, channel_id: int) -> None:
         """Delete a room and drop it from the registry (empty rooms only)."""
@@ -1223,17 +1284,25 @@ class Meetings(commands.Cog):
             )
 
     @meeting.command(name="create",
-                     description="Create a private voice room with you + the tagged members.")
+                     description="Create a private voice room with you + the picked members.")
     @commands.guild_only()
     @commands.bot_has_permissions(manage_channels=True, move_members=True)
-    async def meeting_create(self, ctx, members: commands.Greedy[discord.Member], *,
+    async def meeting_create(self, ctx, members: commands.Greedy[discord.Member] = None, *,
                              name: str | None = None):
+        """Spin up a private voice room only the invitees can enter.
+
+        Invite people by **tagging them**, or leave the list empty and pick them
+        from the dropdown that appears once the room exists. Discord has no
+        "several users" command option, so a tagged list arriving as a *slash*
+        command is text the bot cannot resolve — the dropdown is the path that
+        works from the Discord UI.
+        """
         guild = ctx.guild
         author = ctx.author
 
         allowed = [author]
         seen = {author.id}
-        for member in members:
+        for member in (members or []):
             if member.id in seen or member == author or member.bot:
                 continue
             seen.add(member.id)
@@ -1254,39 +1323,59 @@ class Meetings(commands.Cog):
                 f"🔒 {room_name}", category=category,
                 reason=f"Private meeting room by {author.name}",
             )
+        except discord.Forbidden:
+            await ctx.send("❌ I need **Manage Channels** to make a private room.")
+            return
         except discord.HTTPException as exc:
             await ctx.send(f"⚠️ Couldn't create the voice channel: {exc}")
             return
 
         # Lock it down: everyone loses access, the invitees get it back.
-        await channel.set_permissions(guild.default_role, view_channel=False, connect=False)
-        await channel.set_permissions(
-            guild.me, view_channel=True, connect=True, manage_channels=True, move_members=True
-        )
+        try:
+            await channel.set_permissions(guild.default_role,
+                                          view_channel=False, connect=False)
+            await channel.set_permissions(
+                guild.me, view_channel=True, connect=True,
+                manage_channels=True, move_members=True,
+            )
+        except discord.HTTPException as exc:
+            LOG.error("Meetings: could not lock down %s: %s", channel.id, exc)
+            await self._delete_room_quietly(channel)
+            await ctx.send(f"⚠️ Created the room but couldn't lock it down: {exc}")
+            return
         for member in allowed:
             await self._grant_access(channel, member)
 
-        self.meetings[channel.id] = {"owner": author.id, "members": [m.id for m in allowed]}
+        self.meetings[channel.id] = {"owner": author.id,
+                                     "members": [m.id for m in allowed]}
         await self._save_meetings()
-
-        # Move everyone who is already in voice on this guild into the room.
-        moved = []
-        for member in allowed:
-            if member.voice and member.voice.channel and member.voice.channel != channel:
-                try:
-                    await member.move_to(channel)
-                    moved.append(member.display_name)
-                except discord.HTTPException:
-                    pass
 
         mentions = ", ".join(m.mention for m in allowed)
         message = (
             f"🔒 Private room `{channel.name}` ready for {mentions}.\n"
             "Only the people above can join — it deletes itself once empty."
         )
-        if moved:
-            message += "\nMoved in: " + ", ".join(moved)
-        await ctx.send(message)
+
+        # With no invitees there is nothing else to decide, so the room is
+        # offered up for picking people rather than finished here.
+        view = None
+        if len(allowed) == 1:
+            message += "\nNobody else can get in yet — add people below."
+            view = await self._room_invite_picker(ctx, channel)
+        else:
+            # Move everyone who is already in voice on this guild into the room.
+            moved = []
+            for member in allowed:
+                if (member.voice and member.voice.channel
+                        and member.voice.channel != channel):
+                    try:
+                        await member.move_to(channel)
+                        moved.append(member.display_name)
+                    except discord.HTTPException:
+                        pass
+            if moved:
+                message += "\nMoved in: " + ", ".join(moved)
+        await ctx.send(message, view=view)
 
     @meeting.command(name="endroom", aliases=["closeroom"],
                      description="Delete your private meeting room.")

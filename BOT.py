@@ -93,6 +93,12 @@ async def on_application_command_error(
         content = f"⏳ Slow down! Try again in {error.retry_after:.0f}s."
     elif isinstance(error, discord.app_commands.MissingPermissions):
         content = f"⛔ You need `{', '.join(error.missing_permissions)}` to use that."
+    elif (hint := _argument_hint(error)) is not None:
+        # Bad *input* is not an internal failure and must not read as one: the
+        # user can fix it, and "something went wrong" tells them nothing about
+        # what to change. Only the conversion layer's own message is shown --
+        # never the wrapped command's internals.
+        content = f"❓ {hint}"
     else:
         LOG.error("Slash command %r failed: %s", interaction.command, error)
         content = "⚠️ Something went wrong."
@@ -100,6 +106,31 @@ async def on_application_command_error(
         await interaction.response.send_message(content, ephemeral=True)
     except discord.InteractionResponded:
         await interaction.followup.send(content, ephemeral=True)
+
+
+def _argument_hint(error: Exception) -> str | None:
+    """A user-facing message for a failed argument conversion, else ``None``.
+
+    Hybrid commands run their slash arguments through the same converters as
+    text ones, so ``BadArgument`` arrives wrapped in ``CommandInvokeError`` with
+    the real cause a few layers down. The most common way to hit it is passing
+    something Discord's own UI cannot resolve -- typing ``@alice`` into an
+    option that arrived as a plain string, because Discord has no multi-user
+    option type for the converter to work from.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, commands.BadArgument):
+            text = str(error)
+            return text or "I couldn't read one of the values you entered."
+        # ``ext.commands`` chains via __cause__, ``app_commands`` keeps it on
+        # ``.original`` -- following only one of them means the hint silently
+        # stops appearing whenever the other flavour raises.
+        error = (getattr(error, "__cause__", None)
+                 or getattr(error, "original", None)
+                 or getattr(error, "original_error", None))
+    return None
 
 
 async def load_cogs():
