@@ -12,8 +12,8 @@ import discord
 
 LOG = logging.getLogger("bot.ui")
 
-__all__ = ["ConfirmView", "PaginatorView", "OwnerView",
-           "LoggedView", "close_panel"]
+__all__ = ["ConfirmView", "MemberPickerView", "PaginatorView", "OwnerView",
+           "LoggedView", "close_panel", "select_value"]
 
 
 class OwnerView:
@@ -110,6 +110,205 @@ def select_value(interaction: discord.Interaction) -> str:
     data = interaction.data or {}
     values = data.get("values")
     return str(values[0]) if values else ""
+
+
+class MemberPickerView(OwnerView, LoggedView, discord.ui.View):
+    """◀ ▶ multi-select over the guild's members, with a ✅ confirm step.
+
+    Discord has no command option that means "several users at once" — a command
+    option is exactly one value of exactly one type — so any flow that needs
+    several people chosen has to be a component instead. That is not a stylistic
+    preference: ``commands.Greedy[discord.Member]`` serialises to a plain string
+    option, because there is no app-command shape for it, and the members the
+    user typed arrive as text that the converter then fails on.
+
+    A select menu can hold 25 chosen values, but only out of the 25 options on
+    the page it is showing, so a guild with more members than that needs paging
+    *and* per-page selection state. ``_per_page`` is what makes a choice survive
+    a page change instead of being silently replaced by whatever is on the new
+    page — the alternative, rebuilding from the menu's current ``values``, loses
+    every earlier page the moment the user turns the corner.
+
+    ``on_confirm`` is an async callable taking ``(interaction, members)``.
+    """
+
+    #: Discord's hard cap on options in one select menu, and on values chosen
+    #: from it. Overriding either raises inside ``to_components()`` — after the
+    #: flow has been built and usually after someone has already pressed
+    #: something.
+    _MAX = 25
+
+    def __init__(self, candidates: list[discord.Member], *,
+                 on_confirm, user, page_size: int = _MAX,
+                 timeout: float = 300.0,
+                 placeholder: str = "🔎 Pick people…"):
+        super().__init__(timeout=timeout)
+        self.candidates = [m for m in candidates if not getattr(m, "bot", False)]
+        self.on_confirm = on_confirm
+        self.user_id = user.id if hasattr(user, "id") else user
+        self.placeholder = placeholder
+        # A zero-member page would be a select with no options, which discord.py
+        # rejects outright; callers are expected to check first, but clamping to
+        # at least one keeps a miscount from crashing a live interaction.
+        self.page_size = max(1, min(page_size, self._MAX, len(self.candidates) or 1))
+        self.pages = max(1, -(-len(self.candidates) // self.page_size))
+        self._page = 0
+        self._per_page: dict[int, set[str]] = {}
+        self.select: discord.ui.Select | None = None
+        self.confirmed = False
+        self.cancelled = False
+        self._rebuild()
+
+    # ── selection state ────────────────────────────────────────────
+    def selected(self) -> list[discord.Member]:
+        """Chosen members, in the picker's own (stable, name-sorted) order.
+
+        Deduplicated across pages: a member can only appear on one page, but
+        building the union defensively means a future re-ordering of
+        ``candidates`` can't hand the caller the same person twice.
+        """
+        chosen: dict[int, discord.Member] = {}
+        for ids in self._per_page.values():
+            for uid in ids:
+                member = next((m for m in self.candidates if str(m.id) == uid), None)
+                if member is not None:
+                    chosen[member.id] = member
+        return [m for m in self.candidates if m.id in chosen]
+
+    def _page_members(self) -> list[discord.Member]:
+        start = self._page * self.page_size
+        return self.candidates[start:start + self.page_size]
+
+    def _make_select(self) -> discord.ui.Select:
+        picked = self._per_page.get(self._page, set())
+        options = []
+        for member in self._page_members():
+            options.append(discord.SelectOption(
+                label=(member.display_name or member.name)[:100],
+                value=str(member.id),
+                description=_role_hint(member)[:100],
+                default=str(member.id) in picked,
+            ))
+        select = discord.ui.Select(
+            placeholder=self.placeholder, min_values=0,
+            # A multi-select needs headroom over the page size or a full page
+            # could not be selected at once.
+            max_values=min(self._MAX, max(1, len(options))),
+            options=options, row=0)
+        select.callback = self._on_select
+        return select
+
+    def _rebuild(self) -> None:
+        """Swap in a select menu holding the current page's options."""
+        if self.select is not None:
+            self.remove_item(self.select)
+        self.select = self._make_select()
+        self.add_item(self.select)
+        self.prev.disabled = self._page == 0
+        self.next.disabled = self._page >= self.pages - 1
+        self.page_label.label = f"{self._page + 1}/{self.pages}"
+        self.confirm.disabled = not self.selected()
+
+    # ── callbacks ──────────────────────────────────────────────────
+    def _owner_deny_message(self, _interaction: discord.Interaction) -> str:
+        return ("🔒 This picker belongs to the command author — run the command "
+                "yourself to pick from it.")
+
+    async def _edit(self, interaction: discord.Interaction, **kwargs) -> None:
+        try:
+            await interaction.response.edit_message(view=self, **kwargs)
+        except discord.InteractionResponded:
+            await interaction.followup.edit_message(interaction.message.id,
+                                                    view=self, **kwargs)
+        except discord.HTTPException:
+            pass
+
+    async def _notify(self, interaction: discord.Interaction, text: str) -> None:
+        """Ephemeral notice for a refusal that must not replace the picker."""
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        if not await self._owned(interaction):
+            return
+        # Read through the raw payload: this select is multi-value, so
+        # select_value() (first value only) would keep exactly one person.
+        values = (interaction.data or {}).get("values") or []
+        self._per_page[self._page] = {str(v) for v in values}
+        self._rebuild()
+        await self._edit(interaction)
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        self._page = max(0, self._page - 1)
+        self._rebuild()
+        await self._edit(interaction)
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary, label="1/1",
+                       disabled=True, row=1)
+    async def page_label(self, _interaction: discord.Interaction,
+                         _button: discord.ui.Button):
+        pass
+
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary, row=1)
+    async def next(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        self._page = min(self.pages - 1, self._page + 1)
+        self._rebuild()
+        await self._edit(interaction)
+
+    @discord.ui.button(emoji="✅", style=discord.ButtonStyle.success, row=1)
+    async def confirm(self, interaction: discord.Interaction,
+                      _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        members = self.selected()
+        if not members:
+            # The button is disabled in this state, so this should be
+            # unreachable — but the guard belongs here rather than in the
+            # disabled flag, because an empty selection handed to a caller that
+            # is about to start a meeting is a silent, confusing failure.
+            await self._notify(interaction, "Pick at least one person first.")
+            return
+        self.confirmed = True
+        for child in self.children:
+            child.disabled = True
+        await self._edit(interaction, content="✅ picked.", embed=None)
+        await self.on_confirm(interaction, members)
+
+    @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(self, interaction: discord.Interaction,
+                     _button: discord.ui.Button):
+        if not await self._owned(interaction):
+            return
+        self.cancelled = True
+        for child in self.children:
+            child.disabled = True
+        await self._edit(interaction, content="❌ Cancelled.", embed=None)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+def _role_hint(member: discord.Member) -> str:
+    """One-line 'who is this' for a select option.
+
+    The most senior role they hold, so a 200-person picker is still navigable
+    by looking for "President" instead of comparing display names.
+    """
+    roles = [r for r in getattr(member, "roles", ())
+             if getattr(r, "name", "") and not getattr(r, "managed", False)
+             and r.name != "@everyone"]
+    return roles[-1].name if roles else "no club role"
 
 
 async def close_panel(interaction: discord.Interaction, *, text: str,
