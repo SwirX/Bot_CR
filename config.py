@@ -143,6 +143,10 @@ MEETING_EXCLUDED_ROLE_KEYWORDS = ("bot", "jockie", "easypoll", "minecraft ping")
 # audience, and how many absentees the report page lists per page.
 MEETING_MAX_EXTRA_MEMBERS = _env("MEETING_MAX_EXTRA_MEMBERS", 25, cast=int)
 MEETING_ABSENTEE_PAGE_SIZE = _env("MEETING_ABSENTEE_PAGE_SIZE", 10, cast=int)
+# Members per page in the interactive member picker. Discord caps a select menu
+# at 25 options, so raising this past 25 does nothing but confuse.
+MEMBER_PICKER_PAGE_SIZE = max(1, min(25, _env("MEMBER_PICKER_PAGE_SIZE", 25,
+                                             cast=int)))
 # Cap on per-member "you already left" deny-overwrites a lock may create.
 # Discord allows 100 overwrites per channel, so the bot stays well clear of it.
 MEETING_MAX_LOCKED_OUT = _env("MEETING_MAX_LOCKED_OUT", 60, cast=int)
