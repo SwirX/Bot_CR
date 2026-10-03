@@ -74,18 +74,20 @@ command works as both `!prefix` and `/slash`.
 - 🔁 **JockieMusic migration nudge** — members who still type `m!` get a
   friendly pitch for `/play` and `/queue auto` (once per user, rarely per
   channel), so the old music bot converts without ever feeling like spam.
-- 🗣 **Club meetings with attendance** — `/meeting start 60 bureau` creates a
-  channel for the meeting, or name one to scope it instead; either way the bot
-  restricts it to the invited audience, records every join and leave as it
-  happens, and hands back a report splitting the audience into who stayed, who
-  left early and who never came — plus a CSV of the full timeline and a paged
-  absentee list with a yellow-card button per absence. Reports are answered
-  privately, and per-member detail is limited to the bureau and the bot
+- 🗣 **Club meetings with attendance** — `/meeting start` creates a channel for
+  the meeting, or name one to scope it instead; either way the bot restricts it
+  to the audience you pick from a dropdown (**Bureau**, **Cell members**, **All
+  members**, or **Custom** for a hand-picked list), records every join and leave
+  as it happens, and hands back a report splitting the audience into who stayed,
+  who left early and who never came — plus a CSV of the full timeline and a
+  paged absentee list with a yellow-card button per absence. Reports are
+  answered privately, and per-member detail is limited to the bureau and the bot
   developer. `/meeting lock` denies re-entry to leavers until an admin calls
   `/meeting unlock @member` by name. See
   [Meetings](#-meetings-meeting-start--end) below.
-- 🤖 **Private meeting rooms** — `/meeting create @a @b [name]` spins up a
-  private VC (auto-deleted when empty), `/meeting endroom` cleans it up.
+- 🤖 **Private meeting rooms** — `/meeting create [name]` spins up a private VC
+  (auto-deleted when empty) and offers a dropdown to pick who gets in;
+  `/meeting endroom` cleans it up.
 - 🔐 **Club permission scopes** — an authorization layer instead of scattered
   role checks: every club command is gated on a scope (`tasks.create`,
   `members.manage`, `competitions.manage`, …) resolved from the member's
@@ -183,8 +185,8 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `keep` | everyone | Vote against an open skip/remove vote (the requester's keep vetoes) |
 | `radio <station>` | everyone | Stream any live internet radio station by name |
 | `stop`, `loop`, `volume <1-100>`, `nowplaying` | everyone | Music control |
-| `meeting create <@members...> [name]`, `meeting endroom` | everyone | Private VC room (aliases: `closeroom`) |
-| `meeting start [<#channel>] <minutes> [audience] [@members...]` | meeting admin | Start a tracked meeting. No channel? The bot makes one and deletes it at the end |
+| `meeting create [name]`, `meeting endroom` | everyone | Private VC room, with a dropdown to pick who gets in (aliases: `closeroom`) |
+| `meeting start [<#channel>] [audience] [minutes]` | meeting admin | Start a tracked meeting. `audience` is a dropdown: Bureau / Cell members / All members / Custom. No channel? The bot makes one and deletes it at the end |
 | `meeting end` | meeting admin | End the meeting; restore the channel, or delete it if the bot made it |
 | `meeting lock` | meeting admin | Deny re-entry to everyone who joined and left |
 | `meeting unlock <@member>` | meeting admin | Let one locked-out member back in |
@@ -556,20 +558,29 @@ return to, so `/meeting end` **deletes it** rather than restoring permissions
 onto it. Every failure path after creation removes the channel again, so a
 rejected audience or a failed write cannot leave an orphan behind.
 
-`audience` is one of:
+`audience` is a **dropdown**:
 
 | Audience | Who can join |
 | --- | --- |
-| `bureau` | Archon, President, VP, Manager **and** the Chief/Lead/Head of every unit |
-| `cells` | everything in `bureau`, plus every member of any cell |
-| `all` | every club member |
+| `Bureau` | Archon, President, VP, Manager **and** the Chief/Lead/Head of every unit |
+| `Cell members` | everything in `Bureau`, plus every member of any cell |
+| `All members` | every club member |
+| `Custom` | only the people you pick from the dropdown that appears |
 
-Extra members can be tagged on top of the resolved audience (capped by
-`MEETING_MAX_EXTRA_MEMBERS`). Resolution reads role names, not ids, so a
-promotion between meetings is picked up automatically — and the **expected
-list is snapshotted at start**, so the absentee report describes who the
-meeting was for on the day rather than re-resolving the club org chart later.
-Managed integration roles and bot accounts are excluded.
+`Custom` ignores roles entirely — the people you pick are the whole audience, so
+a meeting cannot quietly widen itself to whoever happens to hold a qualifying
+role. The bot adds whoever ran the command, since no role would have put them in
+a custom audience and they need to be able to hear the meeting they opened.
+
+Extra members can be tagged on top of a role-based audience with `also:@a @b`
+(capped by `MEETING_MAX_EXTRA_MEMBERS`). `also` is **text-command only**:
+Discord has no command option that accepts several users at once, which is why
+the dropdown exists and why `Custom` is the way to choose people from the
+Discord UI. Resolution reads role names, not ids, so a promotion between
+meetings is picked up automatically — and the **expected list is snapshotted at
+start**, so the absentee report describes who the meeting was for on the day
+rather than re-resolving the club org chart later. Managed integration roles and
+bot accounts are excluded.
 
 ### 🔒 Lockouts
 
