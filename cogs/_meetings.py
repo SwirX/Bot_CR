@@ -42,17 +42,21 @@ ATTENDEE_PERMS = {"view_channel": True, "connect": True, "speak": True,
 # Same, as the kwargs form ``set_permissions`` accepts directly.
 ATTENDEE_KWARGS = dict(ATTENDEE_PERMS)
 
-# The three /meeting start audiences, in the order they widen.
-SCOPES = ("bureau", "cells", "all")
+# The /meeting start audiences, in the order they widen. ``custom`` is not a
+# role tier at all -- it is whatever the invoker picked from the member
+# dropdown -- so it sorts after the real tiers and skips role resolution.
+SCOPES = ("bureau", "cells", "all", "custom")
 SCOPE_LABELS = {
     "bureau": "Bureau",
     "cells": "Cell members",
     "all": "All members",
+    "custom": "Custom",
 }
 SCOPE_SUMMARY = {
     "bureau": "bureau offices + every unit/cell head",
     "cells": "bureau + every member of a unit/cell",
     "all": "every robotics member in the server",
+    "custom": "only the people picked from the dropdown",
 }
 # Audience tiers from widest to narrowest. A member qualifies for a scope when
 # their tier is at least as *narrow* as it (higher index): a cell member belongs
@@ -61,6 +65,9 @@ SCOPE_SUMMARY = {
 _TIER_ORDER = ("all", "cells", "bureau")
 # Sorts last among tiers — used for anyone tagged in who qualifies for nothing.
 _TIER_NONE = len(_TIER_ORDER)
+# A chosen audience carries no tier, so every one of its members sorts as an
+# equal. Zero matches the in-scope group's own sort key.
+_TIER_CUSTOM = 0
 
 # Permissions the meeting layer needs on the channel, for a clear error.
 REQUIRED_CHANNEL_PERMS = discord.Permissions(
@@ -70,6 +77,44 @@ REQUIRED_CHANNEL_PERMS = discord.Permissions(
 
 def scope_label(scope: str) -> str:
     return SCOPE_LABELS.get(scope, scope or "—")
+
+
+# The words the ``/meeting start audience`` dropdown offers, in order. These are
+# also the literal values Discord validates against, so the text form takes the
+# same words the slash form displays instead of guessing at internal keys.
+SCOPE_CHOICES = ("bureau", "cell members", "all members", "custom")
+
+# Everything a person might reasonably type for a scope, folded to its key.
+# The display words come first: someone reading the dropdown sees "cell
+# members" and then types "cell members", which would otherwise be rejected as
+# an unknown audience because the internal key is ``cells``.
+_SCOPE_ALIASES = {
+    "bureau": "bureau",
+    "bureau only": "bureau",
+    "offices": "bureau",
+    "cell members": "cells",
+    "cell member": "cells",
+    "cells": "cells",
+    "cell": "cells",
+    "all members": "all",
+    "all member": "all",
+    "all": "all",
+    "everyone": "all",
+    "custom": "custom",
+    "chosen": "custom",
+    "picked": "custom",
+}
+
+
+def normalise_scope(text: str) -> str | None:
+    """Fold whatever the user typed into a scope key, or ``None``.
+
+    Case, surrounding whitespace, underscores and hyphens are all ignored, so
+    ``"Cell-Members "`` and ``"cell members"`` both reach the same scope.
+    """
+    key = " ".join((text or "").strip().lower()
+                  .replace("_", " ").replace("-", " ").split())
+    return _SCOPE_ALIASES.get(key)
 
 
 def _member_rank(member: discord.Member, scope: str) -> tuple[int, int, str]:
@@ -84,11 +129,17 @@ def _member_rank(member: discord.Member, scope: str) -> tuple[int, int, str]:
     Falls back to display name so the audience — and therefore the permission
     write order — is stable across identical runs.
     """
+    name = member.display_name.lower()
+    if scope == "custom":
+        # Rank by name only. Comparing roles here would be meaningless — the
+        # point of a chosen audience is that roles played no part in it — and
+        # ``_TIER_ORDER.index(scope)`` would raise outright.
+        return (0, _TIER_CUSTOM, name)
     tier = meeting_tier(member)
     index = _TIER_ORDER.index(tier) if tier in _TIER_ORDER else _TIER_NONE
     if tier in _TIER_ORDER and index >= _TIER_ORDER.index(scope):
-        return (0, index, member.display_name.lower())
-    return (1, _TIER_NONE, member.display_name.lower())
+        return (0, index, name)
+    return (1, _TIER_NONE, name)
 
 
 async def resolve_audience(guild: discord.Guild, scope: str, *,
@@ -101,6 +152,10 @@ async def resolve_audience(guild: discord.Guild, scope: str, *,
     part of. They are merged into the resolved ordering rather than appended so
     a tagged cell member doesn't end up below a plain ``New Member``.
 
+    ``custom`` ignores roles entirely and returns ``extra`` and nothing else,
+    so a meeting cannot silently widen itself to whoever happens to hold a
+    qualifying role.
+
     The guild member list is read from the cache on purpose. ``guild.members``
     can be several thousand rows on a big server, and iterating it is cheap;
     the alternative (``query_members``) would require the privileged
@@ -110,7 +165,17 @@ async def resolve_audience(guild: discord.Guild, scope: str, *,
         raise ValueError(f"unknown meeting scope {scope!r}")
 
     ceiling = config.MEETING_MAX_EXTRA_MEMBERS if limit is None else limit
+    extras = [m for m in (extra or []) if not m.bot]
+    if len(extras) > ceiling:
+        raise ValueError(
+            f"{len(extras)} tagged members exceeds the {ceiling} limit")
+
     seen: dict[int, discord.Member] = {}
+    if scope == "custom":
+        for member in extras:
+            seen.setdefault(member.id, member)
+        return sorted(seen.values(), key=lambda m: _member_rank(m, scope))
+
     for member in guild.members:
         if member.bot:
             continue
@@ -125,10 +190,6 @@ async def resolve_audience(guild: discord.Guild, scope: str, *,
             continue
         seen[member.id] = member
 
-    extras = [m for m in (extra or []) if not m.bot]
-    if len(extras) > ceiling:
-        raise ValueError(
-            f"{len(extras)} tagged members exceeds the {ceiling} limit")
     for member in extras:
         seen.setdefault(member.id, member)
 

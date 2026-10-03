@@ -32,6 +32,7 @@ from cogs import _meetings as ml  # noqa: E402
 import cogs.meetings as meetings_mod  # noqa: E402
 from cogs.meetings import MeetingAbsenteesView, MeetingListView  # noqa: E402
 from cogs.meetings import Meetings, MeetingStatsView  # noqa: E402
+from cogs._ui import MemberPickerView  # noqa: E402
 
 import config  # noqa: E402
 
@@ -71,6 +72,11 @@ class _Channel:
         self.id, self.name, self.members = channel_id, "Bureau", list(members)
         self.guild = _GuildStub()
         self.writes = []
+        # snapshot_overwrites() reads channel.overwrites to capture what the
+        # channel looked like before the meeting, so it can be restored at the
+        # end. Empty here means "no prior overwrites".
+        self.overwrites: dict = {}
+        self.mention = f"<#{channel_id}>"
 
     async def set_permissions(self, target, **kw):
         self.writes.append((getattr(target, "id", None), kw))
@@ -93,9 +99,21 @@ class _DeletableChannel(_Channel):
 class _GuildStub:
     def __init__(self):
         self._members = {}
+        # ensure_bot_access() grants the bot itself attendee permissions, so the
+        # stub needs a `me` to hand to set_permissions.
+        self.me = _Member("Bot", 999, bot=True)
+        # apply_meeting_permissions() opens the channel to @everyone and then
+        # narrows it to the audience, so it needs the default role too.
+        self.default_role = _Role("@everyone", 1)
 
     def add(self, member):
         self._members[member.id] = member
+
+    @property
+    def members(self):
+        # The audience resolver walks the guild member list; without this the
+        # stub's dict would hide it.
+        return list(self._members.values())
 
     def get_member(self, uid):
         return self._members.get(uid)
@@ -116,6 +134,10 @@ class _FakeStore:
         self.locks: list[tuple[str, bool]] = []
         self.ended: list[str] = []
         self.history: list[dict] = []
+        self.created: list[dict] = []
+        self.channel_state: dict[str, dict] = {}
+        self.deleted_meetings: list[str] = []
+        self._created = 0
         self.fail_next = None
         self._clock = 0
 
@@ -185,6 +207,24 @@ class _FakeStore:
                     if m["id"] == meeting_id]:
             del self.live_by_channel[cid]
 
+    # ── /meeting start ────────────────────────────────────────────────
+    async def create_meeting(self, row):
+        self._created += 1
+        row = dict(row, id=f"m{self._created}", live=True, ended_at="",
+                   locked=False, granted=[])
+        self.created.append(row)
+        self.live_by_channel[int(row["channel_id"])] = row
+        return row["id"]
+
+    async def save_meeting_channel_state(self, meeting_id, snapshot):
+        self.channel_state[meeting_id] = dict(snapshot)
+
+    async def meeting_channel_state(self, meeting_id):
+        return dict(self.channel_state.get(meeting_id) or {})
+
+    async def delete_meeting(self, meeting_id):
+        self.deleted_meetings.append(meeting_id)
+
 
 def _voice(after_id, before_id=None):
     """``(before, after)`` channel-state pair for the listener.
@@ -233,15 +273,31 @@ def drive(cog, store, member, before_id, after_id):
 class _Ctx:
     """Just enough Context to call a command body: an author, and a send()."""
 
-    def __init__(self, author, guild=None):
+    def __init__(self, author, guild=None, *, interaction=None):
         self.author = author
         self.guild = guild
+        # ``interaction`` is what marks a slash invocation; the cog branches on
+        # it to decide whether a follow-up can be ephemeral.
+        self.interaction = interaction
         self.sent: list[dict] = []
 
     async def send(self, content=None, *, embed=None, view=None,
                    ephemeral=False):
         self.sent.append({"content": content, "embed": embed, "view": view,
                           "ephemeral": ephemeral})
+
+    def typing(self):
+        # A real Context.typing() returns an async context manager; /meeting
+        # start wraps its store writes in one.
+        ctx = self
+
+        class _Typing:
+            async def __aenter__(self):
+                return ctx
+
+            async def __aexit__(self, *exc):
+                return False
+        return _Typing()
 
 
 def run_command(cog, store, ctx, name):
@@ -282,6 +338,79 @@ def as_admin(*role_names):
         finally:
             config.MEETING_ADMIN_ROLES = real
     return _swap()
+
+
+class _Pick:
+    """One picker interaction: choose these user ids, then confirm or cancel."""
+
+    def __init__(self, ids=(), *, confirm=True):
+        self.ids, self.confirm = [str(i) for i in ids], confirm
+
+
+def start_meeting(cog, store, ctx, channel, *, audience="bureau", minutes=None,
+                  also=None, picks=()):
+    """Drive ``/meeting start``, answering its member dropdown if one appears.
+
+    ``picks`` is a sequence of :class:`_Pick`. The command blocks on the picker
+    for a custom audience, so the runner has to drive the component *while* the
+    command is in flight — the point of the test is that a chosen audience
+    reaches the store, and that needs the whole flow to run, not just the parts
+    before the wait.
+    """
+    async def _go():
+        real = meetings_mod.store
+        meetings_mod.store = store
+        try:
+            task = asyncio.ensure_future(Meetings.meeting_start.callback(
+                cog, ctx, channel, audience=audience, minutes=minutes,
+                also=also))
+            for pick in picks:
+                view = await _wait_for_view(ctx)
+                who = _PickInteraction(user_id=ctx.author.id)
+                await view._on_select(_PickInteraction(pick.ids,
+                                                      user_id=ctx.author.id))
+                button = "confirm" if pick.confirm else "cancel"
+                await getattr(view, button).callback(who)
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            meetings_mod.store = real
+    asyncio.run(_go())
+    return ctx.sent
+
+
+class _PickInteraction:
+    """The bare minimum a MemberPickerView callback touches."""
+
+    def __init__(self, values=(), user_id=1):
+        # The picker is owner-scoped, so the driving interaction has to come
+        # from the command's author or every callback refuses it.
+        self.user = type("U", (), {"id": user_id})()
+        self.data = {"values": list(values)}
+        self.message = type("M", (), {"id": 1})()
+        self.response = self
+        self.followup = self
+
+    def is_done(self):
+        return False
+
+    async def edit_message(self, **kw):
+        return None
+
+    async def send(self, content=None, **kw):
+        return None
+
+    async def send_message(self, content=None, **kw):
+        return None
+
+
+async def _wait_for_view(ctx, *, tries=200):
+    """Wait for the command to publish its picker, then return it."""
+    for _ in range(tries):
+        for entry in ctx.sent:
+            if isinstance(entry.get("view"), MemberPickerView):
+                return entry["view"]
+        await asyncio.sleep(0)
+    raise AssertionError("the command never showed a member picker")
 
 
 def _view_children_ok(view, *, label, check):
@@ -713,7 +842,10 @@ def main() -> int:
 
     print("\n/meeting last answers a regular member privately, without names")
     plain = _Member("Cell", 7, "Member of IT Unit")
-    archon = _Member("Archon", 3, "「🏴」Archon of Robotics Club")
+    # Id 5: the other members in this file already use 1-4, and a collision
+    # would make the archon indistinguishable from `other` in the audience sets
+    # asserted below.
+    archon = _Member("Archon", 5, "「🏴」Archon of Robotics Club")
     priv = _Ctx(plain, guild=chan.guild)
     sent = run_command(cog, store, priv, "meeting_last")
     check("one reply", len(sent), 1)
@@ -773,6 +905,167 @@ def main() -> int:
     check("same for /meeting list",
           "Couldn't read" in (sent[0]["content"] or ""), True)
     check("ephemeral too", sent[0]["ephemeral"], True)
+
+    # ── /meeting start audiences ───────────────────────────────────────
+    print("\n/meeting start resolves each audience dropdown entry")
+    for word, want_scope, want_ids in (
+        ("bureau", "bureau", {"1"}),
+        ("cell members", "cells", {"1", "2"}),
+        ("all members", "all", {"1", "2", "3"}),
+    ):
+        s = _FakeStore()
+        c = build_cog(s, [mgr, cell, other])
+        ch = c._test_channel
+        ctx = _Ctx(archon, guild=ch.guild, interaction=object())
+        with as_admin("「🏴」Archon of Robotics Club"):
+            sent = start_meeting(c, s, ctx, ch, audience=word)
+        check(f"{word!r} -> one meeting created", len(s.created), 1)
+        check(f"{word!r} -> scope {want_scope}", s.created[0]["scope"], want_scope)
+        check(f"{word!r} -> expected audience", set(s.created[0]["expected"]),
+              want_ids)
+        check(f"{word!r} -> nobody counted as a visitor",
+              s.created[0]["visitors"], [])
+        check(f"{word!r} -> announced", "Meeting started" in (sent[-1]["content"] or ""),
+              True)
+
+    print("\n/meeting start refuses an audience nobody qualifies for")
+    s = _FakeStore()
+    c = build_cog(s, [_Member("Stranger", 30, "🌿 | LVL 01+")])
+    ch = c._test_channel
+    ctx = _Ctx(archon, guild=ch.guild, interaction=object())
+    with as_admin("「🏴」Archon of Robotics Club"):
+        sent = start_meeting(c, s, ctx, ch, audience="bureau")
+    check("no meeting was created", len(s.created), 0)
+    check("it says why", "Nobody matched" in (sent[-1]["content"] or ""), True)
+
+    print("\n/meeting start with a custom audience asks who is coming")
+    s = _FakeStore()
+    c = build_cog(s, [mgr, cell, other])
+    ch = c._test_channel
+    ctx = _Ctx(archon, guild=ch.guild, interaction=object())
+    with as_admin("「🏴」Archon of Robotics Club"):
+        sent = start_meeting(c, s, ctx, ch, audience="custom",
+                             minutes=45, picks=[_Pick([2, 3])])
+    check("a picker was offered", sent[0]["view"] is not None, True)
+    check("and it is ephemeral, so the audience list stays private",
+          sent[0]["ephemeral"], True)
+    _view_children_ok(sent[0]["view"], label="custom audience picker", check=check)
+    check("one meeting was created", len(s.created), 1)
+    check("scope is custom", s.created[0]["scope"], "custom")
+    # The invoker is in there because they are running it and no role would have
+    # put them in a custom audience; the other two are the picks; the manager is
+    # in neither list and still ends up in the room.
+    check("audience = the invoker plus the two picks",
+          set(s.created[0]["expected"]), {str(archon.id), "2", "3"})
+    check("the picked cell member was not the only one",
+          "2" in s.created[0]["expected"], True)
+    check("the planned length is kept", s.created[0]["planned_minutes"], 45)
+    check("nobody was logged as a visitor", s.created[0]["visitors"], [])
+
+    print("\na custom audience ignores roles entirely")
+    # Only the manager is picked, though the bureau scope would have taken all
+    # three of them -- if roles leaked in, the dropdown would not be choosing.
+    s = _FakeStore()
+    c = build_cog(s, [mgr, cell, other])
+    ch = c._test_channel
+    ctx = _Ctx(archon, guild=ch.guild, interaction=object())
+    with as_admin("「🏴」Archon of Robotics Club"):
+        start_meeting(c, s, ctx, ch, audience="custom", picks=[_Pick([1])])
+    check("only the pick (plus the invoker)", set(s.created[0]["expected"]),
+          {str(archon.id), "1"})
+
+    print("\ncancelling the custom picker starts nothing")
+    s = _FakeStore()
+    c = build_cog(s, [mgr, cell, other])
+    ch = c._test_channel
+    ctx = _Ctx(archon, guild=ch.guild, interaction=object())
+    with as_admin("「🏴」Archon of Robotics Club"):
+        sent = start_meeting(c, s, ctx, ch, audience="custom",
+                             picks=[_Pick([2], confirm=False)])
+    check("no meeting was created", len(s.created), 0)
+    check("it says so", "no meeting was started" in (sent[-1]["content"] or ""), True)
+
+    print("\nmore picks than the cap are refused before anything is created")
+    s = _FakeStore()
+    crowd = [mgr, cell, other, _Member("D", 31), _Member("E", 32)]
+    c = build_cog(s, crowd)
+    ch = c._test_channel
+    ctx = _Ctx(archon, guild=ch.guild, interaction=object())
+    real_cap = config.MEETING_MAX_EXTRA_MEMBERS
+    config.MEETING_MAX_EXTRA_MEMBERS = 2
+    try:
+        with as_admin("「🏴」Archon of Robotics Club"):
+            sent = start_meeting(c, s, ctx, ch, audience="custom",
+                                 picks=[_Pick([1, 2, 3, 31])])
+    finally:
+        config.MEETING_MAX_EXTRA_MEMBERS = real_cap
+    check("no meeting was created", len(s.created), 0)
+    check("it points at a wider audience instead",
+          "wider audience" in (sent[-1]["content"] or ""), True)
+
+    print("\npeople already picked are not offered twice in a row")
+    s = _FakeStore()
+    c = build_cog(s, [mgr, cell, other])
+    ch = c._test_channel
+    ctx = _Ctx(archon, guild=ch.guild, interaction=object())
+    with as_admin("「🏴」Archon of Robotics Club"):
+        sent = start_meeting(c, s, ctx, ch, audience="custom",
+                             picks=[_Pick([2])])
+    offered = {o.value for o in sent[0]["view"].select.options}
+    check("the invoker is excluded from the picker", str(archon.id) in offered,
+          False)
+    check("everyone else is there", {str(m.id) for m in (mgr, cell, other)},
+          offered)
+
+    print("\n`also` supplies the audience for a custom meeting without a picker")
+    s = _FakeStore()
+    c = build_cog(s, [mgr, cell, other])
+    ch = c._test_channel
+    ctx = _Ctx(archon, guild=ch.guild, interaction=object())
+    with as_admin("「🏴」Archon of Robotics Club"):
+        sent = start_meeting(c, s, ctx, ch, audience="custom", also=[cell])
+    check("no picker was needed", sent[0]["view"], None)
+    check("the tagged member is the audience, plus the invoker",
+          set(s.created[0]["expected"]), {str(archon.id), "2"})
+
+    print("\n/meeting start refuses a second meeting while one is live")
+    s = _FakeStore()
+    c = build_cog(s, [mgr, cell, other])
+    ch = c._test_channel
+    ctx = _Ctx(archon, guild=ch.guild, interaction=object())
+    with as_admin("「🏴」Archon of Robotics Club"):
+        start_meeting(c, s, ctx, ch, audience="bureau")
+        # No `picks` here: the running-meeting check comes first, so a custom
+        # audience must not send someone through a dropdown for a meeting that
+        # was never going to start. The context is shared, so the refusal is the
+        # last reply, not the first.
+        sent = start_meeting(c, s, ctx, ch, audience="custom")
+    check("still just the one meeting", len(s.created), 1)
+    check("the picker was never shown", sent[-1]["view"], None)
+    check("it points at /meeting end",
+          "/meeting end" in (sent[-1]["content"] or ""), True)
+
+    print("\n/meeting start is gated on the meeting tier, not just any member")
+    # The tier is enforced by `@require_meeting_admin()` living on the command,
+    # which Discord's dispatch runs — calling `.callback` directly (as the tests
+    # above must, to have a Context at all) walks straight past it. So the gate
+    # is asserted where it actually lives.
+    from cogs._perms import is_meeting_admin  # noqa: PLC0415
+    check("the command carries checks", len(Meetings.meeting_start.checks) >= 1,
+          True)
+    with as_admin("「🏴」Archon of Robotics Club"):
+        check("a plain member is not in the tier", is_meeting_admin(other),
+              False)
+        check("the archon is", is_meeting_admin(archon), True)
+        # IDs are the escape hatch that survives losing the role, which is the
+        # whole reason `MEETING_ADMIN_USER_IDS` exists.
+        real_ids = config.MEETING_ADMIN_USER_IDS
+        config.MEETING_ADMIN_USER_IDS = frozenset({other.id})
+        try:
+            check("an explicitly whitelisted id is, though",
+                  is_meeting_admin(other), True)
+        finally:
+            config.MEETING_ADMIN_USER_IDS = real_ids
 
     print("\n_issue_yellow_card writes the same row /warn does")
     written = {}

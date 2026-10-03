@@ -282,6 +282,10 @@ class MemberPickerView(OwnerView, LoggedView, discord.ui.View):
         for child in self.children:
             child.disabled = True
         await self._edit(interaction, content="✅ picked.", embed=None)
+        # Releases anyone awaiting ``view.wait()``. Without this the wait only
+        # ends at the timeout, so a caller that waits before acting would hang
+        # for the full five minutes on an otherwise successful pick.
+        self.stop()
         await self.on_confirm(interaction, members)
 
     @discord.ui.button(emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
@@ -293,6 +297,7 @@ class MemberPickerView(OwnerView, LoggedView, discord.ui.View):
         for child in self.children:
             child.disabled = True
         await self._edit(interaction, content="❌ Cancelled.", embed=None)
+        self.stop()
 
     async def on_timeout(self):
         for child in self.children:

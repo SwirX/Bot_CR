@@ -180,6 +180,66 @@ def main() -> int:
     except ValueError as exc:
         print(f"  ✓ unknown scope rejected: {exc}")
 
+    print("\nSCOPE_CHOICES lines up with SCOPES and SCOPE_LABELS")
+    # These are declared separately, so a rename touching only one of them would
+    # silently break the dropdown, the resolver, or the messages.
+    check("every dropdown word resolves to a scope",
+          [ml.normalise_scope(c) for c in ml.SCOPE_CHOICES], list(ml.SCOPES))
+    check("no duplicate dropdown words",
+          len(set(ml.SCOPE_CHOICES)), len(ml.SCOPE_CHOICES))
+    check("every scope has a label", sorted(ml.SCOPE_LABELS), sorted(ml.SCOPES))
+    check("every scope has a one-line summary",
+          sorted(ml.SCOPE_SUMMARY), sorted(ml.SCOPES))
+    check("the created channel name reads sensibly for each",
+          [ml.meeting_channel_name(s) for s in ml.SCOPES],
+          ["📣 Bureau Meeting", "📣 Cell members Meeting",
+           "📣 All members Meeting", "📣 Custom Meeting"])
+
+    print("\nnormalise_scope() accepts what a person would actually type")
+    for text, want in (
+        ("bureau", "bureau"), ("Bureau", "bureau"), ("  BUREAU  ", "bureau"),
+        ("cell members", "cells"), ("Cell Members", "cells"),
+        ("cell-members", "cells"), ("cell_members", "cells"),
+        ("  cell   members  ", "cells"),
+        ("all members", "all"), ("All", "all"), ("everyone", "all"),
+        ("custom", "custom"), ("Chosen", "custom"),
+    ):
+        check(f"{text!r}", ml.normalise_scope(text), want)
+    for text in ("", "   ", None, "everyone please", "the bureau", "cellss"):
+        check(f"{text!r} is refused", ml.normalise_scope(text), None)
+
+    print("\nresolve_audience() with a custom scope returns only the picks")
+    chosen = [_Member("Zoe", 20), _Member("Adam", 21)]
+    got = asyncio_run(ml.resolve_audience(guild, "custom", extra=chosen))
+    # The guild above holds a manager, a president and a cell head who would all
+    # qualify for "bureau" -- none may leak into a custom audience, or the
+    # dropdown would not be choosing anything.
+    check("exactly the picked people", [m.display_name for m in got],
+          ["Adam", "Zoe"])
+    check("no bureau member leaked in",
+          [m.display_name for m in got if m.id in (1, 2, 3)], [])
+    check("no picks means no audience",
+          asyncio_run(ml.resolve_audience(guild, "custom")), [])
+    check("bots in the picks are dropped",
+          [m.display_name for m in asyncio_run(ml.resolve_audience(
+              guild, "custom",
+              extra=[_Member("Robot", 22, bot=True), _Member("Real", 23)]))],
+          ["Real"])
+    check("ordered by name, not by tier",
+          [m.display_name for m in asyncio_run(ml.resolve_audience(
+              guild, "custom",
+              extra=[_Member("Newb", 25, "「✨」New Member"),
+                     _Member("Head2", 24, "「🔧」Head of Technical Unit")]))],
+          ["Head2", "Newb"])
+    try:
+        asyncio_run(ml.resolve_audience(
+            guild, "custom",
+            extra=[_Member(f"C{i}", 200 + i) for i in range(40)]))
+        failures.append("custom cap not enforced")
+        print("  ✗ custom cap not enforced")
+    except ValueError as exc:
+        print(f"  ✓ custom cap enforced: {exc}")
+
     print("\nscope_note_for() records how each attendee qualified")
     check("office in a bureau meeting", ml.scope_note_for(manager, "bureau"), "bureau")
     check("cell member in an all meeting", ml.scope_note_for(cell, "all"), "cells")

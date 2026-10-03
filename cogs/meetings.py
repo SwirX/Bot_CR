@@ -19,9 +19,11 @@ an *event with a report*. The room's ``end`` subcommand was renamed to
 ``endroom`` when attendance tracking claimed ``end``.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Literal
 
 import discord
 from discord.ext import commands
@@ -657,6 +659,63 @@ class Meetings(commands.Cog):
             await ctx.send(f"⚠️ Couldn't create a meeting channel: {exc}")
         return None
 
+    async def _pick_custom_audience(self, ctx,
+                                      minutes: int | None) -> list[discord.Member] | None:
+        """Ask who a Custom-audience meeting is for, via a member dropdown.
+
+        Returns the chosen members, or ``None`` if the invoker cancelled. A
+        custom audience has no role resolution at all, so this list is the whole
+        meeting — an empty one is refused rather than started, because a meeting
+        nobody may enter is not a meeting.
+
+        Discord has no command option that accepts several users, which is the
+        only reason this is a second step at all; ``also:`` covers the same need
+        from the text form.
+        """
+        candidates = sorted(
+            (m for m in ctx.guild.members
+             if not m.bot and m.id != ctx.author.id),
+            key=lambda m: (m.display_name or m.name).lower())
+        if not candidates:
+            await ctx.send("❌ There's nobody else in this server to pick.")
+            return None
+
+        picked: list[discord.Member] = []
+
+        async def _done(interaction: discord.Interaction,
+                        members: list[discord.Member]) -> None:
+            picked.extend(members)
+
+        plan = "\n".join([
+            f"**Custom** audience for {ctx.author.mention}.",
+            f"Planned length: **{minutes} min**." if minutes else "",
+            "Pick who this meeting is for. Only they will be able to join, and "
+            "nobody is added by virtue of their roles.",
+        ])
+        view = MemberPickerView(
+            candidates, on_confirm=_done, user=ctx.author,
+            page_size=config.MEMBER_PICKER_PAGE_SIZE,
+            placeholder="🎯 Pick the audience…")
+
+        if ctx.interaction is None:
+            await ctx.send(plan, view=view)
+        else:
+            await ctx.send(plan, view=view, ephemeral=True)
+
+        try:
+            await view.wait()
+        except asyncio.TimeoutError:
+            await ctx.send("⌛ Timed out — nothing was picked, so no meeting "
+                           "was started.")
+            return None
+        if view.cancelled or not picked:
+            await ctx.send("❌ No audience picked — no meeting was started.")
+            return None
+
+        # The caller adds the invoker; returning them here too would count the same
+        # person twice once it does.
+        return picked
+
     async def _discard_channel(self, channel: discord.VoiceChannel) -> None:
         """Delete a channel the bot created for a meeting that failed to start.
 
@@ -838,7 +897,8 @@ class Meetings(commands.Cog):
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True,
                                   connect=True, move_members=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
-                            audience: str = "bureau",
+                            audience: Literal["bureau", "cell members",
+                                              "all members", "custom"] = "bureau",
                             minutes: int | None = None,
                             also: commands.Greedy[discord.Member] = None):
         """Start a meeting and track who attends.
@@ -847,21 +907,24 @@ class Meetings(commands.Cog):
         the audience for the meeting; leave it blank and the bot creates a
         dedicated one, which it deletes again at `/meeting end`.
 
-        `audience` is one of:
-        **bureau** — the bureau offices (Archon, President, Vice President,
+        **audience** is a dropdown:
+        **Bureau** — the bureau offices (Archon, President, Vice President,
         Manager) plus every Chief/Lead/Head of a unit or cell.
-        **cells** — the bureau plus every member of a unit or cell.
-        **all** — every robotics member in the server.
+        **Cell members** — the bureau plus every member of a unit or cell.
+        **All members** — every robotics member in the server.
+        **Custom** — only the people you pick from the dropdown that appears.
 
         `minutes` is the planned length, recorded on the meeting so the report
         can show planned vs actual. `also` adds members who don't qualify for
-        the audience (guests, visiting members).
+        the audience (guests, visiting members) — it only works as a text
+        command, since Discord has no option that accepts several users at
+        once; in the Discord UI, use **Custom** and pick them there.
         """
-        scope = audience.strip().lower()
-        if scope not in meetlib.SCOPES:
+        scope = meetlib.normalise_scope(audience)
+        if scope is None:
             await ctx.send(
                 f"❓ Unknown audience `{audience}`. Pick one of: "
-                + ", ".join(f"`{s}`" for s in meetlib.SCOPES) + ".")
+                + ", ".join(f"`{c}`" for c in meetlib.SCOPE_CHOICES) + ".")
             return
         if minutes is not None and not 1 <= minutes <= 24 * 60:
             await ctx.send("❌ `minutes` must be between 1 and 1440.")
@@ -884,6 +947,27 @@ class Meetings(commands.Cog):
                 f"⏳ A meeting is already running in {where} "
                 f"(`{existing['title']}`). End it with `/meeting end` first.")
             return
+
+        if scope == "custom":
+            # Picking an audience takes a round trip through a dropdown, so it
+            # waits until the cheap refusals above are out of the way — otherwise
+            # someone picks fifteen people only to be told a meeting was already
+            # running.
+            if not extras:
+                extras = await self._pick_custom_audience(ctx, minutes)
+                if extras is None:
+                    return
+            # The invoker is running the meeting. Without access they cannot
+            # hear it, and no role would have put them in a custom audience
+            # anyway, so add them explicitly — whoever else was picked.
+            extras = [ctx.author] + [m for m in extras
+                                     if m.id != ctx.author.id]
+            if len(extras) > config.MEETING_MAX_EXTRA_MEMBERS:
+                await ctx.send(
+                    f"❌ That's {len(extras)} people — the ceiling is "
+                    f"{config.MEETING_MAX_EXTRA_MEMBERS}. Start a meeting with "
+                    f"a wider audience instead.")
+                return
 
         created = False
         if channel is None:
