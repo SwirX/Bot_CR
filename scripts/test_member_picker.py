@@ -5,6 +5,7 @@ selection bookkeeping: a choice made on one page has to survive turning to
 another and coming back, because getting that wrong silently drops people from a
 meeting's audience with no error anywhere.
 """
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -181,6 +182,28 @@ def main() -> int:
                       all(c.disabled for c in v.children
                           if not isinstance(c, discord.ui.Select)), True)
 
+    print("\nconfirm and cancel release a caller blocked in view.wait()")
+    # Without stop() the wait only ends at the timeout, so a command that waits
+    # for an audience before acting would sit idle for the full five minutes on
+    # a pick that had already succeeded.
+    async def _wait_and_press(view, vname, want_cancelled):
+        waiter = asyncio.ensure_future(view.wait())
+        await asyncio.sleep(0)
+        # Driven inline rather than via press(), so the waiter and the button
+        # share one event loop -- press() would open a second one.
+        await getattr(view, vname).callback(_Interaction())
+        timed_out = await asyncio.wait_for(waiter, timeout=2)
+        check(f"{vname}: wait() returned 'finished', not 'timed out'",
+              timed_out, False)
+        check(f"{vname}: cancelled is {want_cancelled}", view.cancelled,
+              want_cancelled)
+
+    for name, expect_cancelled in (("confirm", False), ("cancel", True)):
+        got.clear()
+        v = MemberPickerView(members(10), on_confirm=_confirm, user=admin)
+        asyncio_run(v._on_select(_Interaction(values=["1000"])))
+        asyncio_run(_wait_and_press(v, name, expect_cancelled))
+
     print("\nconfirming with nothing chosen refuses instead of calling back")
     got.clear()
     v = MemberPickerView(members(3), on_confirm=_confirm, user=admin)
@@ -249,7 +272,6 @@ def main() -> int:
 
 
 def asyncio_run(coro):
-    import asyncio
     return asyncio.run(coro)
 
 
