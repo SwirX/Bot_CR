@@ -119,7 +119,7 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
         return _Profile(row, await store.get_discord_xp(discord_id))
 
     # ------------------------------------------------------------------
-    @app_commands.command(name="profile", description="Show a Minecraft player profile.")
+    @app_commands.command(name="mcprofile", description="Show a Minecraft player profile.")
     @app_commands.describe(member="Whose profile to show (defaults to you)")
     async def mc_profile(self, interaction: discord.Interaction,
                          member: discord.Member | None = None):
@@ -157,7 +157,7 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------
-    @app_commands.command(name="top", description="Minecraft leaderboards.")
+    @app_commands.command(name="mctop", description="Minecraft leaderboards.")
     async def mc_top(self, interaction: discord.Interaction, board: str = "playtime"):
         """``board`` is populated from the autocomplete callback below."""
         await interaction.response.defer(ephemeral=True)
@@ -195,7 +195,7 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
         await interaction.response.send_autocomplete(choices[:25])
 
     # ------------------------------------------------------------------
-    @app_commands.command(name="shop", description="Browse the RoboticsCMC market.")
+    @app_commands.command(name="mcshop", description="Browse the RoboticsCMC market.")
     @app_commands.describe(category="Filter by category (or leave as all)")
     async def mc_shop(self, interaction: discord.Interaction,
                       category: str = "all"):
@@ -221,7 +221,7 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
 
     # ------------------------------------------------------------------
     @app_commands.command(
-        name="buy",
+        name="mcbuy",
         description="Order an item. Delivered the next time you log in.")
     @app_commands.describe(item="Item key, e.g. iron_ingot", quantity="How many (1-64)")
     async def mc_buy(self, interaction: discord.Interaction, item: str, quantity: int = 1):
