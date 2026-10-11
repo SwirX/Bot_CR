@@ -10,6 +10,14 @@ seconds old.
 
 Profiles are mirrored every 30 minutes, so numbers here can lag gameplay by half
 an hour. That is irrelevant for display and irrelevant for correctness.
+
+**Slash-command budget.** Discord allows 100 global slash commands. This bot
+already syncs 99 of them, and ``/mc`` and ``/minecraft`` are taken by
+``cogs.minecraft``. Everything here therefore lives under one ``/mceco`` group:
+a group costs a single top-level slot no matter how many children it holds, so
+all four commands fit in the one that remains. Adding a fifth top-level command
+anywhere in this bot will stop it booting with
+``CommandLimitReached``. If you need more, retire an existing command first.
 """
 
 import logging
