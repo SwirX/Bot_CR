@@ -81,6 +81,9 @@ _T = {
     "bot_settings": "bot_settings",
     "meetings": "meetings",
     "meeting_sessions": "meeting_sessions",
+    "mc_profiles": "mc_profiles",
+    "mc_shop_items": "mc_shop_items",
+    "mc_orders": "mc_orders",
 }
 
 # Defaults used when a discord_data row has to be bootstrapped (REQ columns).
@@ -2044,6 +2047,53 @@ class Store:
             return {}
         side = _from_json(raw, {})
         return side if isinstance(side, dict) else {}
+
+    # ---------------------------------------------------------------
+    # RoboticsCMC gameplay economy (mirrors written by the game server).
+    #
+    # Everything here is a *mirror* or a *request*. The bot never debits a
+    # balance: /mcbuy writes a PENDING order and the server settles it against
+    # its own SQLite after re-checking the live price and live funds.
+    # ---------------------------------------------------------------
+
+    async def get_mc_profile(self, discord_id) -> dict | None:
+        return await self._get(_T["mc_profiles"], str(discord_id))
+
+    async def get_discord_xp(self, discord_id) -> int:
+        row = await self._get(_T["discord_data"], str(discord_id))
+        return int((row or {}).get("xp") or 0)
+
+    async def get_minecraft_account_by_username(self, username: str) -> dict | None:
+        if not username:
+            return None
+        rows = await self._list(_T["minecraft_accounts"],
+                                [Query.equal("username", username), Query.limit(25)])
+        return rows[0] if rows else None
+
+    async def top_mc_profiles(self, order_column: str, limit: int) -> list[dict]:
+        return await self._list(_T["mc_profiles"],
+                                [Query.order_desc(order_column), Query.limit(min(limit, 25))])
+
+    async def list_mc_shop_items(self, category: str | None = None) -> list[dict]:
+        queries = [Query.limit(25)]
+        if category:
+            queries.insert(0, Query.equal("category", category))
+        return await self._list(_T["mc_shop_items"], queries)
+
+    async def get_mc_shop_item(self, item_key: str) -> dict | None:
+        rows = await self._list(_T["mc_shop_items"],
+                                [Query.equal("item_key", item_key), Query.limit(25)])
+        return rows[0] if rows else None
+
+    async def create_mc_order(self, data: dict) -> str:
+        order_id = data["order_id"]
+        await self._create(_T["mc_orders"], order_id, data)
+        return order_id
+
+    async def get_mc_orders_for(self, discord_id) -> list[dict]:
+        return await self._list(_T["mc_orders"],
+                                [Query.equal("discord_user_id", str(discord_id)),
+                                 Query.limit(25)])
 
 
 store = Store()
