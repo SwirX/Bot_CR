@@ -93,10 +93,25 @@ class _Profile:
 
 
 class MCEconomy(commands.Cog, name="MCEconomy"):
-    """Profile, leaderboard and market commands for RoboticsCMC."""
+    """Profile, leaderboard and market commands for RoboticsCMC.
+
+    Every command lives under the ``/mc`` group. The global slash-command tree
+    is already at 98 of its 100 slots, so adding loose top-level commands
+    crashes the bot on start; a group consumes one slot and its children are
+    budgeted separately.
+    """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    # A group costs exactly one of the 100 global slash-command slots however
+    # many children it holds, which is why everything lives under it. It must be
+    # a class attribute: CogMeta only collects app commands found in the class
+    # body, and it skips anything that already has a parent (the children).
+    mc = app_commands.Group(
+        name="mc",
+        description="RoboticsCMC — profiles, leaderboards and market.",
+    )
 
     async def _resolve_discord_id(self, user) -> str | None:
         """Resolve through the bot's own Minecraft link record."""
@@ -119,7 +134,7 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
         return _Profile(row, await store.get_discord_xp(discord_id))
 
     # ------------------------------------------------------------------
-    @app_commands.command(name="mcprofile", description="Show a Minecraft player profile.")
+    @mc.command(name="profile", description="Show a Minecraft player profile.")
     @app_commands.describe(member="Whose profile to show (defaults to you)")
     async def mc_profile(self, interaction: discord.Interaction,
                          member: discord.Member | None = None):
@@ -157,7 +172,7 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------
-    @app_commands.command(name="mctop", description="Minecraft leaderboards.")
+    @mc.command(name="top", description="Minecraft leaderboards.")
     async def mc_top(self, interaction: discord.Interaction, board: str = "playtime"):
         """``board`` is populated from the autocomplete callback below."""
         await interaction.response.defer(ephemeral=True)
@@ -195,7 +210,7 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
         await interaction.response.send_autocomplete(choices[:25])
 
     # ------------------------------------------------------------------
-    @app_commands.command(name="mcshop", description="Browse the RoboticsCMC market.")
+    @mc.command(name="shop", description="Browse the RoboticsCMC market.")
     @app_commands.describe(category="Filter by category (or leave as all)")
     async def mc_shop(self, interaction: discord.Interaction,
                       category: str = "all"):
@@ -220,8 +235,8 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------
-    @app_commands.command(
-        name="mcbuy",
+    @mc.command(
+        name="buy",
         description="Order an item. Delivered the next time you log in.")
     @app_commands.describe(item="Item key, e.g. iron_ingot", quantity="How many (1-64)")
     async def mc_buy(self, interaction: discord.Interaction, item: str, quantity: int = 1):
