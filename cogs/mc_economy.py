@@ -158,10 +158,8 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
 
     # ------------------------------------------------------------------
     @app_commands.command(name="top", description="Minecraft leaderboards.")
-    @app_commands.choices(*[app_commands.Choice(name=label, value=key)
-                            for key, (_, label) in BOARDS.items()],
-                           *[app_commands.Choice(name=label, value=key) for key, label in JOBS])
     async def mc_top(self, interaction: discord.Interaction, board: str = "playtime"):
+        """``board`` is populated from the autocomplete callback below."""
         await interaction.response.defer(ephemeral=True)
         if board in BOARDS:
             label, column = BOARDS[board][1], BOARDS[board][0]
@@ -187,10 +185,20 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
         embed.set_footer(text="Mirror refreshes every 30 minutes.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @mc_top.autocomplete("board")
+    async def _mc_top_board_autocomplete(self, interaction: discord.Interaction,
+                                         current: str):
+        options = [(label, key) for key, (_, label) in BOARDS.items()]
+        options += [(label, key) for key, label in JOBS]
+        choices = [app_commands.Choice(name=label, value=key)
+                   for label, key in options if current.lower() in label.lower() or current.lower() in key]
+        await interaction.response.send_autocomplete(choices[:25])
+
     # ------------------------------------------------------------------
     @app_commands.command(name="shop", description="Browse the RoboticsCMC market.")
-    @app_commands.describe(category="Filter by category")
-    async def mc_shop(self, interaction: discord.Interaction, category: str = "all"):
+    @app_commands.describe(category="Filter by category (or leave as all)")
+    async def mc_shop(self, interaction: discord.Interaction,
+                      category: str = "all"):
         await interaction.response.defer(ephemeral=True)
         items = [i for i in await store.list_mc_shop_items() if i.get("tradable")]
         if category.lower() != "all":
