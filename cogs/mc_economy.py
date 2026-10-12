@@ -103,12 +103,11 @@ class _Profile:
 class MCEconomy(commands.Cog, name="MCEconomy"):
     """Profile, leaderboard and market commands for RoboticsCMC.
 
-    Every command lives under the ``/mceco`` group. The global slash-command
-    tree sits at 98 of its 100 slots, and ``/mc`` and ``/minecraft`` are already
-    taken by the existing minecraft cog. A group costs exactly one top-level
-    slot however many children it holds, so all four commands fit in the two
-    that remain.
-    """
+Every command lives under the ``/mc`` group. The global slash-command tree sits
+at 99 of its 100 slots, and a group costs exactly one top-level slot however
+many children it holds, so everything fits in one. ``/minecraft`` still opens
+the RoboticsCMC server menu (link, unlink, server control).
+"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -118,9 +117,24 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
     # a class attribute: CogMeta only collects app commands found in the class
     # body, and it skips anything that already has a parent (the children).
     mc = app_commands.Group(
-        name="mceco",
-        description="RoboticsCMC economy — profiles, leaderboards, market and orders.",
+        name="mc",
+        description="RoboticsCMC — profiles, leaderboards, market, orders and server status.",
     )
+
+    @mc.command(name="status",
+                description="Server status, address and the BlueMap link.")
+    async def mc_status(self, interaction: discord.Interaction):
+        cog = self.bot.get_cog("Minecraft")
+        if cog is None:
+            await interaction.response.send_message(
+                "The Minecraft cog is not loaded.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        status, error = await cog._fetch_status("en")
+        embed = await cog._status_embed("en", status)
+        if error:
+            embed.add_field(name="⚠️", value=error, inline=False)
+        await interaction.followup.send(embed=embed)
 
     async def _resolve_discord_id(self, user) -> str | None:
         """Resolve through the bot's own Minecraft link record."""
