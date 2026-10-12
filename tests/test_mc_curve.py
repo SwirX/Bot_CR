@@ -158,3 +158,52 @@ def test_reward_formula_matches_the_documented_budget():
         for level in range(1, 101)
     )
     assert total == 57_750
+
+
+class TestRewardCadences:
+    """The cosmetic cadence is every 5th, the milestone every 10th.
+
+    Cosmetic levels are the odd multiples of 5 (5, 15, 25 ...), which never
+    coincide with a milestone. Keying the row off the milestone alone dropped
+    all nine of them and the gap was invisible until the Java side asked for
+    them.
+    """
+
+    @staticmethod
+    def _milestones():
+        rows = canonical.rows()
+        by_level = rows["rewards:milestones"]["byLevel"]
+        return {int(level): entry for level, entry in by_level.items()}
+
+    def test_both_cadences_land_at_every_fifth_level(self):
+        levels = set(self._milestones())
+        expected = set(range(5, 101, 5))
+        assert expected <= levels, f"missing levels {sorted(expected - levels)}"
+
+    def test_cosmetics_survive_where_there_is_no_milestone(self):
+        milestones = self._milestones()
+        for level, cosmetic in canonical.COSMETICS.items():
+            entry = milestones[level]
+            assert entry["cosmetic"] == cosmetic, f"level {level} lost its cosmetic"
+            assert entry["r"] == 0 or entry["r"] > 0
+
+    def test_every_cosmetic_level_has_a_milestone_entry_and_vice_versa(self):
+        milestones = self._milestones()
+        for level in range(5, 101, 5):
+            entry = milestones[level]
+            has_reward = bool(entry["cosmetic"]) or bool(entry["unlock"])
+            assert has_reward, f"level {level} grants nothing"
+
+    def test_milestone_currency_still_only_on_every_tenth(self):
+        milestones = self._milestones()
+        for level, entry in milestones.items():
+            if entry["r"]:
+                assert level % 10 == 0, f"level {level} pays milestone R off-cadence"
+
+    def test_ladder_total_is_unaffected_by_cosmetic_rows(self):
+        """Adding cosmetic rows must not change the 57,750 R budget."""
+        total = sum(
+            canonical.level_reward(level) + canonical.milestone_reward(level)
+            for level in range(1, 101)
+        )
+        assert total == 57_750

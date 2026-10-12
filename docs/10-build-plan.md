@@ -71,17 +71,27 @@ claims its perk at 10/25/50/75.
 - reaching a level pays exactly once. `RewardServiceTest` runs sixteen
   concurrent settle calls over the same range and asserts one payment per level
 - replaying a grant is a no-op, and an overlapping range pays only the gap
-- the ledger holds one row per granted level
+- the ledger holds one row per granted level, carrying `source` and `level` so
+  "was this exact level already paid" never has to parse a reason string
 
 Idempotency is a primary key on `reward_grants (uuid, scope, level)` claimed with
 `INSERT OR IGNORE`, so the answer to "have I already paid for level 34" comes
 from the database rather than from a caller's memory. The profile sync, the AFK
 award and the quit-persist path can all observe the same level-up.
 
-**Settled on join.** A player who earned level 19 while the ladder was inert
-would otherwise forfeit it, so `onJoin` reconciles the whole range. The grant is
-idempotent, so rejoining a hundred times still pays once. On the current roster
-this owes **4,520 R** in total.
+**Settled at boot.** A player who earned level 19 while the ladder was inert
+would otherwise forfeit it, so a sweep settles every recorded player shortly
+after start, and `onJoin` is the backstop for rows that appear later. The grant
+is idempotent, so restarting a hundred times still pays once. On the current
+roster this settled **4,520 R** across 5 players.
+
+**Three cadences, not one.** Currency, the permanent unlock and the cosmetic are
+claimed separately. That separation matters: a player paid for level 5 before the
+catalogue existed is still owed that cosmetic, and the next sweep delivers it
+without re-paying the currency. All 20 cadence levels (5, 10, ... 100) now land.
+
+Verified live: shadow, at level 19, received the level 5 and 15 cosmetics and the
+level 10 unlock with no currency re-paid.
 
 ## Step 4 — Job tier retier  ← the interface mods will target
 

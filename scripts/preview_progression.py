@@ -69,6 +69,7 @@ def cumulative_xp(level: int, base: int, band: int, growth: float,
 # Vanilla goes boring precisely because nothing accumulates; these are the
 # things that keep accumulating in a game with no seasons to reset them.
 LEVEL_R_BASE, LEVEL_R_PER_LEVEL = 50, 5
+MILESTONE_EVERY = 10           # milestone R + unlock cadence
 MILESTONE_R_MULTIPLE = 500
 
 JOBS = (
@@ -132,8 +133,15 @@ def level_reward(level: int) -> int:
 
 
 def milestone_reward(level: int) -> int:
-    """Every 10th level, on top, sized by which multiple of ten it is."""
-    return MILESTONE_R_MULTIPLE * (level // 10)
+    """Every 10th level, on top, sized by which multiple of ten it is.
+
+    The guard matters: without it every level from 10 up is a "multiple of ten"
+    in Python's floor division, so the ladder would pay milestone R on 81 levels
+    it should not and the budget would overrun by 202,500 R.
+    """
+    if MILESTONE_EVERY <= 0 or level % MILESTONE_EVERY != 0:
+        return 0
+    return MILESTONE_R_MULTIPLE * (level // MILESTONE_EVERY)
 
 
 # ── earning rate ─────────────────────────────────────────────────────────
@@ -230,11 +238,18 @@ def rows(base: int = DEFAULT_BASE, band: int = DEFAULT_BAND,
     milestones, perks = {}, {}
     for job, entries in spec["rewards"].items():
         for entry in entries:
-            if "milestone_r" in entry:
-                milestones[str(entry["level"])] = {
-                    "r": entry["milestone_r"],
+            # Every level carrying either cadence, not just milestones. The
+            # cosmetic cadence fires on odd multiples of 5 (5, 15, 25 ...) which
+            # never have a milestone, so keying this off milestone_r alone
+            # silently dropped all nine of them.
+            level = entry["level"]
+            is_milestone = "milestone_r" in entry
+            is_cosmetic = level in COSMETICS
+            if is_milestone or is_cosmetic:
+                milestones[str(level)] = {
+                    "r": entry.get("milestone_r", 0),
                     "unlock": entry.get("unlock", ""),
-                    "cosmetic": entry.get("cosmetic", ""),
+                    "cosmetic": COSMETICS.get(level, entry.get("cosmetic", "")),
                 }
             if "job_perk" in entry:
                 perks.setdefault(job, []).append(
