@@ -93,15 +93,30 @@ without re-paying the currency. All 20 cadence levels (5, 10, ... 100) now land.
 Verified live: shadow, at level 19, received the level 5 and 15 cosmetics and the
 level 10 unlock with no currency re-paid.
 
-## Step 4 — Job tier retier  ← the interface mods will target
+## Step 4 — Job tier retier — **DONE**  ← the interface mods will target
 
 Convert Hunter and Crafter to tiered XP with stop-levels. Add Businessman XP
 sources and its sell-slot function.
 
-**Accept:** crafting planks grants **zero** XP at every level; killing a cow
-grants XP at level 14 and none at level 16; Businessman XP is granted on order
-settlement only, and an expired order pays nothing; `/mc top` Power still
-computes as the sum of derived levels.
+**Accept — all four confirmed:**
+- crafting planks grants **zero** XP at every level. `JobTierTest` checks
+  planks at levels 1/5/10/25/40/60/75/100, and separately checks all nine
+  trivial recipes, because planks alone would pass while sticks still paid
+- killing a cow grants XP at level 14 and none at 15 or 16. The stop level is
+  exclusive: the tier pays the level *below* it and nothing at it
+- Businessman XP is granted on settlement only. `Settlement` is a closed enum,
+  so "expired" and "listed" cannot be expressed as a source, and both are
+  asserted to pay zero
+- `/mc top` Power is the sum of all eight derived job levels: **34** for a
+  profile with miner 20, lumberjack 6, farmer 3 and five jobs at level 1.
+  Summing XP instead would give 10,640, which is the failure the test guards
+
+**The stop level is read before the award.** A tier that pushes a player over
+its own stop level would otherwise pay once more on that final action.
+
+**Unknown sources pay nothing.** Defaulting a modded mob or recipe to the lowest
+tier would hand out XP for anything registered after this step, which is the
+curve-breaking the tiers exist to prevent.
 
 **This step is the interface the modded client will build against.** Doing it
 before any modding starts is what makes future XP sources pluggable instead of
