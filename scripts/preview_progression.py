@@ -189,8 +189,11 @@ def build(base: int, band: int, growth: float,
             if level % 10 == 0:
                 reward["milestone_r"] = milestone_reward(level)
                 reward["unlock"] = MILESTONES.get(level, "")
-                if level in PERK_LEVELS:
-                    reward["job_perk"] = PERKS[job][PERK_LEVELS.index(level)]
+            # Perks sit at 10/25/50/75, so this must not be nested inside the
+            # milestone branch: 25 and 75 are not multiples of ten and would
+            # otherwise never be emitted at all.
+            if level in PERK_LEVELS:
+                reward["job_perk"] = PERKS[job][PERK_LEVELS.index(level)]
             entries.append(reward)
         rewards[job] = entries
 
@@ -204,11 +207,51 @@ def build(base: int, band: int, growth: float,
         "curve": {
             "mode": "tutorial_then_banded_geometric",
             "tutorial_base": tutorial, "base": base, "band_size": band,
-            "growth": growth, "max_reward_level": MAX_REWARD_LEVEL,
+            "growth": growth, "income_growth": INCOME_GROWTH,
+            "base_hourly_xp": DEFAULT_HOURLY_XP,
+            "max_reward_level": MAX_REWARD_LEVEL,
             "prestige_every": PRESTIGE_EVERY, "cosmetic_every": COSMETIC_EVERY,
         },
         "rewards": rewards,
         "prestige": prestige,
+    }
+
+
+def rows(base: int = DEFAULT_BASE, band: int = DEFAULT_BAND,
+         growth: float = DEFAULT_GROWTH,
+         tutorial: int = DEFAULT_TUTORIAL) -> dict[str, dict]:
+    """The ``mc_progression`` documents this script seeds.
+
+    This is the single definition of the balance data: the Discord bot reads it,
+    the server loads it, and the documentation describes it. Keys match the row
+    names in ``docs/08-data-model.md``.
+    """
+    spec = build(base, band, growth, tutorial)
+    milestones, perks = {}, {}
+    for job, entries in spec["rewards"].items():
+        for entry in entries:
+            if "milestone_r" in entry:
+                milestones[str(entry["level"])] = {
+                    "r": entry["milestone_r"],
+                    "unlock": entry.get("unlock", ""),
+                    "cosmetic": entry.get("cosmetic", ""),
+                }
+            if "job_perk" in entry:
+                perks.setdefault(job, []).append(
+                    {"level": entry["level"], "perk": entry["job_perk"]})
+    return {
+        "curve": dict(spec["curve"], _rev=1),
+        # byLevel/byJob wrap the keyed collections so _rev is always a sibling of
+        # the data and can never be mistaken for a level or a job name.
+        "rewards:milestones": {"byLevel": milestones, "_rev": 1},
+        "rewards:perks": {"byJob": perks, "_rev": 1},
+        "rewards:prestige": dict(
+            entries=spec["prestige"],
+            formula="5000 * step^2",
+            every=PRESTIGE_EVERY,
+            after=MAX_REWARD_LEVEL,
+            _rev=1,
+        ),
     }
 
 
@@ -223,9 +266,15 @@ def main() -> None:
     parser.add_argument("--hourly", type=int, default=DEFAULT_HOURLY_XP,
                         help="base XP/hour at level 1")
     parser.add_argument("--json", action="store_true", help="emit the DB payload")
+    parser.add_argument("--emit-rows", action="store_true",
+                        help="emit the mc_progression rows for seeding Appwrite")
     args = parser.parse_args()
 
     spec = build(args.base, args.band, args.growth, args.tutorial)
+
+    if args.emit_rows:
+        print(json.dumps(rows(args.base, args.band, args.growth, args.tutorial), indent=2))
+        return
 
     if args.json:
         print(json.dumps(spec, indent=2))

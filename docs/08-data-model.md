@@ -57,7 +57,29 @@ pattern the hub already uses for `links`.
 }
 ```
 
-This is exactly `preview_progression.build()["curve"]`.
+This is exactly `preview_progression.build()["curve"]`, and it is what is live:
+the server logs `Progression curve adopted (rev 1, trigger boot): reaching level
+100 costs 429440 XP` on start.
+
+Emit it with:
+
+```
+python3 scripts/preview_progression.py --emit-rows
+```
+
+and seed it with `scripts/seed_progression.py` in the plugin repository. The
+bot repository defines the numbers; the plugin only reads them.
+
+**One Appwrite detail worth knowing before writing a reader.** TablesDB list
+rows return attributes *flattened* at the top level of each row
+(`{"key": ..., "payload": ...}`), not nested under a `data` object. Only writes
+use `{"data": {...}}`. A reader that looks for `row.data.payload` finds nothing
+and the loader treats that as "no curve row" — silently running on the config
+fallback with no error anywhere. `ProgressionStoreParsingTest` pins this against
+a body captured from the live instance.
+
+**Query strings must be percent-encoded.** Appwrite's list query is JSON
+embedded in the URL, so a raw `{"method":"limit"...}` makes `URI.create` throw.
 
 ## Loading rules — the server must not be breakable by a document edit
 

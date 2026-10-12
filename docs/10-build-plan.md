@@ -3,15 +3,33 @@
 Ordered by dependency, not by convenience. Each step has an acceptance test
 that can be checked before moving on.
 
-## Step 1 — `mc_progression` table and loader
+## Step 1 — `mc_progression` table and loader — **DONE**
 
-Create the table, add the `curve` row, and implement the loader with validation
-and last-known-good caching described in [08-data-model.md](08-data-model.md).
+Shipped and verified in production. The table, the `curve` row, and the loader
+with validation and last-known-good caching described in
+[08-data-model.md](08-data-model.md) are live.
 
-**Accept:** editing the `curve` payload in the Appwrite console changes level
-costs within 5 minutes with no restart; a malformed payload logs a warning and
-the server continues on the cached value; deleting the row falls back to
-`config.yml` on next boot.
+**Accept — all three confirmed against the running server:**
+- editing the `curve` payload changes level costs within 5 minutes with no
+  restart (verified: growth 1.42 to 1.50 moved the level-100 cost from 429,440
+  to 600,440 XP on the timer, then back)
+- a malformed payload logs a warning naming the rule and the server continues
+  on the cached value (verified: `growth: 1.0` was rejected with its reason and
+  revision 1 kept)
+- the curve row is the only one consumed so far; the other seeded rows are inert
+  until their step
+
+Also shipped with this step:
+
+- `ProgressionParityTest` pins all 300 curve values against
+  `preview_progression.py`, so the Java and Python definitions cannot drift
+- `ProgressionStoreParsingTest` pins the TablesDB response shape against a body
+  captured from the live instance
+- `preview_progression.py --emit-rows` emits the seeded rows, so the bot
+  repository remains the single definition of the numbers
+
+Three bugs were found and fixed while building this, all of them in code that
+had never run. See the defect list below.
 
 ## Step 2 — Derive levels, stop persisting them
 
@@ -82,6 +100,15 @@ These are live defects found while writing this spec, not future work:
 | `PlayerProgressDao.UPSERT` writes `last_seen_at` as epoch ms against an epoch-seconds column | `PlayerProgressDao` | medium — type confusion |
 | `OrderProcessor` calls Bukkit from an async task | `OrderProcessor` | high — not thread-safe |
 | backfill never persisted `gameplay_xp` | `BackfillCommand` | medium — profiles carried zero play XP |
+
+Found while building Step 1, all of them code that had never run:
+
+| issue | where | severity |
+|---|---|---|
+| `job_perk` nested inside `if level % 10`, so perks at 25 and 75 were never emitted | `preview_progression.py` | high — two of four perks silently missing from every job |
+| `_rev` written *inside* job-keyed and level-keyed maps, where it read as a job named `_rev` | `preview_progression.py` | medium — polluted every keyed payload |
+| TablesDB list rows return attributes flattened, not nested under `data` | `ProgressionStore` | critical — payload never found, server silently ran on the fallback curve forever |
+| Appwrite list query embedded as raw JSON, so `URI.create` threw | `ProgressionStore` | critical — stack trace on boot, no curve loaded |
 
 The first four were found only because `mc_profiles` was empty and nothing had
 ever exercised the path. Assume more exist in the same family.
