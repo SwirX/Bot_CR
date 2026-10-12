@@ -176,6 +176,25 @@ shown only where they apply.
 
 ---
 
+## Which track pays
+
+The R ladder follows **total job XP** — the sum of all eight jobs — not any single
+job and not the AFK counter.
+
+| option | consequence |
+|---|---|
+| **total job XP (chosen)** | one ladder, 57,750 R to level 100, matches the faucet budget in [05-economy.md](05-economy.md) exactly |
+| each job's own track | 8x the budget: 462,000 R, because the ladder is paid once per job |
+| highest single job | rewards specialisation but punishes spreading across jobs |
+
+`gameplay_xp` is the **AFK counter**, not a levelling route. AFK exists to keep
+chunks loaded near a mob farm and to stop players being attacked while away; at
+1 XP per 30s it would take 675 hours to reach level 10 on its own. It is reported
+but never used as a level.
+
+`mc_profiles.level` therefore derives from total job XP, and so does the
+published reward ladder. The two can never disagree.
+
 ## Payment semantics
 
 R is credited **at the moment the level is reached**, not on a sync timer. The

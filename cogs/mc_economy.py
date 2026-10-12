@@ -87,7 +87,7 @@ class _Profile:
 
     __slots__ = ("username", "minecraft_xp", "discord_xp", "level", "discord_level",
                  "power", "money", "playtime_seconds", "active_seconds", "claims",
-                 "squads", "jobs", "curve")
+                 "squads", "jobs", "curve", "job_xp")
 
     def __init__(self, row: dict, discord_xp: int, curve: dict | None = None):
         self.username = row.get("username") or "?"
@@ -97,7 +97,11 @@ class _Profile:
         # no meaning on either scale. This used to sqrt the sum, which produced a
         # number that was neither level.
         self.curve = curve or mc_curve.DEFAULT_CURVE
-        self.level = mc_curve.level_for_xp(self.minecraft_xp, self.curve)
+        # The ladder follows total job XP. gameplay_xp is the AFK counter, which
+        # is deliberately not a levelling route, so it is reported but never
+        # used as a level.
+        self.job_xp = sum(xp for _, xp in _job_xp(row))
+        self.level = mc_curve.level_for_xp(self.job_xp, self.curve)
         self.discord_level = level_from_xp(self.discord_xp)
         self.power = sum(mc_curve.level_for_xp(xp, self.curve) for _, xp in _job_xp(row))
         self.money = int(row.get("money") or 0)

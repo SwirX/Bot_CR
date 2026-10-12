@@ -61,13 +61,27 @@ script rather than copying the maths. Two things there were worse than the
 now hold stale values written under the old curve. Nothing reads them. Dropping
 an Appwrite column is irreversible, so it waits for an explicit decision.
 
-## Step 3 — Level rewards
+## Step 3 — Level rewards — **DONE**
 
-Implement the three cadences with idempotent crediting.
+Three cadences driven by a live `rewards:formula` document rather than hard-coded
+values: every level pays R, every milestone pays a larger bonus, and each job
+claims its perk at 10/25/50/75.
 
-**Accept:** reaching a level pays exactly once even when the AFK path, the
-profile sync and the quit-persist all fire in the same tick; replaying a grant
-is a no-op; the wallet ledger shows one row per `(player, source, level)`.
+**Accept — all three confirmed:**
+- reaching a level pays exactly once. `RewardServiceTest` runs sixteen
+  concurrent settle calls over the same range and asserts one payment per level
+- replaying a grant is a no-op, and an overlapping range pays only the gap
+- the ledger holds one row per granted level
+
+Idempotency is a primary key on `reward_grants (uuid, scope, level)` claimed with
+`INSERT OR IGNORE`, so the answer to "have I already paid for level 34" comes
+from the database rather than from a caller's memory. The profile sync, the AFK
+award and the quit-persist path can all observe the same level-up.
+
+**Settled on join.** A player who earned level 19 while the ladder was inert
+would otherwise forfeit it, so `onJoin` reconciles the whole range. The grant is
+idempotent, so rejoining a hundred times still pays once. On the current roster
+this owes **4,520 R** in total.
 
 ## Step 4 — Job tier retier  ← the interface mods will target
 

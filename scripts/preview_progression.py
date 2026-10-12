@@ -243,6 +243,21 @@ def rows(base: int = DEFAULT_BASE, band: int = DEFAULT_BAND,
         "curve": dict(spec["curve"], _rev=1),
         # byLevel/byJob wrap the keyed collections so _rev is always a sibling of
         # the data and can never be mistaken for a level or a job name.
+        # The R ladder is a formula rather than 100 stored rows, so a balance
+        # change is a one-line edit instead of a regenerate-and-reseed.
+        "rewards:formula": {
+            "level_r_base": LEVEL_R_BASE,
+            "level_r_per_level": LEVEL_R_PER_LEVEL,
+            "milestone_r_multiple": MILESTONE_R_MULTIPLE,
+            "milestone_every": 10,
+            "perk_levels": list(PERK_LEVELS),
+            # The ladder follows total job XP: summing all eight jobs keeps the
+            # 1-100 payout at the documented 57,750 R instead of paying it eight
+            # times over.
+            "track": "total_job_xp",
+            "max_level": MAX_REWARD_LEVEL,
+            "_rev": 1,
+        },
         "rewards:milestones": {"byLevel": milestones, "_rev": 1},
         "rewards:perks": {"byJob": perks, "_rev": 1},
         "rewards:prestige": dict(

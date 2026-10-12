@@ -134,3 +134,27 @@ def test_profile_derives_job_levels_from_experience():
     assert profile.discord_level == 9
     assert profile.level != profile.discord_level
 
+
+
+def test_profile_level_follows_total_job_xp_not_afk():
+    """The ladder follows job XP; gameplay_xp is the AFK counter, not a route."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from cogs.mc_economy import _Profile
+
+    job_xp = canonical_cumulative(30)
+    row = {"username": "miner", "gameplay_xp": 999_999, "xp_miner": job_xp}
+    profile = _Profile(row, discord_xp=0)
+    assert profile.level == 30, "level must come from job XP"
+    assert profile.minecraft_xp == 999_999, "AFK XP is still reported"
+
+
+def test_reward_formula_matches_the_documented_budget():
+    """The seeded formula must reconcile with the 57,750 R faucet budget."""
+    rows_path = (Path(__file__).resolve().parent.parent / "scripts" / "preview_progression.py")
+    assert rows_path.exists()
+    total = sum(
+        canonical.level_reward(level)
+        + (canonical.milestone_reward(level) if level % 10 == 0 else 0)
+        for level in range(1, 101)
+    )
+    assert total == 57_750

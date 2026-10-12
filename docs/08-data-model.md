@@ -139,10 +139,12 @@ effectively irreversible.
 
 ### Changes required
 
-- ~~**Drop `lv_*` persistence.**~~ **Done.** The sync writes experience only and
-  every reader derives the level, so a retune needs no migration. The columns
-  still exist in `mc_profiles` and hold stale values from the old curve; nothing
-  reads them, and dropping an Appwrite column is irreversible.
+- ~~**Drop `lv_*` persistence.**~~ **Done, including the columns.** The sync
+  writes experience only, every reader derives the level, and the eight columns
+  and their eight indexes were dropped from `mc_profiles` on 2026-10-12
+  (30 columns to 22). `provision_appwrite.py` no longer recreates them.
+- **Add `reward_grants`** — **done.** `(uuid, scope, level)` is the idempotency
+  key for every reward ever paid.
 - **Add `unlocks`** — `(uuid, command, purchased_at)`.
 - **Add `quest_progress`** — `(uuid, quest_id, date, state)`.
 - **Add `streaks`** — `(uuid, current, longest, last_day)`.
