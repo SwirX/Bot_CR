@@ -47,7 +47,6 @@ BOARDS = {
     "active": ("active_seconds", "Active time"),
     "balance": ("money", "Balance"),
     "xp": ("gameplay_xp", "Gameplay XP"),
-    "total": ("total_xp", "Total XP (Minecraft + Discord)"),
     "power": ("power", "Power"),
 }
 
@@ -195,8 +194,7 @@ the RoboticsCMC server menu (link, unlink, server control).
             column = f"xp_{board}"
             duration = False
 
-        rows = await (store.top_mc_profiles_by_total_xp(PAGE_SIZE)
-                    if board == "total" else store.top_mc_profiles(column, PAGE_SIZE))
+        rows = await store.top_mc_profiles(column, PAGE_SIZE)
         if not rows:
             await interaction.followup.send("No entries yet.", ephemeral=True)
             return
@@ -205,17 +203,9 @@ the RoboticsCMC server menu (link, unlink, server control).
         for index, row in enumerate(rows, start=1):
             medal = {1: "1.", 2: "2.", 3: "3."}.get(index, f"{index}.")
             name = row.get("username") or "?"
-            if board == "total":
-                # Both sources named: a player should be able to see what drove
-                # their rank, and a gap between the two is the whole point of
-                # the gameplay-to-hub conversion.
-                lines.append(f"**{medal}** `{name}` — **{int(row.get('total_xp') or 0):,}** "
-                             f"({int(row.get('gameplay_xp') or 0):,} MC "
-                             f"+ {int(row.get('discord_xp') or 0):,} Discord)")
-            else:
-                value = row.get(column) or 0
-                lines.append(f"**{medal}** `{name}` — "
-                             f"{_seconds(value) if duration else f'{int(value):,}'}")
+            value = row.get(column) or 0
+            lines.append(f"**{medal}** `{name}` — "
+                         f"{_seconds(value) if duration else f'{int(value):,}'}")
         embed = discord.Embed(title=f"{label} leaderboard", colour=discord.Colour.gold())
         embed.description = "\n".join(lines)
         embed.set_footer(text="Mirror refreshes every 30 minutes.")

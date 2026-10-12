@@ -352,25 +352,48 @@ class Engagement(commands.Cog):
             members = await store.list_members(limit=100, order_by="xp")
         except StoreError:
             members = []
-        rows = []
-        for i, record in enumerate(members, start=1):
+        # Minecraft gameplay XP joins the Discord hub XP so one board ranks
+        # total engagement. mc_profiles is keyed by Discord id (the server
+        # creates each row with rowId = discordUserId), so this is a dict
+        # lookup per member rather than a query per member — the table only
+        # holds players who have actually joined, so it stays small.
+        try:
+            minecraft_xp = {
+                str(row.get("$id")): int(row.get("gameplay_xp") or 0)
+                for row in await store.list_mc_profiles()
+            }
+        except StoreError:
+            minecraft_xp = {}
+
+        ranked = []
+        for record in members:
             uid = int(record.get("user_id") or 0)
-            xp = int(record.get("xp", 0)) + self.xp_pending.get(uid, 0)
+            hub_xp = int(record.get("xp", 0)) + self.xp_pending.get(uid, 0)
+            mc_xp = minecraft_xp.get(str(uid), 0)
             name = (
                 record.get("display_name")
                 or record.get("username")
                 or (self.bot.get_user(uid).name if self.bot.get_user(uid) else "???")
             )
-            rows.append(f"`{i:>2}.` **{name}** — level {level_from_xp(xp)} ({xp} XP)")
+            ranked.append((hub_xp + mc_xp, name, hub_xp, mc_xp))
+        # Discord XP alone is the old ordering, so anyone who earned their rank
+        # in the hub must not silently drop below a player who grinds the game.
+        ranked.sort(key=lambda row: row[0], reverse=True)
+
+        rows = [
+            f"`{i:>2}.` **{name}** — {total:,} XP "
+            f"({mc:,} Minecraft + {hub:,} Discord)"
+            for i, (total, name, hub, mc) in enumerate(ranked, start=1)
+        ]
         if not rows:
-            await ctx.send("🏆 No XP recorded yet — start chatting!")
+            await ctx.send("🏆 No XP recorded yet — start chatting or playing!")
             return
         page_size = 10
         pages = []
         total_pages = (len(rows) + page_size - 1) // page_size
         for p in range(total_pages):
             embed = discord.Embed(
-                title="🏆 Leaderboard",
+                title="🏆 Leaderboard — Minecraft + Discord",
                 description="\n".join(rows[p * page_size:(p + 1) * page_size]),
                 color=discord.Color.gold(),
             )
