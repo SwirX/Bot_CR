@@ -162,13 +162,19 @@ the RoboticsCMC server menu (link, unlink, server control).
     async def mc_profile(self, interaction: discord.Interaction,
                          member: discord.Member | None = None):
         target = member or interaction.user
-        discord_id = await self._resolve_discord_id(target)
-        if not discord_id:
-            await interaction.response.send_message(
-                "No active Minecraft link for that account. Link it in-game first.",
-                ephemeral=True)
-            return
-        profile = await self._profile_for(discord_id)
+        # A profile row's document id *is* the Discord account id (the server's
+        # ProfileSyncService creates it with rowId = discordUserId), so the
+        # account being asked about is already the key. Gating the lookup behind
+        # the legacy mc_username field meant a player with a perfectly good
+        # synced profile was told they had no link — mc_username is populated by
+        # a separate, older path and is empty for most accounts. The legacy
+        # resolution is kept only as a fallback for profiles that still have to
+        # be found by an old name.
+        profile = await self._profile_for(str(target.id))
+        if profile is None and member is not None:
+            legacy_id = await self._resolve_discord_id(target)
+            if legacy_id:
+                profile = await self._profile_for(legacy_id)
         if not profile:
             await interaction.response.send_message(
                 "No synced profile yet — profiles appear within 30 minutes of first play.",
@@ -279,22 +285,25 @@ the RoboticsCMC server menu (link, unlink, server control).
                 f"`{item_key}` is not currently for sale.", ephemeral=True)
             return
 
-        discord_id = await self._resolve_discord_id(interaction.user)
-        if not discord_id:
-            await interaction.followup.send(
-                "No active Minecraft link, so an order cannot be delivered to you.",
-                ephemeral=True)
-            return
-
+        # The order carries the Discord id and the server resolves the buyer from it
+        # when the player next logs in, so no legacy Minecraft link lookup is
+        # needed to order. Gating on mc_username refused orders from accounts
+        # whose profile had synced perfectly well.
+        discord_id = str(interaction.user.id)
         unit_price = int(listing.get("buy_price") or 0)
         total = unit_price * quantity
         profile = await self._profile_for(discord_id)
-        if profile and profile.money < total:
+        low_balance = profile is not None and profile.money < total
+        if low_balance:
+            # Warned, not blocked. The mirror can lag by up to 30 minutes and
+            # reads 0 for a player who has not been synced yet, so refusing here
+            # would block a purchase the server would happily accept. The
+            # authoritative check happens on the server at fulfilment.
             await interaction.followup.send(
-                f"That costs **{total:,} R** but your mirrored balance is "
-                f"**{profile.money:,} R**. Mirrors can lag 30 minutes, so this may "
-                "still go through — the server has the final say.", ephemeral=True)
-            return
+                f"⚠️ That costs **{total:,} R** but your mirrored balance is "
+                f"**{profile.money:,} R**. Placing the order anyway — the server "
+                "checks your real balance when you log in and rejects it if you "
+                "cannot pay.", ephemeral=True)
 
         order_id = str(uuidlib.uuid4())
         now = discord.utils.utcnow()
