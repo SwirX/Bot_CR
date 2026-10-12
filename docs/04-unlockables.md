@@ -28,6 +28,11 @@ no ongoing activity.
 
 ## Cost formulas
 
+The tables below are generated from these formulas and asserted in
+`UnlockServiceTest`. An earlier revision carried hand-written tables that had
+never been computed and disagreed with the formulas in several cells; the
+formula is normative and the tables are checked against it.
+
 ### `/chest` — Builder
 
 Storage is an extension of territory: it is where you put what you mined and
@@ -41,7 +46,11 @@ slotCost = max(10, round(50 * 0.97 ^ builderLevel))
 
 | Builder level | 0 | 10 | 25 | 50 | 75 |
 |---|---:|---:|---:|---:|---:|
-| cost per slot | 50 R | 36 R | 28 R | 21 R | 16 R |
+| cost per slot | 50 R | 37 R | 23 R | 11 R | 10 R |
+
+The floor of 10 R is reached around Builder 53, so the last twenty levels of
+the curve buy a flat 10 R and nothing more. That is deliberate: a player with a
+maxed job should not be able to make the command free.
 
 Opening a chest costs `slots x slotCost` for the slots it exposes. The chest
 persists; the cost is per *access session*, so a player pays once to open their
@@ -58,7 +67,10 @@ smeltCost = max(5, round(20 * 0.97 ^ farmerLevel))
 
 | Farmer level | 0 | 10 | 25 | 50 | 75 |
 |---|---:|---:|---:|---:|---:|
-| cost per smelt | 20 R | 14 R | 11 R | 8 R | 6 R |
+| cost per smelt | 20 R | 15 R | 9 R | 5 R | 5 R |
+
+The 5 R floor lands around Farmer 36, earlier than the Builder floor because the
+per-unit base is smaller.
 
 A batch of 64 costs `64 x smeltCost`. At Farmer 0 that is 1,280 R, which is
 deliberately expensive enough that players use it for value-added processing
@@ -78,8 +90,11 @@ for the items everyone crafts constantly would be punitive rather than a choice.
 |---|---:|---:|---:|---:|
 | 0 | 15 R | 30 R | 45 R | 60 R |
 | 10 | 11 R | 22 R | 33 R | 44 R |
-| 25 | 9 R | 17 R | 26 R | 34 R |
-| 50 | 7 R | 13 R | 20 R | 27 R |
+| 25 | 7 R | 14 R | 21 R | 28 R |
+| 50 | 3 R | 7 R | 10 R | 13 R |
+
+The 3 R floor is reached around Crafter 45 at tier 1, so the deepest craft tiers
+stay meaningfully expensive even for a maxed Crafter.
 
 ### `/shop` concurrent sell slots — Businessman
 
