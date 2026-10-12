@@ -381,8 +381,7 @@ class Engagement(commands.Cog):
         ranked.sort(key=lambda row: row[0], reverse=True)
 
         rows = [
-            f"`{i:>2}.` **{name}** — {total:,} XP "
-            f"({mc:,} Minecraft + {hub:,} Discord)"
+            f"`{i:>2}.` **{name}** — {total:,} XP ({mc:,} MC + {hub:,} DC)"
             for i, (total, name, hub, mc) in enumerate(ranked, start=1)
         ]
         if not rows:
