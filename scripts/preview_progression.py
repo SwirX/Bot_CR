@@ -24,24 +24,41 @@ import json
 # Level 10 is deliberately cheap so a first session produces a real number to
 # chase; every 10 levels after that the step is ~1.5x, which is what makes 100
 # a genuine peak rather than a formality.
-DEFAULT_BASE = 150          # XP for one level inside the first band
+# Two-band model. The first band is a deliberately cheap tutorial ramp so a
+# first session produces a real number to chase; every band after it is an
+# order of magnitude dearer, which is what stops level 70 from costing the same
+# as the entire 0-20 journey.
+DEFAULT_TUTORIAL = 150      # XP per level inside the tutorial band (1-10)
+DEFAULT_BASE = 800          # XP per level in the second band (11-20)
+DEFAULT_GROWTH = 1.42       # cost multiplier at each band boundary after that
 DEFAULT_BAND = 10           # levels per band
-DEFAULT_GROWTH = 1.7        # cost multiplier added at each band boundary
 MAX_REWARD_LEVEL = 100      # rewards track ends here
 PRESTIGE_EVERY = 50         # reward cadence past the cap
 COSMETIC_EVERY = 5          # cosmetic unlock cadence
 
 
-def level_cost(level: int, base: int, band: int, growth: float) -> int:
-    """XP to advance *into* ``level`` (level 1 is free)."""
+def level_cost(level: int, base: int, band: int, growth: float,
+               tutorial: int = DEFAULT_TUTORIAL) -> int:
+    """XP to advance *into* ``level`` (level 1 is free).
+
+    Band 0 is the tutorial ramp at a flat ``tutorial`` cost. Band 1 costs
+    ``base`` — roughly five times as much — and every band after that is
+    ``growth`` times the one before it. Splitting band 0 out is what makes the
+    early game readable: without it the geometric ramp is so shallow early that
+    one level near 70 costs almost the same as the whole first twenty levels.
+    """
     if level <= 1:
         return 0
     band_index = (level - 1) // band
-    return int(round(base * (growth ** band_index)))
+    if band_index == 0:
+        return int(round(tutorial))
+    return int(round(base * (growth ** (band_index - 1))))
 
 
-def cumulative_xp(level: int, base: int, band: int, growth: float) -> int:
-    return sum(level_cost(lvl, base, band, growth) for lvl in range(1, level + 1))
+def cumulative_xp(level: int, base: int, band: int, growth: float,
+                  tutorial: int = DEFAULT_TUTORIAL) -> int:
+    return sum(level_cost(lvl, base, band, growth, tutorial)
+               for lvl in range(1, level + 1))
 
 
 # ── rewards ──────────────────────────────────────────────────────────────
@@ -131,7 +148,8 @@ def prestige_reward(level: int) -> int:
     return 5_000 * step * step
 
 
-def build(base: int, band: int, growth: float) -> dict:
+def build(base: int, band: int, growth: float,
+          tutorial: int = DEFAULT_TUTORIAL) -> dict:
     """The shape both the preview and the future DB payload are built from."""
     rewards: dict[str, list[dict]] = {}
     for job in JOBS:
@@ -156,7 +174,8 @@ def build(base: int, band: int, growth: float) -> dict:
 
     return {
         "curve": {
-            "mode": "banded_geometric", "base": base, "band_size": band,
+            "mode": "tutorial_then_banded_geometric",
+            "tutorial_base": tutorial, "base": base, "band_size": band,
             "growth": growth, "max_reward_level": MAX_REWARD_LEVEL,
             "prestige_every": PRESTIGE_EVERY, "cosmetic_every": COSMETIC_EVERY,
         },
@@ -167,6 +186,7 @@ def build(base: int, band: int, growth: float) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--tutorial", type=int, default=DEFAULT_TUTORIAL)
     parser.add_argument("--base", type=int, default=DEFAULT_BASE)
     parser.add_argument("--band", type=int, default=DEFAULT_BAND)
     parser.add_argument("--growth", type=float, default=DEFAULT_GROWTH)
@@ -175,18 +195,18 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="emit the DB payload")
     args = parser.parse_args()
 
-    spec = build(args.base, args.band, args.growth)
+    spec = build(args.base, args.band, args.growth, args.tutorial)
 
     if args.json:
         print(json.dumps(spec, indent=2))
         return
 
-    print("\n  LEVEL CURVE  (per-level cost is flat within a band, x{growth} each band)"
-          .format(growth=args.growth))
+    print(f"\n  LEVEL CURVE  (per-level cost is flat within a band, x{args.growth} each band)"
+          )
     print(f"  {'lvl':>4} {'cost into lvl':>14} {'cumulative':>12} {'R':>7} {'+milestone':>11}")
     previous = 0
     for level in range(1, MAX_REWARD_LEVEL + 1):
-        cumulative = cumulative_xp(level, args.base, args.band, args.growth)
+        cumulative = cumulative_xp(level, args.base, args.band, args.growth, args.tutorial)
         milestone = f"{milestone_reward(level):,}" if level % 10 == 0 else ""
         is_boundary = level % 10 == 0
         if args.per_level or is_boundary:
@@ -195,10 +215,10 @@ def main() -> None:
                   f"{level_reward(level):>7,} {milestone:>11}")
         previous = cumulative
 
-    print(f"\n  TOTAL to level {MAX_REWARD_LEVEL}: "
-          f"{cumulative_xp(MAX_REWARD_LEVEL, args.base, args.band, args.growth):,} XP")
-    total_r = sum(level_reward(l) + (milestone_reward(l) if l % 10 == 0 else 0)
-                  for l in range(1, MAX_REWARD_LEVEL + 1))
+    peak = cumulative_xp(MAX_REWARD_LEVEL, args.base, args.band, args.growth, args.tutorial)
+    print(f"\n  TOTAL to level {MAX_REWARD_LEVEL}: {peak:,} XP")
+    total_r = sum(level_reward(lvl) + (milestone_reward(lvl) if lvl % 10 == 0 else 0)
+                  for lvl in range(1, MAX_REWARD_LEVEL + 1))
     print(f"  TOTAL R earned across 1-{MAX_REWARD_LEVEL}: {total_r:,} R")
 
     print(f"\n  PRESTIGE TRACK  (past {MAX_REWARD_LEVEL}, reward every {PRESTIGE_EVERY} levels)")
@@ -208,7 +228,7 @@ def main() -> None:
 
     print("\n  MILESTONE PERKS  (every 10 = universal, job perk at 10/25/50/75)")
     for job in JOBS:
-        cells = "  ".join(f"{lvl}:{p}" for lvl, p in zip(PERK_LEVELS, PERKS[job]))
+        cells = "  ".join(f"{lvl}:{p}" for lvl, p in zip(PERK_LEVELS, PERKS[job], strict=True))
         print(f"    {job:<12} {cells}")
 
     print("\n  MILESTONE UNLOCKS  (every 10 — permanent, not a percentage nudge)")
