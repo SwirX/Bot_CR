@@ -122,11 +122,37 @@ curve-breaking the tiers exist to prevent.
 before any modding starts is what makes future XP sources pluggable instead of
 curve-breaking.
 
-## Step 5 — Quest framework and daily board
+## Step 5 — Quest framework and daily board — **DONE**
 
-**Accept:** three deterministic quests per player per day, stable across
-re-logins, resetting at 00:00 UTC; the streak increases and never resets;
-completing a quest pays exactly once.
+**Accept — all three confirmed:**
+- three quests per player per day, drawn from a pool weighted by job level.
+  `DailyBoardTest` re-rolls the same player and day 25 times and gets an
+  identical board every time; different players and different days differ
+- resets at **00:00 UTC**, not server time. Two players would otherwise be on
+  different boards at the same moment, and the reset would drift with daylight
+  saving
+- the streak increases and never resets on its own. Only a missed day breaks it,
+  and viewing the board twice on one day is not a break. An earlier date than the
+  last recorded is a no-op rather than a reset, so a clock skew cannot destroy a
+  streak the player earned
+- completing a quest pays exactly once, enforced by the primary key on
+  `(uuid, quest_id, board_date)` rather than by an in-memory check.
+  `QuestPersistenceTest` claims, reopens the database, and claims again
+
+**The board is derived, not stored.** It is a pure function of (player, date), so
+persisting it would only create a way for the stored copy and the drawn copy to
+disagree. Only claims, progress and streaks are stored.
+
+**Unknown:** a level 80 Miner still missed mining on the whole board at the
+first weighting of 10 + level/5, which is 27% per draw. The weight is now
+10 + level. The seed is a plain arithmetic hash of the player UUID and epoch day
+rather than `UUID.hashCode`, which is not stable across JVM runs and would make
+boards irreproducible for debugging.
+
+The board is drawn and the streak is recorded and displayed, but **no quest
+progress is wired to gameplay events yet** and no reward is paid. Completing a
+quest requires the category hooks (mining, chopping, hunting) that do not exist
+as a single interface; those land with the job retier in Step 4's follow-up.
 
 ## Step 6 — Unlockables
 
