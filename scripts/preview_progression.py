@@ -24,11 +24,12 @@ import json
 # Level 10 is deliberately cheap so a first session produces a real number to
 # chase; every 10 levels after that the step is ~1.5x, which is what makes 100
 # a genuine peak rather than a formality.
-DEFAULT_BASE = 120          # XP for one level inside the first band
+DEFAULT_BASE = 150          # XP for one level inside the first band
 DEFAULT_BAND = 10           # levels per band
-DEFAULT_GROWTH = 1.5        # cost multiplier added at each band boundary
+DEFAULT_GROWTH = 1.7        # cost multiplier added at each band boundary
 MAX_REWARD_LEVEL = 100      # rewards track ends here
-PRESTIGE_EVERY = 25         # reward cadence past the cap
+PRESTIGE_EVERY = 50         # reward cadence past the cap
+COSMETIC_EVERY = 5          # cosmetic unlock cadence
 
 
 def level_cost(level: int, base: int, band: int, growth: float) -> int:
@@ -44,9 +45,12 @@ def cumulative_xp(level: int, base: int, band: int, growth: float) -> int:
 
 
 # ── rewards ──────────────────────────────────────────────────────────────
-# Every level pays something so the bar always moves. Only every 10th pays a
-# milestone worth remembering, so there is a reason to plan a session around
-# hitting a multiple of ten.
+# Three tiers, because one is not enough to hold attention over years:
+#   every level  — R, scaled by band, so the bar always moves
+#   every 5th     — a cosmetic, so progress is visible to other players
+#   every 10th    — a milestone: real perk plus an unlock you can feel in game
+# Vanilla goes boring precisely because nothing accumulates; these are the
+# things that keep accumulating in a game with no seasons to reset them.
 LEVEL_R_BASE, LEVEL_R_PER_LEVEL = 50, 5
 MILESTONE_R_MULTIPLE = 500
 
@@ -74,32 +78,57 @@ PERKS = {
 }
 PERK_LEVELS = (10, 25, 50, 75)
 
-UNIVERSAL_PERKS = {
-    10: "+0.5% shop discount",
-    20: "+0.5% shop discount",
-    30: "+0.5% shop discount",
-    40: "+0.5% shop discount",
-    50: "claim cost -25%",
-    60: "+0.5% shop discount",
-    70: "+0.5% shop discount",
-    80: "+0.5% shop discount",
-    90: "+0.5% shop discount",
-    100: "title: Peak",
+# Milestones are permanent unlocks, not percentage nudges. These compound into
+# real convenience over a long game, which is the point.
+MILESTONES = {
+    10:  "home slot 1  ·  +0.5% shop discount",
+    20:  "home slot 2  ·  +0.5% shop discount",
+    30:  "home slot 3  ·  claim radius +1  ·  +0.5% discount",
+    40:  "home slot 4  ·  +0.5% shop discount",
+    50:  "home slot 5  ·  claim radius +1  ·  AFK daily cap +1h  ·  claim cost -25%",
+    60:  "home slot 6  ·  +0.5% shop discount",
+    70:  "home slot 7  ·  claim radius +1  ·  +0.5% discount",
+    80:  "home slot 8  ·  +0.5% shop discount",
+    90:  "home slot 9  ·  +0.5% shop discount",
+    100: "home slot 10  ·  title: Peak  ·  permanent +1% shop discount",
+}
+
+# Cosmetics are the every-5th cadence. Purely social, so they cost the economy
+# nothing while still being the thing other players notice.
+COSMETICS = {
+    5:   "chat tag: verdant",
+    15:  "particle trail: ember",
+    25:  "join message colour: aqua",
+    35:  "particle trail: frost",
+    45:  "chat tag: gilded",
+    55:  "join message colour: rose",
+    65:  "particle trail: storm",
+    75:  "chat tag: ascendant",
+    85:  "particle trail: void",
+    95:  "particle trail: aurora",
 }
 
 
 def level_reward(level: int) -> int:
+    """Every level pays, so the progress bar is never dead."""
     return LEVEL_R_BASE + LEVEL_R_PER_LEVEL * level
 
 
 def milestone_reward(level: int) -> int:
+    """Every 10th level, on top, sized by which multiple of ten it is."""
     return MILESTONE_R_MULTIPLE * (level // 10)
 
 
 def prestige_reward(level: int) -> int:
-    """Every PRESTIGE_EVERY levels past the cap, scaled so prestige stays worth it."""
+    """Quadratic in the prestige step.
+
+    Minecraft has no season to reset for, so prestige cannot pay out the way a
+    battle pass does — there is nothing to compete against except yourself,
+    years apart. Every 50 levels past 100, growing quadratically so it stays
+    worth chasing rather than being outrun within a season.
+    """
     step = (level - MAX_REWARD_LEVEL) // PRESTIGE_EVERY
-    return 2_000 * step * step
+    return 5_000 * step * step
 
 
 def build(base: int, band: int, growth: float) -> dict:
@@ -109,9 +138,11 @@ def build(base: int, band: int, growth: float) -> dict:
         entries = []
         for level in range(1, MAX_REWARD_LEVEL + 1):
             reward = {"level": level, "r": level_reward(level)}
+            if level % COSMETIC_EVERY == 0:
+                reward["cosmetic"] = COSMETICS.get(level, "")
             if level % 10 == 0:
                 reward["milestone_r"] = milestone_reward(level)
-                reward["perk"] = UNIVERSAL_PERKS.get(level, "")
+                reward["unlock"] = MILESTONES.get(level, "")
                 if level in PERK_LEVELS:
                     reward["job_perk"] = PERKS[job][PERK_LEVELS.index(level)]
             entries.append(reward)
@@ -127,7 +158,7 @@ def build(base: int, band: int, growth: float) -> dict:
         "curve": {
             "mode": "banded_geometric", "base": base, "band_size": band,
             "growth": growth, "max_reward_level": MAX_REWARD_LEVEL,
-            "prestige_every": PRESTIGE_EVERY,
+            "prestige_every": PRESTIGE_EVERY, "cosmetic_every": COSMETIC_EVERY,
         },
         "rewards": rewards,
         "prestige": prestige,
@@ -180,9 +211,13 @@ def main() -> None:
         cells = "  ".join(f"{lvl}:{p}" for lvl, p in zip(PERK_LEVELS, PERKS[job]))
         print(f"    {job:<12} {cells}")
 
-    print("\n  UNIVERSAL MILESTONES")
-    for level, perk in UNIVERSAL_PERKS.items():
-        print(f"    {level:>4}: {perk}")
+    print("\n  MILESTONE UNLOCKS  (every 10 — permanent, not a percentage nudge)")
+    for level, unlock in MILESTONES.items():
+        print(f"    {level:>4}: {unlock}")
+
+    print(f"\n  COSMETICS  (every {COSMETIC_EVERY} — social only, free to the economy)")
+    for level, cosmetic in COSMETICS.items():
+        print(f"    {level:>4}: {cosmetic}")
     print()
 
 
