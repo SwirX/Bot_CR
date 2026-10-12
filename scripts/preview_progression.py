@@ -136,6 +136,34 @@ def milestone_reward(level: int) -> int:
     return MILESTONE_R_MULTIPLE * (level // 10)
 
 
+# ── earning rate ─────────────────────────────────────────────────────────
+# XP income is NOT flat. Cost per level grows ~1.42x per band, so a flat income
+# would make every band take 42% longer than the last and the wall into the
+# 90s would be uncrossable. Income therefore grows with level, chosen so time
+# per level rises gently (~15% per band) instead of exploding. This is also the
+# core retention lever: levelling makes you earn faster, so there is always a
+# reason to come back tomorrow.
+INCOME_GROWTH = 1.1
+DEFAULT_HOURLY_XP = 1500  # Miner baseline: ~250 ores/hr at 6.0 XP each
+
+
+def hourly_income(level: int, base_rate: int) -> int:
+    """XP/hour at ``level``, scaling by band so time-per-level grows gently."""
+    return int(round(base_rate * (INCOME_GROWTH ** ((level - 1) // DEFAULT_BAND))))
+
+
+def time_to(base: int, band: int, growth: float, tutorial: int,
+            base_rate: int) -> dict[int, float]:
+    """Cumulative active hours to reach each level."""
+    out, elapsed = {}, 0.0
+    for level in range(1, MAX_REWARD_LEVEL + 1):
+        if level > 1:
+            cost = level_cost(level, base, band, growth, tutorial)
+            elapsed += cost / hourly_income(level, base_rate)
+        out[level] = elapsed
+    return out
+
+
 def prestige_reward(level: int) -> int:
     """Quadratic in the prestige step.
 
@@ -192,6 +220,8 @@ def main() -> None:
     parser.add_argument("--growth", type=float, default=DEFAULT_GROWTH)
     parser.add_argument("--per-level", action="store_true",
                         help="print all 100 levels instead of band boundaries")
+    parser.add_argument("--hourly", type=int, default=DEFAULT_HOURLY_XP,
+                        help="base XP/hour at level 1")
     parser.add_argument("--json", action="store_true", help="emit the DB payload")
     args = parser.parse_args()
 
@@ -230,6 +260,20 @@ def main() -> None:
     for job in JOBS:
         cells = "  ".join(f"{lvl}:{p}" for lvl, p in zip(PERK_LEVELS, PERKS[job], strict=True))
         print(f"    {job:<12} {cells}")
+
+    hours = time_to(args.base, args.band, args.growth, args.tutorial, args.hourly)
+    print(f"\n  ACTIVE TIME  (income grows {INCOME_GROWTH}x per band, "
+          f"from {args.hourly:,} XP/hr at level 1)")
+    print(f"  {'lvl':>4} {'XP needed':>12} {'XP/hr':>9} {'this level':>12} {'cumulative':>12}")
+    previous_xp = previous_time = 0.0
+    for level in range(1, MAX_REWARD_LEVEL + 1):
+        if level % 10 == 0:
+            cumulative = cumulative_xp(level, args.base, args.band, args.growth, args.tutorial)
+            rate = hourly_income(level, args.hourly)
+            this_level = hours[level] - previous_time
+            print(f"  {level:>4} {cumulative - previous_xp:>12,} {rate:>9,} "
+                  f"{this_level:>11.1f}h {hours[level]:>11.1f}h")
+        previous_time = hours[level]
 
     print("\n  MILESTONE UNLOCKS  (every 10 — permanent, not a percentage nudge)")
     for level, unlock in MILESTONES.items():
