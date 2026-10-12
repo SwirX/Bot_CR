@@ -31,13 +31,35 @@ Also shipped with this step:
 Three bugs were found and fixed while building this, all of them in code that
 had never run. See the defect list below.
 
-## Step 2 — Derive levels, stop persisting them
+## Step 2 — Derive levels, stop persisting them — **DONE**
 
-Remove `lv_*` from `ProfileSyncService` and `ProfilePayloadBuilder`. Compute
-every level from XP at display time.
+`lv_*` is gone from `ProfileSyncService` and `ProfilePayloadBuilder`, and the
+static `SkillCurve` is deleted. `SkillProfile` now derives every level through
+the live curve, and the Discord bot derives from the same document.
 
-**Accept:** changing `growth` in `curve` changes displayed levels for existing
-players with no data migration; no `lv_*` column is written on sync.
+**Accept — both confirmed:**
+- changing `growth` changes displayed levels for existing players with no data
+  migration, verified live in both the server log and the bot
+- no `lv_*` column is written on sync, pinned by `ProfilePayloadLevelsTest`
+
+`SkillProfile` takes a `Supplier<ProgressionCurve>` rather than an instance
+because the curve is hot-reloaded: a cached profile has to observe a retuned
+curve without being rebuilt.
+
+The bot reads `xp_*` and applies the same formula, importing the canonical
+script rather than copying the maths. Two things there were worse than the
+`lv_*` read they replaced:
+
+- `_progress` drew every job bar against a hand-copied `120 * level^1.45`, the
+  curve the server had already deleted. Bars were rendering against a formula
+  that no longer existed anywhere.
+- the profile summed Minecraft and Discord XP and square-rooted the total. The
+  two curves are unrelated, so that number was neither level. They are now
+  reported separately and never combined.
+
+**Left in place deliberately:** the `lv_*` columns still exist in Appwrite and
+now hold stale values written under the old curve. Nothing reads them. Dropping
+an Appwrite column is irreversible, so it waits for an explicit decision.
 
 ## Step 3 — Level rewards
 

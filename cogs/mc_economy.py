@@ -27,6 +27,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from data import mc_curve
+from data.levels import level_from_xp
 from data.store import store
 
 LOG = logging.getLogger("bot.mc_economy")
@@ -65,38 +67,50 @@ def _seconds(value) -> str:
     return f"{value}s"
 
 
-def _progress(xp: int, level: int, width: int = 10) -> str:
-    """Mirror of the server's 120 * level^1.45 cumulative curve."""
-    if level >= 100:
-        return "█" * width
-    floor = 120 * level ** 1.45
-    span = 120 * (level + 1) ** 1.45 - floor
-    ratio = 0.0 if span <= 0 else max(0.0, min(1.0, (xp - floor) / span))
-    filled = max(0, min(width, round(ratio * width)))
-    return "█" * filled + "░" * (width - filled)
+def _job_xp(row: dict) -> list[tuple[str, int]]:
+    """Per-job experience from a profile row, in JOBS order."""
+    return [(key, int(row.get(f"xp_{key}") or 0)) for key, _ in JOBS]
+
+
+def _progress(xp: int, level: int, curve: dict | None = None, width: int = 10) -> str:
+    """Progress through the current level, on the live curve.
+
+    This mirrored the server's old 120 * level^1.45 formula by hand, which meant
+    every job bar was drawn against a curve the server had already stopped using
+    and would silently drift again on the next retune.
+    """
+    return mc_curve.progress_bar(xp, level, curve, width)
 
 
 class _Profile:
     """A parsed ``mc_profiles`` row with the Discord XP pool folded in."""
 
-    __slots__ = ("username", "minecraft_xp", "discord_xp", "level", "power", "money",
-                 "playtime_seconds", "active_seconds", "claims", "squads", "jobs")
+    __slots__ = ("username", "minecraft_xp", "discord_xp", "level", "discord_level",
+                 "power", "money", "playtime_seconds", "active_seconds", "claims",
+                 "squads", "jobs", "curve")
 
-    def __init__(self, row: dict, discord_xp: int):
+    def __init__(self, row: dict, discord_xp: int, curve: dict | None = None):
         self.username = row.get("username") or "?"
         self.minecraft_xp = int(row.get("gameplay_xp") or 0)
         self.discord_xp = int(discord_xp or 0)
-        combined = self.minecraft_xp + self.discord_xp
-        self.level = int((combined // 100) ** 0.5)
-        self.power = int(row.get("power") or 0)
+        # The two curves are unrelated and are never summed: a combined total has
+        # no meaning on either scale. This used to sqrt the sum, which produced a
+        # number that was neither level.
+        self.curve = curve or mc_curve.DEFAULT_CURVE
+        self.level = mc_curve.level_for_xp(self.minecraft_xp, self.curve)
+        self.discord_level = level_from_xp(self.discord_xp)
+        self.power = sum(mc_curve.level_for_xp(xp, self.curve) for _, xp in _job_xp(row))
         self.money = int(row.get("money") or 0)
         self.playtime_seconds = int(row.get("playtime_seconds") or 0)
         self.active_seconds = int(row.get("active_seconds") or 0)
         self.claims = int(row.get("claims") or 0)
         self.squads = int(row.get("squads") or 0)
+        # Job levels are derived from experience. They used to be read from the
+        # lv_* columns, which the server no longer publishes because a published
+        # level is a snapshot of whichever curve was live at sync time.
         self.jobs = {
-            key: (int(row.get(f"lv_{key}") or 0), int(row.get(f"xp_{key}") or 0))
-            for key, _ in JOBS
+            key: (mc_curve.level_for_xp(xp, self.curve), xp)
+            for key, xp in _job_xp(row)
         }
 
 
@@ -140,7 +154,8 @@ the RoboticsCMC server menu (link, unlink, server control).
         row = await store.get_mc_profile(discord_id)
         if not row:
             return None
-        return _Profile(row, await store.get_discord_xp(discord_id))
+        curve = await store.live_curve()
+        return _Profile(row, await store.get_discord_xp(discord_id), curve)
 
     # ------------------------------------------------------------------
     @mc.command(name="profile", description="Show a Minecraft player profile.")
@@ -163,7 +178,10 @@ the RoboticsCMC server menu (link, unlink, server control).
             return
 
         embed = discord.Embed(title=profile.username, colour=discord.Colour.teal())
-        embed.add_field(name="Level", value=f"**{profile.level}**", inline=True)
+        # Discord and Minecraft level on unrelated curves, so they are reported
+        # side by side and never combined into one number.
+        embed.add_field(name="MC level", value=f"**{profile.level}**", inline=True)
+        embed.add_field(name="Discord level", value=f"**{profile.discord_level}**", inline=True)
         embed.add_field(name="Power", value=f"**{profile.power}**", inline=True)
         embed.add_field(name="Balance", value=f"{profile.money:,} R", inline=True)
         embed.add_field(name="Playtime", value=_seconds(profile.playtime_seconds), inline=True)

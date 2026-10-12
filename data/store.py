@@ -55,6 +55,7 @@ from data.appwrite_client import (
     is_missing,
     seed_club_roles as _seed_roles_sync,
 )
+from data import mc_curve
 from data.levels import level_from_xp
 from data.names import best_match, normalize_name
 
@@ -82,6 +83,7 @@ _T = {
     "meetings": "meetings",
     "meeting_sessions": "meeting_sessions",
     "mc_profiles": "mc_profiles",
+    "mc_progression": "mc_progression",
     "mc_shop_items": "mc_shop_items",
     "mc_orders": "mc_orders",
 }
@@ -2058,6 +2060,32 @@ class Store:
 
     async def get_mc_profile(self, discord_id) -> dict | None:
         return await self._get(_T["mc_profiles"], str(discord_id))
+
+    async def get_mc_progression(self, key: str) -> dict | None:
+        """One ``mc_progression`` document, e.g. the live ``curve``.
+
+        The payload column is a JSON string because Appwrite has no JSON type.
+        """
+        row = await self._get(_T["mc_progression"], mc_curve.row_id_for(key))
+        if not row:
+            return None
+        payload = row.get("payload")
+        if isinstance(payload, dict):
+            return payload
+        try:
+            return json.loads(payload) if payload else None
+        except (TypeError, ValueError):
+            LOG.warning("mc_progression %s has an unparseable payload", key)
+            return None
+
+    async def live_curve(self) -> dict:
+        """The live curve, falling back to the shipped defaults.
+
+        Callers must not cache this for long: the server hot-reloads the curve
+        every five minutes and this bot derives its levels from the same data.
+        """
+        payload = await self.get_mc_progression("curve")
+        return payload or dict(mc_curve.DEFAULT_CURVE)
 
     async def list_mc_profiles(self) -> list[dict]:
         """Every synced RoboticsCMC profile, for the gameplay->hub XP sweep."""

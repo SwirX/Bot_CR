@@ -112,7 +112,7 @@ players will notice the moment it changes.
 
 | table | purpose | notes |
 |---|---|---|
-| `mc_profiles` | profile mirror | **must gain** `mc_xp_credited`, `mc_xp_credited_day`, `mc_xp_credited_today` |
+| `mc_profiles` | profile mirror | gained the three `mc_xp_credited` watermarks; `lv_*` is deprecated and unread |
 | `mc_shop_items` | market mirror | 12 rows live |
 | `mc_orders` | Discord order transport | `discord_user` relationship is unused and should be dropped |
 | `discord_data` | hub XP | keyed by Discord id |
@@ -139,9 +139,10 @@ effectively irreversible.
 
 ### Changes required
 
-- **Drop `lv_*` persistence.** `ProfileSyncService` currently writes a
-  materialised level column per job. Levels must be derived, or a curve change
-  leaves stale columns that silently disagree with the formula.
+- ~~**Drop `lv_*` persistence.**~~ **Done.** The sync writes experience only and
+  every reader derives the level, so a retune needs no migration. The columns
+  still exist in `mc_profiles` and hold stale values from the old curve; nothing
+  reads them, and dropping an Appwrite column is irreversible.
 - **Add `unlocks`** — `(uuid, command, purchased_at)`.
 - **Add `quest_progress`** — `(uuid, quest_id, date, state)`.
 - **Add `streaks`** — `(uuid, current, longest, last_day)`.
