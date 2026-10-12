@@ -634,6 +634,11 @@ class Minecraft(commands.Cog):
             embed.add_field(name=t("mc.field.players", lang), value=value)
         else:
             embed.add_field(name=t("mc.field.players", lang), value="—")
+        if config.MC_MAP_URL:
+            embed.add_field(
+                name=t("mc.field.map", lang),
+                value=t("mc.field.map_value", lang, url=config.MC_MAP_URL),
+            )
         if include_guide:
             embed.add_field(name=t("mc.linking.title", lang),
                             value=t("mc.linking.body", lang))

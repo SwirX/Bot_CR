@@ -203,6 +203,26 @@ MC_ADDRESS = _env("MC_ADDRESS", "")
 MC_PORT = _env("MC_PORT", 25566, cast=int)
 MC_SERVER_NAME = _env("MC_SERVER_NAME", "Robotics CMC")
 
+# Public BlueMap web UI, shown on the /mc status card. Blank hides the field,
+# so the same build works before the map is published.
+MC_MAP_URL = _env("MC_MAP_URL", "https://mc-map.alibks.dev")
+
+# ── Minecraft → hub XP conversion ─────────────────────────────────────
+# Playing the game pays Discord XP so the game is worth the time. Rate is
+# hub XP per point of gameplay XP; gameplay XP accrues at 1 per 30s of active
+# play, capped by the server's daily-active cap (6h), so the ratio is chosen
+# against Discord's own faucets: a 3x payout puts an hour of play ~3.8x above
+# realistic chat (1 msg / 5min) without making chatter pointless.
+MC_XP_SYNC_ENABLED = _env("MC_XP_SYNC_ENABLED", True, cast=bool)
+MC_XP_RATIO = _env("MC_XP_RATIO", 3, cast=int)
+# Caps hub XP from Minecraft per member per day, independently of the server's
+# active-play cap. Raising gameplay generosity must not inflate the hub
+# economy, and this keeps a ratio change from retro-granting a large balance.
+MC_XP_DAILY_CAP = _env("MC_XP_DAILY_CAP", 2500, cast=int)
+# Conversion runs on a timer rather than inside the 30-minute profile sync so a
+# profile sync outage cannot stall or double-credit payouts.
+MC_XP_SYNC_SECONDS = _env("MC_XP_SYNC_SECONDS", 900, cast=int)
+
 # Auto-assigned to every member who links a Minecraft account, so a single
 # role mention pings the whole linked player base (used by /mcsession and the
 # auto "someone joined" rally).

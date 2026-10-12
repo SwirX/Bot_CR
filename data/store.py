@@ -2059,6 +2059,24 @@ class Store:
     async def get_mc_profile(self, discord_id) -> dict | None:
         return await self._get(_T["mc_profiles"], str(discord_id))
 
+    async def list_mc_profiles(self) -> list[dict]:
+        """Every synced RoboticsCMC profile, for the gameplay->hub XP sweep."""
+        return await self._list(_T["mc_profiles"], [])
+
+    async def record_mc_xp_credit(self, discord_id, *, credited: int,
+                                  day: str, credited_today: int) -> None:
+        """Advance the gameplay->hub XP watermark on one profile row.
+
+        Bot-owned columns only. The game server PATCHes the same row from
+        ProfileSyncService, so this must stay a partial update of just the
+        watermark triple and never a full-row write.
+        """
+        await self._write(_T["mc_profiles"], str(discord_id), {
+            "mc_xp_credited": max(0, int(credited)),
+            "mc_xp_credited_day": day,
+            "mc_xp_credited_today": max(0, int(credited_today)),
+        })
+
     async def get_discord_xp(self, discord_id) -> int:
         row = await self._get(_T["discord_data"], str(discord_id))
         return int((row or {}).get("xp") or 0)
