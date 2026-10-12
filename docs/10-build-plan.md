@@ -149,10 +149,27 @@ first weighting of 10 + level/5, which is 27% per draw. The weight is now
 rather than `UUID.hashCode`, which is not stable across JVM runs and would make
 boards irreproducible for debugging.
 
-The board is drawn and the streak is recorded and displayed, but **no quest
-progress is wired to gameplay events yet** and no reward is paid. Completing a
-quest requires the category hooks (mining, chopping, hunting) that do not exist
-as a single interface; those land with the job retier in Step 4's follow-up.
+**Fully wired.** Progress is recorded from the same event funnel that awards job
+XP, so every category advances from real gameplay: mining, chopping and building
+through `awardMaterial`, hunting from the killer-only death handler, harvesting,
+smelting, crafting (including trivial recipes that pay no XP), and trade
+settlement.
+
+Payment is automatic the moment a target is reached, with a message and a sound.
+A reward that requires opening a command to collect is a reward most players
+never collect.
+
+**Quests are generated, not written.** `QuestGenerator` derives targets and
+rewards from rules, so the pool is never hand-authored and never needs
+appending. Nothing to schedule, review or write a month's worth of.
+
+**Trade quests settle only.** `MarketService` fires the callback after the sale
+completes, never on listing, so an order that expires pays nothing.
+
+Verified end to end on the production jar by simulating seven days: boards vary
+per day, the streak rises and adds to each payout, and replaying the whole week
+pays nothing further. Simulated day payouts ran 506, 540, 728, 700, 675, 720,
+765 R as the streak bonus grew from 0% to 60%.
 
 ## Step 6 — Unlockables
 
