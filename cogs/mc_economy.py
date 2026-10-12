@@ -47,6 +47,7 @@ BOARDS = {
     "active": ("active_seconds", "Active time"),
     "balance": ("money", "Balance"),
     "xp": ("gameplay_xp", "Gameplay XP"),
+    "total": ("total_xp", "Total XP (Minecraft + Discord)"),
     "power": ("power", "Power"),
 }
 
@@ -136,20 +137,6 @@ the RoboticsCMC server menu (link, unlink, server control).
             embed.add_field(name="⚠️", value=error, inline=False)
         await interaction.followup.send(embed=embed)
 
-    async def _resolve_discord_id(self, user) -> str | None:
-        """Resolve through the bot's own Minecraft link record."""
-        record = (await store.get_member(user.id)) or {}
-        username = record.get("mc_username") or ""
-        if not username:
-            return None
-        account = await store.get_minecraft_account_by_username(username)
-        if not account:
-            return None
-        link = await store.mc_active_link_for_user(user.id)
-        if link and link.get("discord_user"):
-            return str(link["discord_user"])
-        return str(account.get("discord_user")) if account.get("discord_user") else None
-
     async def _profile_for(self, discord_id: str) -> _Profile | None:
         row = await store.get_mc_profile(discord_id)
         if not row:
@@ -164,17 +151,12 @@ the RoboticsCMC server menu (link, unlink, server control).
         target = member or interaction.user
         # A profile row's document id *is* the Discord account id (the server's
         # ProfileSyncService creates it with rowId = discordUserId), so the
-        # account being asked about is already the key. Gating the lookup behind
-        # the legacy mc_username field meant a player with a perfectly good
-        # synced profile was told they had no link — mc_username is populated by
-        # a separate, older path and is empty for most accounts. The legacy
-        # resolution is kept only as a fallback for profiles that still have to
-        # be found by an old name.
+        # account being asked about is already the key — there is nothing to
+        # resolve. This used to go through a legacy chain that read a Discord id
+        # off minecraft_accounts.discord_user, a column nothing populates, so it
+        # always resolved to None and refused players whose profiles had synced
+        # perfectly well.
         profile = await self._profile_for(str(target.id))
-        if profile is None and member is not None:
-            legacy_id = await self._resolve_discord_id(target)
-            if legacy_id:
-                profile = await self._profile_for(legacy_id)
         if not profile:
             await interaction.response.send_message(
                 "No synced profile yet — profiles appear within 30 minutes of first play.",
@@ -213,7 +195,8 @@ the RoboticsCMC server menu (link, unlink, server control).
             column = f"xp_{board}"
             duration = False
 
-        rows = await store.top_mc_profiles(column, PAGE_SIZE)
+        rows = await (store.top_mc_profiles_by_total_xp(PAGE_SIZE)
+                    if board == "total" else store.top_mc_profiles(column, PAGE_SIZE))
         if not rows:
             await interaction.followup.send("No entries yet.", ephemeral=True)
             return
@@ -222,8 +205,17 @@ the RoboticsCMC server menu (link, unlink, server control).
         for index, row in enumerate(rows, start=1):
             medal = {1: "1.", 2: "2.", 3: "3."}.get(index, f"{index}.")
             name = row.get("username") or "?"
-            value = row.get(column) or 0
-            lines.append(f"**{medal}** `{name}` — {_seconds(value) if duration else f'{int(value):,}'}")
+            if board == "total":
+                # Both sources named: a player should be able to see what drove
+                # their rank, and a gap between the two is the whole point of
+                # the gameplay-to-hub conversion.
+                lines.append(f"**{medal}** `{name}` — **{int(row.get('total_xp') or 0):,}** "
+                             f"({int(row.get('gameplay_xp') or 0):,} MC "
+                             f"+ {int(row.get('discord_xp') or 0):,} Discord)")
+            else:
+                value = row.get(column) or 0
+                lines.append(f"**{medal}** `{name}` — "
+                             f"{_seconds(value) if duration else f'{int(value):,}'}")
         embed = discord.Embed(title=f"{label} leaderboard", colour=discord.Colour.gold())
         embed.description = "\n".join(lines)
         embed.set_footer(text="Mirror refreshes every 30 minutes.")

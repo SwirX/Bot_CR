@@ -2092,6 +2092,32 @@ class Store:
         return await self._list(_T["mc_profiles"],
                                 [Query.order_desc(order_column), Query.limit(min(limit, 25))])
 
+    async def top_mc_profiles_by_total_xp(self, limit: int) -> list[dict]:
+        """Rank by Minecraft gameplay XP *plus* Discord hub XP.
+
+        <p>Appwrite cannot sum across two tables, so the join happens here. The
+        two rows already share a key: ``mc_profiles`` is created by the game
+        server with ``rowId = discordUserId``, and ``discord_data`` is keyed by
+        that same Discord id. Each profile is therefore paired with its hub row
+        and ranked on the total.
+
+        <p>One lookup per profile rather than a query join: a profile table is
+        small (it only exists for players who have actually joined), so this is
+        a handful of round trips rather than a fan-out worth optimising.
+        """
+        profiles = await self.list_mc_profiles()
+        scored: list[dict] = []
+        for profile in profiles:
+            member_id = str(profile.get("$id") or "")
+            if not member_id:
+                continue
+            row = dict(profile)
+            row["discord_xp"] = await self.get_discord_xp(member_id)
+            row["total_xp"] = int(profile.get("gameplay_xp") or 0) + row["discord_xp"]
+            scored.append(row)
+        scored.sort(key=lambda row: row["total_xp"], reverse=True)
+        return scored[:max(1, min(limit, 25))]
+
     async def list_mc_shop_items(self, category: str | None = None) -> list[dict]:
         queries = [Query.limit(25)]
         if category:
