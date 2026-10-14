@@ -37,6 +37,57 @@ PRESTIGE_EVERY = 50         # reward cadence past the cap
 COSMETIC_EVERY = 5          # cosmetic unlock cadence
 
 
+# The command table from docs/04-unlockables.md. The cost formulas stay in code
+# because they decay per level; what belongs here is the shape a client needs to
+# render "you are 3,000 R short of this".
+UNLOCKABLES = [
+    {"key": "chest", "job": "builder", "required_level": 20, "unlock_r": 5_000,
+     "use": "per claimed slot opened", "per_claim": True},
+    {"key": "furnace", "job": "farmer", "required_level": 30, "unlock_r": 8_000,
+     "use": "per smelt", "per_claim": False},
+    {"key": "craft", "job": "crafter", "required_level": 40, "unlock_r": 12_000,
+     "use": "per recipe tier", "per_claim": False},
+    {"key": "sell_slots", "job": "businessman", "required_level": 25, "unlock_r": 10_000,
+     "use": "slot count scales with job level", "per_claim": False},
+]
+
+# One entry per quest category. Targets and rewards are generated from these
+# bands rather than authored, which is what makes the board indefinite.
+QUEST_CATEGORIES = [
+    {"key": "mine", "job": "miner", "small_target": 40, "large_target": 130,
+     "reward_floor_r": 150, "reward_ceiling_r": 300},
+    {"key": "chop", "job": "lumberjack", "small_target": 40, "large_target": 130,
+     "reward_floor_r": 150, "reward_ceiling_r": 300},
+    {"key": "build", "job": "builder", "small_target": 40, "large_target": 130,
+     "reward_floor_r": 150, "reward_ceiling_r": 300},
+    {"key": "hunt", "job": "hunter", "small_target": 25, "large_target": 90,
+     "reward_floor_r": 150, "reward_ceiling_r": 300},
+    {"key": "harvest", "job": "farmer", "small_target": 40, "large_target": 130,
+     "reward_floor_r": 150, "reward_ceiling_r": 300},
+    {"key": "smelt", "job": "blacksmith", "small_target": 40, "large_target": 130,
+     "reward_floor_r": 150, "reward_ceiling_r": 300},
+    {"key": "craft", "job": "crafter", "small_target": 30, "large_target": 110,
+     "reward_floor_r": 150, "reward_ceiling_r": 300},
+    {"key": "trade", "job": "businessman", "small_target": 8, "large_target": 30,
+     "reward_floor_r": 150, "reward_ceiling_r": 300},
+]
+
+# Every metric is a read of the ledger the economy already writes. A separate
+# counter would need updating from every path that grants R, and the first path
+# anyone forgot would undercount the goal forever.
+GOAL_METRICS = [
+    {"key": "distinct_players", "ledger": "count(distinct uuid)", "label": "players active"},
+    {"key": "items_sold", "ledger": "count(reason like 'sell:%')", "label": "items sold"},
+    {"key": "sell_income", "ledger": "sum(amount where reason like 'sell:%')",
+     "label": "R earned from sales"},
+    {"key": "quest_r", "ledger": "sum(amount where reason like 'quest:%')",
+     "label": "R earned from daily quests"},
+    {"key": "level_rewards", "ledger": "sum(amount where reason like 'level-reward:%')",
+     "label": "R earned from level rewards"},
+]
+
+
+
 def level_cost(level: int, base: int, band: int, growth: float,
                tutorial: int = DEFAULT_TUTORIAL) -> int:
     """XP to advance *into* ``level`` (level 1 is free).
@@ -282,6 +333,35 @@ def rows(base: int = DEFAULT_BASE, band: int = DEFAULT_BAND,
             after=MAX_REWARD_LEVEL,
             _rev=1,
         ),
+        # The client contract promises these exist before a client is written
+        # against them. Until they did, the promise was aspirational and a mod
+        # author had nothing to render a goal or integrate a tier against.
+        "unlockables": {
+            "entries": UNLOCKABLES,
+            "cost_decay": 0.97,
+            # Tier 0 crafting is free because it pays no XP either.
+            "craft_free_tier": 0,
+            "_rev": 1,
+        },
+        # Quest rules, not quest instances. The board is derived per player and
+        # per UTC date from these numbers, so the pool never needs authoring and
+        # a client can run the same arithmetic the server will.
+        "quests:daily": {
+            "board_size": 3,
+            "categories": QUEST_CATEGORIES,
+            "streak_bonus_percent_per_day": 10,
+            "streak_bonus_cap_percent": 100,
+            "seed": "hash(player_uuid, utc_date)",
+            "_rev": 1,
+        },
+        "goals:server": {
+            "window_days": 7,
+            "metrics": GOAL_METRICS,
+            "mint_base_r": 2_000,
+            "mint_per_active_player_r": 250,
+            "market_spread": 0.10,
+            "_rev": 1,
+        },
     }
 
 
