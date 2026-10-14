@@ -362,6 +362,52 @@ def rows(base: int = DEFAULT_BASE, band: int = DEFAULT_BAND,
             "market_spread": 0.10,
             "_rev": 1,
         },
+        # Tier content, moved out of code so an operator can retune an XP rate or
+        # a stop level by editing a row. The server keeps the built-in content as
+        # a fallback, so a bad row slows progression down rather than stopping it.
+        "tiers:jobs": {
+            "byJob": [
+                {"job": "hunter", "tiers": [
+                    {"tier": 0, "value": 2, "stopLevel": 15,
+                     "sources": ["COW", "PIG", "SHEEP", "CHICKEN", "RABBIT", "SQUID", "BAT"]},
+                    {"tier": 1, "value": 8, "stopLevel": 25,
+                     "sources": ["ZOMBIE", "SPIDER", "CREEPER", "SKELETON", "SLIME"]},
+                    {"tier": 2, "value": 20, "stopLevel": 40,
+                     "sources": ["HUSK", "DROWNED", "WITCH", "CAVE_SPIDER", "PILLAGER",
+                                 "RAVAGER", "ZOMBIE_VILLAGER"]},
+                    {"tier": 3, "value": 60, "stopLevel": 60,
+                     "sources": ["BLAZE", "GHAST", "ENDERMAN", "PHANTOM", "GUARDIAN",
+                                 "ELDER_GUARDIAN", "EVOKER", "VINDICATOR", "PIGLIN_BRUTE"]},
+                    {"tier": 4, "value": 400, "stopLevel": 0,
+                     "sources": ["WITHER", "ENDER_DRAGON", "WARDEN"]}]},
+                {"job": "crafter", "tiers": [
+                    # Tier 0 is worthless by design, at every level, permanently:
+                    # charging XP for planks would make the first few minutes of
+                    # the game a chore instead of a tutorial.
+                    {"tier": 0, "value": 0, "stopLevel": 0,
+                     "sources": ["OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS",
+                                 "ACACIA_PLANKS", "CHERRY_PLANKS", "STICK", "CRAFTING_TABLE"]},
+                    {"tier": 1, "value": 4, "stopLevel": 25,
+                     "sources": ["STONE_PICKAXE", "STONE_AXE", "STONE_SWORD", "STONE_SHOVEL",
+                                 "STONE_HOE", "CHAINMAIL_HELMET", "CHEST", "BARREL",
+                                 "OAK_CHEST", "OAK_FENCE", "OAK_DOOR"]},
+                    {"tier": 2, "value": 12, "stopLevel": 40,
+                     "sources": ["IRON_PICKAXE", "IRON_AXE", "IRON_SWORD", "IRON_SHOVEL",
+                                 "IRON_HOE", "IRON_CHESTPLATE", "STONE_BRICKS",
+                                 "BLAST_FURNACE", "HOPPER", "ANVIL"]},
+                    {"tier": 3, "value": 35, "stopLevel": 60,
+                     "sources": ["GOLDEN_PICKAXE", "GOLDEN_SWORD", "DIAMOND_PICKAXE",
+                                 "DIAMOND_SWORD", "DIAMOND_CHESTPLATE", "ENCHANTING_TABLE",
+                                 "SHULKER_BOX", "BEACON"]},
+                    {"tier": 4, "value": 90, "stopLevel": 0,
+                     "sources": ["ENCHANTED_BOOK", "ELYTRA"]}]},
+                {"job": "businessman", "tiers": [
+                    {"tier": 0, "value": 10, "stopLevel": 0, "sources": ["settled:shop_sell"]},
+                    {"tier": 1, "value": 15, "stopLevel": 0, "sources": ["settled:order_buy"]},
+                    {"tier": 2, "value": 25, "stopLevel": 0, "sources": ["settled:order_board"]}]},
+            ],
+            "_rev": 1,
+        },
     }
 
 
