@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 
 import config
-from cogs._perms import meeting_tier
+from cogs._perms import is_cell_chief, is_meeting_admin, meeting_tier, role_key
 from data.store import _parse_ts
 
 # What an attendee needs: see the channel, join it, be heard, and stream.
@@ -46,18 +46,22 @@ ATTENDEE_KWARGS = dict(ATTENDEE_PERMS)
 # The /meeting start audiences, in the order they widen. ``custom`` is not a
 # role tier at all -- it is whatever the invoker picked from the member
 # dropdown -- so it sorts after the real tiers and skips role resolution.
-SCOPES = ("bureau", "cells", "all", "custom")
+SCOPES = ("bureau", "chiefs", "cells", "all", "custom", "my_cell")
 SCOPE_LABELS = {
     "bureau": "Bureau",
+    "chiefs": "Bureau and cell chiefs",
     "cells": "Cell members",
     "all": "All members",
     "custom": "Custom",
+    "my_cell": "My cell",
 }
 SCOPE_SUMMARY = {
-    "bureau": "bureau offices + every unit/cell head",
+    "bureau": "Archon, President, Vice President and Manager",
+    "chiefs": "bureau + every cell chief",
     "cells": "bureau + every member of a unit/cell",
     "all": "every robotics member in the server",
     "custom": "only the people picked from the dropdown",
+    "my_cell": "your cell + bureau",
 }
 # Audience tiers from widest to narrowest. A member qualifies for a scope when
 # their tier is at least as *narrow* as it (higher index): a cell member belongs
@@ -83,7 +87,7 @@ def scope_label(scope: str) -> str:
 # The words the ``/meeting start audience`` dropdown offers, in order. These are
 # also the literal values Discord validates against, so the text form takes the
 # same words the slash form displays instead of guessing at internal keys.
-SCOPE_CHOICES = ("bureau", "cell members", "all members", "custom")
+SCOPE_CHOICES = ("bureau", "chiefs", "cell members", "all members", "custom", "my cell")
 
 # Everything a person might reasonably type for a scope, folded to its key.
 # The display words come first: someone reading the dropdown sees "cell
@@ -93,6 +97,8 @@ _SCOPE_ALIASES = {
     "bureau": "bureau",
     "bureau only": "bureau",
     "offices": "bureau",
+    "chiefs": "chiefs",
+    "cell chiefs": "chiefs",
     "cell members": "cells",
     "cell member": "cells",
     "cells": "cells",
@@ -104,7 +110,25 @@ _SCOPE_ALIASES = {
     "custom": "custom",
     "chosen": "custom",
     "picked": "custom",
+    "my cell": "my_cell",
+    "my unit": "my_cell",
 }
+
+
+def cell_names(member: discord.Member) -> set[str]:
+    """Extract cell names from head/member roles with the club's naming scheme."""
+    names = set()
+    for role in member.roles:
+        if getattr(role, "managed", False):
+            continue
+        key = role_key(role.name)
+        for prefix in ("head of ", "chief of ", "lead of ", "member of "):
+            if key.startswith(prefix):
+                cell = key.removeprefix(prefix).removesuffix(" unit").removesuffix(" cell")
+                if cell:
+                    names.update(part.strip().replace("docs", "documentation").removesuffix("s")
+                                 for part in cell.split(" & "))
+    return names
 
 
 def normalise_scope(text: str) -> str | None:
@@ -131,7 +155,7 @@ def _member_rank(member: discord.Member, scope: str) -> tuple[int, int, str]:
     write order — is stable across identical runs.
     """
     name = member.display_name.lower()
-    if scope == "custom":
+    if scope in ("custom", "chiefs", "my_cell"):
         # Rank by name only. Comparing roles here would be meaningless — the
         # point of a chosen audience is that roles played no part in it — and
         # ``_TIER_ORDER.index(scope)`` would raise outright.
@@ -145,6 +169,7 @@ def _member_rank(member: discord.Member, scope: str) -> tuple[int, int, str]:
 
 async def resolve_audience(guild: discord.Guild, scope: str, *,
                            extra: list[discord.Member] | None = None,
+                           organizer: discord.Member | None = None,
                            limit: int | None = None) -> list[discord.Member]:
     """Members of the audience for ``scope``, widest-last, deterministic order.
 
@@ -177,17 +202,28 @@ async def resolve_audience(guild: discord.Guild, scope: str, *,
             seen.setdefault(member.id, member)
         return sorted(seen.values(), key=lambda m: _member_rank(m, scope))
 
+    organizer_cells = cell_names(organizer) if organizer else set()
+    if scope == "my_cell" and not organizer_cells:
+        raise ValueError("your chief role does not identify a cell")
     for member in guild.members:
         if member.bot:
+            continue
+        if scope == "all":
+            seen[member.id] = member
             continue
         # ``meeting_tier`` returns the member's *highest* tier; widen it to the
         # requested scope instead of testing three separate predicates.
         tier = meeting_tier(member)
         if tier is None:
             continue
-        if scope == "bureau" and tier != "bureau":
+        if scope == "bureau" and not is_meeting_admin(member):
+            continue
+        if scope == "chiefs" and not (is_meeting_admin(member) or is_cell_chief(member)):
             continue
         if scope == "cells" and tier not in ("bureau", "cells"):
+            continue
+        if scope == "my_cell" and not (is_meeting_admin(member)
+                                        or bool(cell_names(member) & organizer_cells)):
             continue
         seen[member.id] = member
 
@@ -211,6 +247,8 @@ def scope_note_for(member: discord.Member, scope: str) -> str:
     outsider invited in".
     """
     tier = meeting_tier(member)
+    if scope in ("custom", "chiefs", "my_cell"):
+        return tier or "visitor"
     if tier is None or _TIER_ORDER.index(tier) < _TIER_ORDER.index(scope):
         return "visitor"
     return tier
@@ -313,6 +351,7 @@ def restore_plan(snapshot: dict, *, granted: set[int]) -> dict[str, dict]:
 
 async def apply_meeting_permissions(channel: discord.VoiceChannel, *,
                                     audience: list[discord.Member],
+                                    everyone: bool = False,
                                     grant_extra: list[discord.Member] | None = None
                                     ) -> set[str]:
     """Open ``channel`` to the audience for the duration of the meeting.
@@ -324,12 +363,9 @@ async def apply_meeting_permissions(channel: discord.VoiceChannel, *,
 
     Two behaviours changed here, both of them bugs:
 
-    * **@everyone gets ``view_channel`` only, not ``connect``/``speak``/
-      ``stream``.** The full attendee set was granted to @everyone, which meant
-      ``connect=True`` for the entire server: *anyone* could join any tracked
-      meeting, the audience was never actually enforced, and they were logged as
-      attendees. Seeing the channel but being unable to join is what the
-      original intent described.
+    * **@everyone is denied visibility for private scopes.** For the `all`
+      scope it receives attendee permissions because every server member is
+      invited and per-member overwrites would exceed Discord's limit.
     * The bot's own overwrite (``ensure_bot_access``) is now returned by the
       caller for cleanup too. @everyone and the bot are in neither the snapshot
       nor ``expected``, so neither was ever removed at /meeting end — meaning a
@@ -338,18 +374,17 @@ async def apply_meeting_permissions(channel: discord.VoiceChannel, *,
       on it.
     """
     written: set[str] = set()
-    # Viewable-but-not-joinable for non-audience members: a hidden channel just
-    # looks like a bug to the people who were left out.
-    await channel.set_permissions(
-        channel.guild.default_role, view_channel=True,
-        reason="Meeting in progress")
+    # A meeting's existence and membership are private to its audience.
+    await channel.set_permissions(channel.guild.default_role,
+                                  **(ATTENDEE_KWARGS if everyone else
+                                     {"view_channel": False, "connect": False}),
+                                  reason="Meeting in progress")
     written.add(str(channel.guild.default_role.id))
+    if everyone:
+        return written
     for member in {*(a for a in audience), *(grant_extra or [])}:
-        try:
-            await channel.set_permissions(member, **ATTENDEE_KWARGS,
-                                          reason="Meeting audience")
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            continue
+        await channel.set_permissions(member, **ATTENDEE_KWARGS,
+                                      reason="Meeting audience")
         written.add(str(member.id))
     return written
 

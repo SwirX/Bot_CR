@@ -133,15 +133,18 @@ def main() -> int:
     party = [manager, pres, head, cell, newb, outsider]
     guild = type("G", (), {"members": party, "default_role": _Role("@everyone", 5)})()
 
-    check("bureau = offices + heads",
+    check("bureau = offices",
           sorted(m.display_name for m in asyncio_run(ml.resolve_audience(guild, "bureau"))),
+          ["Mgr", "Pres"])
+    check("chiefs = bureau + heads",
+          sorted(m.display_name for m in asyncio_run(ml.resolve_audience(guild, "chiefs"))),
           ["Head", "Mgr", "Pres"])
     check("cells = bureau + cell members",
           sorted(m.display_name for m in asyncio_run(ml.resolve_audience(guild, "cells"))),
           ["Cell", "Head", "Mgr", "Pres"])
-    check("all = every club member",
+    check("all = every server member",
           sorted(m.display_name for m in asyncio_run(ml.resolve_audience(guild, "all"))),
-          ["Cell", "Head", "Mgr", "New", "Pres"])
+          ["Cell", "Head", "Mgr", "New", "Pres", "Stranger"])
     # The bot holds a bureau role here, so this proves the bot flag alone is
     # what excludes it rather than the role simply not matching.
     with_bot = party + [_Member("Bot", 7, "「👸」Manager", bot=True)]
@@ -149,13 +152,13 @@ def main() -> int:
           sorted(m.display_name for m in asyncio_run(ml.resolve_audience(
               type("G", (), {"members": with_bot,
                              "default_role": _Role("@everyone", 5)})(), "bureau"))),
-          ["Head", "Mgr", "Pres"])
+          ["Mgr", "Pres"])
 
     print("\nresolve_audience() merges tagged extras into the ordering")
     guest = _Member("Guest", 8, "🌿 | LVL 01+")
     got = asyncio_run(ml.resolve_audience(guild, "bureau", extra=[guest]))
     check("tagged outsider included", sorted(m.display_name for m in got),
-          ["Guest", "Head", "Mgr", "Pres"])
+          ["Guest", "Mgr", "Pres"])
     check("extra is not sorted last",
           [m.display_name for m in got].index("Guest"),
           max(range(len(got)), key=lambda i: 0) if False else
@@ -164,7 +167,7 @@ def main() -> int:
     guest_cell = _Member("GuestCell", 9, "「🔧」Member of Technical Unit")
     got = asyncio_run(ml.resolve_audience(guild, "bureau", extra=[guest_cell]))
     check("tagged cell member sorts after offices",
-          [m.display_name for m in got], ["Head", "Mgr", "Pres", "GuestCell"])
+          [m.display_name for m in got], ["Mgr", "Pres", "GuestCell"])
     try:
         asyncio_run(ml.resolve_audience(
             guild, "all", extra=[_Member(f"G{i}", 100 + i) for i in range(40)]))
@@ -191,8 +194,9 @@ def main() -> int:
           sorted(ml.SCOPE_SUMMARY), sorted(ml.SCOPES))
     check("the created channel name reads sensibly for each",
           [ml.meeting_channel_name(s) for s in ml.SCOPES],
-          ["📣 Bureau Meeting", "📣 Cell members Meeting",
-           "📣 All members Meeting", "📣 Custom Meeting"])
+          ["📣 Bureau Meeting", "📣 Bureau and cell chiefs Meeting",
+           "📣 Cell members Meeting", "📣 All members Meeting",
+           "📣 Custom Meeting", "📣 My cell Meeting"])
 
     print("\nnormalise_scope() accepts what a person would actually type")
     for text, want in (
