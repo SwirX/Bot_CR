@@ -2,10 +2,9 @@
 
 Two independent features share the ``/meeting`` group.
 
-**Tracked meetings** (``/meeting start|end|lock|unlock|list|last``) record a
-club meeting in an existing voice channel: the channel's permissions are
-narrowed to the chosen audience for the duration, every join/leave is written
-to the hub, and the resulting attendance is exported as CSV. See
+**Tracked meetings** (``/meeting start|schedule|end|list|last``) use a private
+voice channel, log every join/leave to Appwrite, and export attendance as CSV.
+The bot can also scope an existing channel when one is supplied. See
 :mod:`cogs._meetings` for the permission snapshot/restore and attendance
 helpers.
 
@@ -477,7 +476,7 @@ class Meetings(commands.Cog):
                 try:
                     await self._claim_voice(channel)
                 except (discord.Forbidden, discord.ClientException,
-                        discord.HTTPException) as exc:
+                        discord.HTTPException, asyncio.TimeoutError) as exc:
                     LOG.warning("Meetings: could not rejoin live room: %s", exc)
 
     def cog_unload(self):
@@ -501,7 +500,8 @@ class Meetings(commands.Cog):
             while True:
                 try:
                     await self._advance_schedules()
-                except (StoreError, discord.HTTPException, ValueError, KeyError) as exc:
+                except (StoreError, discord.HTTPException, asyncio.TimeoutError,
+                        ValueError, KeyError) as exc:
                     LOG.error("Meetings: schedule tick failed: %s", exc)
                 await asyncio.sleep(30)
         except asyncio.CancelledError:
@@ -524,7 +524,7 @@ class Meetings(commands.Cog):
                     item["prepared"] = True
                     await self._save_schedules()
                 except (discord.Forbidden, discord.ClientException,
-                        discord.HTTPException) as exc:
+                        discord.HTTPException, asyncio.TimeoutError) as exc:
                     LOG.warning("Meetings: scheduled voice join failed: %s", exc)
             if now < starts:
                 continue
@@ -1466,7 +1466,8 @@ class Meetings(commands.Cog):
         await ctx.send("\n".join(lines))
         try:
             await self._claim_voice(channel)
-        except (discord.Forbidden, discord.ClientException, discord.HTTPException) as exc:
+        except (discord.Forbidden, discord.ClientException,
+                discord.HTTPException, asyncio.TimeoutError) as exc:
             LOG.warning("Meetings: bot could not join %s: %s", channel.id, exc)
         for occupant in channel.members:
             if not occupant.bot:
