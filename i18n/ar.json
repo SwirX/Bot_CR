@@ -17,6 +17,8 @@
   "mc.field.version": "الإصدار",
   "mc.field.status": "الحالة",
   "mc.field.players": "اللاعبون",
+  "mc.field.map": "الخريطة",
+  "mc.field.map_value": "[افتح BlueMap]({url})",
   "mc.status.running": "🟢 يعمل",
   "mc.status.starting": "🟡 قيد التشغيل",
   "mc.status.stopping": "🟠 قيد الإيقاف",

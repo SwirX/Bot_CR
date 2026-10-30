@@ -17,6 +17,8 @@
   "mc.field.version": "Version",
   "mc.field.status": "Statut",
   "mc.field.players": "Joueurs",
+  "mc.field.map": "Carte",
+  "mc.field.map_value": "[Ouvrir BlueMap]({url})",
   "mc.status.running": "🟢 En ligne",
   "mc.status.starting": "🟡 Démarrage",
   "mc.status.stopping": "🟠 Arrêt",

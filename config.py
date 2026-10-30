@@ -203,6 +203,26 @@ MC_ADDRESS = _env("MC_ADDRESS", "")
 MC_PORT = _env("MC_PORT", 25566, cast=int)
 MC_SERVER_NAME = _env("MC_SERVER_NAME", "Robotics CMC")
 
+# Public BlueMap web UI, shown on the /mc status card. Blank hides the field,
+# so the same build works before the map is published.
+MC_MAP_URL = _env("MC_MAP_URL", "https://mc-map.alibks.dev")
+
+# ── Minecraft → hub XP conversion ─────────────────────────────────────
+# Playing the game pays Discord XP so the game is worth the time. Rate is
+# hub XP per point of gameplay XP; gameplay XP accrues at 1 per 30s of active
+# play, capped by the server's daily-active cap (6h), so the ratio is chosen
+# against Discord's own faucets: a 3x payout puts an hour of play ~3.8x above
+# realistic chat (1 msg / 5min) without making chatter pointless.
+MC_XP_SYNC_ENABLED = _env("MC_XP_SYNC_ENABLED", True, cast=bool)
+MC_XP_RATIO = _env("MC_XP_RATIO", 3, cast=int)
+# Caps hub XP from Minecraft per member per day, independently of the server's
+# active-play cap. Raising gameplay generosity must not inflate the hub
+# economy, and this keeps a ratio change from retro-granting a large balance.
+MC_XP_DAILY_CAP = _env("MC_XP_DAILY_CAP", 2500, cast=int)
+# Conversion runs on a timer rather than inside the 30-minute profile sync so a
+# profile sync outage cannot stall or double-credit payouts.
+MC_XP_SYNC_SECONDS = _env("MC_XP_SYNC_SECONDS", 900, cast=int)
+
 # Auto-assigned to every member who links a Minecraft account, so a single
 # role mention pings the whole linked player base (used by /mcsession and the
 # auto "someone joined" rally).
@@ -222,3 +242,48 @@ MC_PAIR_KEY_TTL = _env("MC_PAIR_KEY_TTL", 300, cast=int)
 MC_LINK_CODE_TTL = _env("MC_LINK_CODE_TTL", 300, cast=int)
 # Watcher poll interval for OTP minting / pair expiry (seconds).
 MC_LINK_POLL_SECONDS = _env("MC_LINK_POLL_SECONDS", 5, cast=int)
+
+# ── Uptime monitoring ──────────────────────────────────────────────────
+# The backend's own Docker healthcheck only reads a static version string and
+# passes even when the database is unreachable, so the bot polls real endpoints
+# instead.
+#
+# CAVEAT: this bot runs on the SAME OCI host as the Appwrite backend. If that
+# host dies outright, this monitor dies with it and goes silent -- which is the
+# one failure it cannot report. That is what the deadman switch below is for:
+# an external service watches this bot, so a silent monitor is still detected.
+# Resolved by ID, not name: these channel names carry emoji and punctuation
+# that are painful to type and easy to break by a rename. The ID is stable.
+CHANNEL_UPTIME_ALERT_ID = _env("CHANNEL_UPTIME_ALERT_ID", "1333113500167442569", cast=int)
+
+# Fallback only, used when the ID lookup fails (e.g. the bot left the channel).
+CHANNEL_UPTIME_ALERT = _env("CHANNEL_UPTIME_ALERT", _env("CHANNEL_BOTLOG", "🤖bot-development"))
+
+# Who to DM when the backend goes down. Comma-separated Discord user IDs.
+# Defaults to the bot operator IDs so it works out of the box.
+UPTIME_ALERT_USER_IDS = _env("UPTIME_ALERT_USER_IDS", _env("BOT_ADMIN_USER_IDS", ""))
+
+UPTIME_POLL_SECONDS = _env("UPTIME_POLL_SECONDS", 60, cast=int)
+# Per-request timeout. Kept well under the poll interval so a slow backend
+# can't overlap the next tick.
+UPTIME_TIMEOUT = _env("UPTIME_TIMEOUT", 10, cast=int)
+# Consecutive failures required before alerting. Guards against paging on a
+# single slow response; at the default cadence this is ~3 minutes of sustained
+# failure.
+UPTIME_FAILURES_BEFORE_ALERT = _env("UPTIME_FAILURES_BEFORE_ALERT", 3, cast=int)
+
+# Deadman's switch. Point DEADMAN_URL at an external monitor (UptimeRobot,
+# healthchecks.io, cronitor). The bot pings it every DEADMAN_POLL_SECONDS; if
+# the pings stop, that service alerts you that the MONITOR itself is dead --
+# which a plain healthcheck cannot detect, because the thing doing the
+# checking is the thing that broke.
+#
+# Keep DEADMAN_POLL_SECONDS comfortably under the external service's grace
+# period, and set that grace period to allow one restart plus slack. systemd
+# has Restart=always with a 5s delay, so a crash is usually recovered before
+# this ever fires; it exists for the cases auto-restart cannot fix.
+#
+# Empty by default: with no URL set, the deadman is simply inert and logs
+# nothing. Set it to enable.
+DEADMAN_URL = _env("DEADMAN_URL", "")
+DEADMAN_POLL_SECONDS = _env("DEADMAN_POLL_SECONDS", 300, cast=int)
