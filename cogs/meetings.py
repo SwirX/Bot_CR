@@ -22,7 +22,7 @@ an *event with a report*. The room's ``end`` subcommand was renamed to
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import discord
@@ -30,11 +30,15 @@ from discord.ext import commands
 
 import config
 from cogs import _meetings as meetlib
-from cogs._perms import is_meeting_admin, require_meeting_admin
-from cogs._ui import (LoggedView, MemberPickerView, OwnerView, close_panel,
-                      select_value)
-from data.store import store
-from data.store import StoreError
+from cogs._perms import (
+    is_cell_chief,
+    is_meeting_admin,
+    is_meeting_report_viewer,
+    require_meeting_admin,
+    require_meeting_creator,
+)
+from cogs._ui import LoggedView, MemberPickerView, OwnerView, close_panel, select_value
+from data.store import StoreError, store
 
 LOG = logging.getLogger("bot.meetings")
 
@@ -45,6 +49,27 @@ MAX_MEMBERS = 15  # sane cap on tagged members per private room
 # and 25 components per view, so two rows leaves room for the pager and the
 # back/close pair below them.
 _CARD_ROWS = 2
+
+
+class _MeetingSystemContext:
+    def __init__(self, guild, author=None, channel=None, created_channel_id=None):
+        self.guild = guild
+        self.author = author
+        self.channel = channel
+        self.interaction = None
+        self.created_channel_id = created_channel_id
+
+    async def send(self, message, **_kwargs):
+        LOG.info("Meetings: scheduled action: %s", message)
+
+    def typing(self):
+        class _Typing:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *_exc):
+                return False
+        return _Typing()
 
 
 class MeetingListView(OwnerView, LoggedView, discord.ui.View):
@@ -91,7 +116,7 @@ class MeetingListView(OwnerView, LoggedView, discord.ui.View):
         # unreachable — but it is the one place the redaction in /meeting last
         # could be walked around, and three lines here is cheaper than relying on
         # every future caller of MeetingListView to remember.
-        if not is_meeting_admin(interaction.user):
+        if not is_meeting_report_viewer(interaction.user):
             await interaction.response.send_message(
                 "🔒 Attendance reports are kept for the bureau.", ephemeral=True)
             return
@@ -411,6 +436,10 @@ class Meetings(commands.Cog):
         self.bot = bot
         # channel_id (int) -> {"owner": int, "members": [int, ...]}
         self.meetings: dict[int, dict] = {}
+        self._idle_tasks: dict[int, asyncio.Task] = {}
+        self._scheduled: list[dict] = []
+        self._schedule_task: asyncio.Task | None = None
+        self._schedule_lock = asyncio.Lock()
 
     @property
     def _start_lock(self) -> asyncio.Lock:
@@ -437,6 +466,143 @@ class Meetings(commands.Cog):
     async def on_ready(self):
         await self.bot.wait_until_ready()
         await self._load_meetings()
+        await self._load_schedules()
+        if self._schedule_task is None or self._schedule_task.done():
+            self._schedule_task = asyncio.create_task(self._schedule_loop())
+        live = await self._live_meeting()
+        if live and live.get("channel_id"):
+            channel = self._find_channel(int(live["channel_id"]))
+            if channel is not None:
+                self._watch_empty(channel)
+                try:
+                    await self._claim_voice(channel)
+                except (discord.Forbidden, discord.ClientException,
+                        discord.HTTPException) as exc:
+                    LOG.warning("Meetings: could not rejoin live room: %s", exc)
+
+    def cog_unload(self):
+        for task in self._idle_tasks.values():
+            task.cancel()
+        if self._schedule_task is not None:
+            self._schedule_task.cancel()
+
+    async def _load_schedules(self) -> None:
+        try:
+            self._scheduled = json.loads(await store.get_setting("meeting_schedules") or "[]")
+        except (StoreError, ValueError) as exc:
+            LOG.error("Meetings: could not load schedules: %s", exc)
+            self._scheduled = []
+
+    async def _save_schedules(self) -> None:
+        await store.set_setting("meeting_schedules", json.dumps(self._scheduled))
+
+    async def _schedule_loop(self) -> None:
+        try:
+            while True:
+                try:
+                    await self._advance_schedules()
+                except (StoreError, discord.HTTPException, ValueError, KeyError) as exc:
+                    LOG.error("Meetings: schedule tick failed: %s", exc)
+                await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            return
+
+    async def _advance_schedules(self) -> None:
+        now = datetime.now(timezone.utc)
+        for item in list(self._scheduled):
+            guild = self.bot.get_guild(item["guild_id"])
+            channel = guild.get_channel(item["channel_id"]) if guild else None
+            if channel is None:
+                await self._remove_schedule(item)
+                continue
+            starts = datetime.fromisoformat(item["starts_at"])
+            if await self._live_meeting() is not None:
+                continue
+            if now >= starts - timedelta(minutes=10) and not item.get("prepared"):
+                try:
+                    await self._claim_voice(channel)
+                    item["prepared"] = True
+                    await self._save_schedules()
+                except (discord.Forbidden, discord.ClientException,
+                        discord.HTTPException) as exc:
+                    LOG.warning("Meetings: scheduled voice join failed: %s", exc)
+            if now < starts:
+                continue
+            organizer = guild.get_member(item["organizer_id"])
+            if organizer is None:
+                await self._remove_schedule(item)
+                await self._discard_channel(channel)
+                continue
+            role = guild.get_role(item["role_id"]) if item.get("role_id") else None
+            if item.get("role_id") and role is None:
+                await self._remove_schedule(item)
+                await self._discard_channel(channel)
+                continue
+            ctx = _MeetingSystemContext(guild, organizer, channel,
+                                        created_channel_id=channel.id)
+            await self.meeting_start.callback(
+                self, ctx, channel, audience=item["audience"],
+                minutes=item["minutes"], role=role)
+            live = await self._live_meeting_for_channel(channel.id)
+            if live is not None:
+                await self._remove_schedule(item)
+
+    async def _remove_schedule(self, item: dict) -> None:
+        async with self._schedule_lock:
+            if item in self._scheduled:
+                self._scheduled.remove(item)
+                await self._save_schedules()
+
+    def _watch_empty(self, channel: discord.VoiceChannel) -> None:
+        tasks = self.__dict__.setdefault("_idle_tasks", {})
+        previous = tasks.pop(channel.id, None)
+        if previous is not None:
+            previous.cancel()
+        if any(not member.bot for member in channel.members):
+            return
+        tasks[channel.id] = asyncio.create_task(self._end_after_idle(channel))
+
+    async def _end_after_idle(self, channel: discord.VoiceChannel) -> None:
+        try:
+            await asyncio.sleep(600)
+            if any(not member.bot for member in channel.members):
+                return
+            meeting = await self._live_meeting_for_channel(channel.id)
+            if meeting is None:
+                return
+            await self._end_running_meeting(channel.guild)
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._idle_tasks.get(channel.id) is asyncio.current_task():
+                self._idle_tasks.pop(channel.id, None)
+
+    async def _end_running_meeting(self, guild: discord.Guild) -> None:
+        await self.meeting_end.callback(self, _MeetingSystemContext(guild))
+
+    async def _claim_voice(self, channel: discord.VoiceChannel) -> None:
+        music = self.bot.get_cog("Music") if hasattr(self.bot, "get_cog") else None
+        player = music.players.get(channel.guild.id) if music else None
+        if player is not None and player.voice is not None:
+            await player.stop()
+        existing = discord.utils.get(getattr(self.bot, "voice_clients", []), guild=channel.guild)
+        if existing is not None and existing.channel != channel:
+            await existing.disconnect()
+        if hasattr(channel, "connect") and (existing is None or
+                                            existing.channel != channel or
+                                            not existing.is_connected()):
+            await channel.connect()
+
+    async def _invite_audience(self, channel: discord.VoiceChannel,
+                               audience: list[discord.Member]) -> None:
+        for member in audience:
+            if not hasattr(member, "send"):
+                continue
+            try:
+                await member.send(f"Meeting started: {channel.mention}. Join here: "
+                                  f"https://discord.com/channels/{channel.guild.id}/{channel.id}")
+            except (discord.Forbidden, discord.HTTPException):
+                LOG.info("Meetings: DM unavailable for %s", member.id)
 
     async def _load_meetings(self) -> None:
         """Restore the room registry from the store after a restart."""
@@ -455,7 +621,8 @@ class Meetings(commands.Cog):
         if not isinstance(data, dict):
             data = {}
         self.meetings = {
-            int(cid): meta for cid, meta in data.items() if str(cid).isdigit() and isinstance(meta, dict)
+            int(cid): meta for cid, meta in data.items()
+            if str(cid).isdigit() and isinstance(meta, dict)
         }
         # Rooms that vanished while we were offline are dropped from the registry.
         existing = {ch.id for guild in self.bot.guilds for ch in guild.voice_channels}
@@ -475,7 +642,8 @@ class Meetings(commands.Cog):
     # ── helpers ──────────────────────────────────────────────────────
     def _find_channel(self, channel_id: int):
         for guild in self.bot.guilds:
-            channel = guild.get_channel(channel_id)
+            lookup = getattr(guild, "get_channel", None)
+            channel = lookup(channel_id) if lookup is not None else None
             if channel is not None:
                 return channel
         return None
@@ -571,6 +739,8 @@ class Meetings(commands.Cog):
                 "                         blank and the bot makes one, and pick\n"
                 "                         the audience from the dropdown\n"
                 "`/meeting end` — end the running meeting\n"
+                "`/meeting schedule` — set a start time with timezone\n"
+                "`/meeting cancel` — remove a scheduled meeting\n"
                 "`/meeting list` — browse past meetings\n"
                 "`/meeting last` — stats for the most recent meeting\n"
                 "`/meeting lock` / `/meeting unlock` — manage the lockout\n"
@@ -702,7 +872,14 @@ class Meetings(commands.Cog):
         the user's language rather than a traceback.
         """
         name = meetlib.meeting_channel_name(scope)
-        kwargs: dict = {"name": name, "reason": f"Meeting room for {scope}"}
+        kwargs: dict = {"name": name, "reason": f"Meeting room for {scope}",
+                        "overwrites": {
+                            ctx.guild.default_role: discord.PermissionOverwrite(
+                                view_channel=False, connect=False),
+                            ctx.guild.me: discord.PermissionOverwrite(
+                                view_channel=True, connect=True,
+                                manage_channels=True, manage_roles=True),
+                        }}
         category = getattr(getattr(ctx, "channel", None), "category", None)
         if category is not None:
             kwargs["category"] = category
@@ -868,6 +1045,14 @@ class Meetings(commands.Cog):
             # recording one would just pollute the CSV with the club's music
             # and integration bots sitting in the VC.
             return
+        if old_id is not None:
+            old_channel = self._find_channel(old_id)
+            if old_channel is not None and await self._live_meeting_for_channel(old_id):
+                self._watch_empty(old_channel)
+        if new_id is not None:
+            new_channel = self._find_channel(new_id)
+            if new_channel is not None and await self._live_meeting_for_channel(new_id):
+                self._watch_empty(new_channel)
 
         # Resolve which side of the transition is the meeting channel. If the
         # member moved between two non-meeting channels there is nothing to do.
@@ -947,19 +1132,107 @@ class Meetings(commands.Cog):
                 await self._destroy_meeting(channel_id)
 
     # ── commands: tracked meetings ───────────────────────────────────
+    @meeting.command(name="schedule", description="Schedule a private tracked meeting.")
+    @commands.guild_only()
+    @require_meeting_creator()
+    @commands.bot_has_permissions(manage_channels=True, manage_roles=True, connect=True)
+    async def meeting_schedule(self, ctx, when: str, *,
+                               audience: Literal["default", "bureau", "chiefs",
+                                                 "cell members", "all members",
+                                                 "my cell", "custom"] = "default",
+                               minutes: int | None = None,
+                               role: discord.Role | None = None):
+        try:
+            start = datetime.fromisoformat(when.replace("Z", "+00:00"))
+        except ValueError:
+            await ctx.send("Use an ISO date and time with an offset, e.g. "
+                           "`2026-11-05T18:00+01:00`.", ephemeral=True)
+            return
+        if start.tzinfo is None or not timedelta(minutes=1) <= (
+                start - datetime.now(timezone.utc)) <= timedelta(days=30):
+            await ctx.send("Choose a time between one minute and 30 days from now, "
+                           "including its timezone offset.", ephemeral=True)
+            return
+        if minutes is not None and not 1 <= minutes <= 1440:
+            await ctx.send("`minutes` must be between 1 and 1440.", ephemeral=True)
+            return
+        if audience == "custom" and role is None:
+            await ctx.send("A scheduled custom audience needs a role.", ephemeral=True)
+            return
+        if len(self._scheduled) >= 10:
+            await ctx.send("The meeting schedule is full (10 pending meetings).",
+                           ephemeral=True)
+            return
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is not None and not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        channel = await self._make_meeting_channel(ctx, audience)
+        if channel is None:
+            return
+        item = {"guild_id": ctx.guild.id, "channel_id": channel.id,
+                "organizer_id": ctx.author.id, "starts_at": start.isoformat(),
+                "audience": audience, "minutes": minutes,
+                "role_id": role.id if role else None, "prepared": False}
+        try:
+            await channel.set_permissions(ctx.guild.default_role,
+                                          view_channel=False, connect=False)
+            await meetlib.ensure_bot_access(channel)
+            async with self._schedule_lock:
+                self._scheduled.append(item)
+                await self._save_schedules()
+        except (StoreError, discord.HTTPException):
+            if item in self._scheduled:
+                self._scheduled.remove(item)
+            await self._discard_channel(channel)
+            await ctx.send("Could not save the scheduled meeting.", ephemeral=True)
+            return
+        await ctx.send(f"Meeting scheduled for <t:{int(start.timestamp())}:F>. "
+                       f"The room will open at start time. ID: `{channel.id}`",
+                       ephemeral=True)
+
+    @meeting.command(name="cancel", description="Cancel a scheduled meeting.")
+    @commands.guild_only()
+    @require_meeting_creator()
+    async def meeting_cancel(self, ctx, channel_id: str):
+        item = next((row for row in self._scheduled
+                     if str(row["channel_id"]) == channel_id
+                     and row["guild_id"] == ctx.guild.id), None)
+        if item is None:
+            await ctx.send("No scheduled meeting has that ID.", ephemeral=True)
+            return
+        if not is_meeting_admin(ctx.author) and item["organizer_id"] != ctx.author.id:
+            await ctx.send("Only its organizer or bureau can cancel it.", ephemeral=True)
+            return
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is not None and not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        channel = ctx.guild.get_channel(item["channel_id"])
+        if channel is not None:
+            voice = discord.utils.get(getattr(self.bot, "voice_clients", []), guild=ctx.guild)
+            if voice is not None and voice.channel == channel:
+                try:
+                    await voice.disconnect()
+                except discord.HTTPException as exc:
+                    LOG.warning("Meetings: could not leave cancelled room: %s", exc)
+            await self._discard_channel(channel)
+        await self._remove_schedule(item)
+        await ctx.send("Scheduled meeting cancelled.", ephemeral=True)
+
     @meeting.command(
         name="start",
         description=("Start a tracked meeting. Pick a voice channel to scope, "
                      "or leave it blank and the bot makes one."))
     @commands.guild_only()
-    @require_meeting_admin()
+    @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True,
                                   connect=True, move_members=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
-                            audience: Literal["bureau", "cell members",
-                                              "all members", "custom"] = "bureau",
+                            audience: Literal["default", "bureau", "chiefs",
+                                              "cell members", "all members",
+                                              "custom", "my cell"] = "default",
                             minutes: int | None = None,
-                            also: commands.Greedy[discord.Member] = None):
+                            also: commands.Greedy[discord.Member] = None,
+                            role: discord.Role | None = None):
         """Start a meeting and track who attends.
 
         **channel** is optional. Pick an existing voice channel to scope it to
@@ -967,19 +1240,23 @@ class Meetings(commands.Cog):
         dedicated one, which it deletes again at `/meeting end`.
 
         **audience** is a dropdown:
-        **Bureau** — the bureau offices (Archon, President, Vice President,
-        Manager) plus every Chief/Lead/Head of a unit or cell.
+        **Bureau** — Archon, President, Vice President and Manager.
+        **Chiefs** — bureau plus every Chief/Lead/Head of a unit or cell.
         **Cell members** — the bureau plus every member of a unit or cell.
-        **All members** — every robotics member in the server.
+        **All members** — every human member in the server.
+        **My cell** — the organizer's cell plus bureau.
         **Custom** — only the people you pick from the dropdown that appears.
 
+        `default` selects everyone for bureau organizers and the organizer's
+        cell for chiefs. `role` selects everyone holding a Discord role.
         `minutes` is the planned length, recorded on the meeting so the report
         can show planned vs actual. `also` adds members who don't qualify for
         the audience (guests, visiting members) — it only works as a text
         command, since Discord has no option that accepts several users at
         once; in the Discord UI, use **Custom** and pick them there.
         """
-        scope = meetlib.normalise_scope(audience)
+        scope = ("my_cell" if is_cell_chief(ctx.author) and not is_meeting_admin(ctx.author)
+                 else "all") if audience == "default" else meetlib.normalise_scope(audience)
         if scope is None:
             await ctx.send(
                 f"❓ Unknown audience `{audience}`. Pick one of: "
@@ -1004,10 +1281,16 @@ class Meetings(commands.Cog):
                 pass
 
         extras = [m for m in (also or []) if not m.bot]
-        if len(extras) > config.MEETING_MAX_EXTRA_MEMBERS:
+        if role is not None:
+            extras.extend(m for m in role.members if not m.bot)
+            if audience == "default":
+                scope = "custom"
+        extras = list({member.id: member for member in extras}.values())
+        extra_limit = 90 if role is not None else config.MEETING_MAX_EXTRA_MEMBERS
+        if len(extras) > extra_limit:
             await ctx.send(
                 f"❌ Too many tagged members — max "
-                f"{config.MEETING_MAX_EXTRA_MEMBERS} extra members.")
+                f"{extra_limit} extra members.")
             return
 
         # A meeting already running would leave its own snapshot orphaned and
@@ -1035,10 +1318,10 @@ class Meetings(commands.Cog):
             # anyway, so add them explicitly — whoever else was picked.
             extras = [ctx.author] + [m for m in extras
                                      if m.id != ctx.author.id]
-            if len(extras) > config.MEETING_MAX_EXTRA_MEMBERS:
+            if len(extras) > extra_limit:
                 await ctx.send(
                     f"❌ That's {len(extras)} people — the ceiling is "
-                    f"{config.MEETING_MAX_EXTRA_MEMBERS}. Start a meeting with "
+                    f"{extra_limit}. Start a meeting with "
                     f"a wider audience instead.")
                 return
 
@@ -1050,6 +1333,10 @@ class Meetings(commands.Cog):
         # returns the newest) could never reach — orphaned at live=True forever,
         # with its channel locked to an audience and no command able to end it.
         async with self._start_lock:
+            starting = self.__dict__.get("_starting_task")
+            if starting is not None and not starting.done():
+                await ctx.send("⏳ Another meeting is starting. Try again shortly.")
+                return
             existing = await self._live_meeting()
             if existing is not None:
                 where = (f"<#{existing['channel_id']}>"
@@ -1065,6 +1352,7 @@ class Meetings(commands.Cog):
                     return  # the helper already explained itself
                 created = True
             else:
+                created = getattr(ctx, "created_channel_id", None) == channel.id
                 # Starting a meeting in the same channel the running one uses
                 # would clobber the live snapshot.
                 clash = await self._live_meeting_for_channel(channel.id)
@@ -1073,10 +1361,13 @@ class Meetings(commands.Cog):
                         f"⏳ A meeting is already running in <#{channel.id}>. "
                         f"End it with `/meeting end` first.")
                     return
+            current = asyncio.current_task()
+            self.__dict__["_starting_task"] = current
 
         try:
             audience_members = await meetlib.resolve_audience(
-                ctx.guild, scope, extra=extras)
+                ctx.guild, scope, extra=extras, organizer=ctx.author,
+                limit=extra_limit)
         except ValueError as exc:
             await ctx.send(f"❌ {exc}")
             if created:
@@ -1099,6 +1390,7 @@ class Meetings(commands.Cog):
             if created:
                 snapshot[meetlib.CHANNEL_CREATED_KEY] = True
             meeting_id = None
+            written: set[str] = set()
             try:
                 meeting_id = await store.create_meeting({
                     "title": f"{meetlib.scope_label(scope)} meeting",
@@ -1124,12 +1416,12 @@ class Meetings(commands.Cog):
                 # bot's manage_channels/manage_roles) on the channel — while the
                 # admin was told "couldn't narrow the channel" and reasonably
                 # assumed nothing had happened.
-                written: set[str] = set()
                 await meetlib.ensure_bot_access(channel)
                 written.add(str(ctx.guild.me.id))
                 written.update(
                     await meetlib.apply_meeting_permissions(
-                        channel, audience=audience_members, grant_extra=extras))
+                        channel, audience=audience_members, everyone=scope == "all",
+                        grant_extra=extras))
             except StoreError as exc:
                 LOG.error("Meetings: /meeting start failed: %s", exc)
                 # Roll the channel back: a half-started meeting with a narrowed
@@ -1172,16 +1464,32 @@ class Meetings(commands.Cog):
         else:
             lines.append(f"Attendance ID: `{meeting_id}`")
         await ctx.send("\n".join(lines))
+        try:
+            await self._claim_voice(channel)
+        except (discord.Forbidden, discord.ClientException, discord.HTTPException) as exc:
+            LOG.warning("Meetings: bot could not join %s: %s", channel.id, exc)
+        for occupant in channel.members:
+            if not occupant.bot:
+                await self._record_join({"id": meeting_id, "scope": scope,
+                                         "granted": [], "title": "Meeting"}, occupant)
+        await self._invite_audience(channel, audience_members)
+        self._watch_empty(channel)
 
     @meeting.command(name="end", aliases=["finish"],
                      description="End the running meeting and restore the channel.")
     @commands.guild_only()
-    @require_meeting_admin()
+    @require_meeting_creator()
     async def meeting_end(self, ctx):
         """End the running meeting, restore the channel, keep the attendance."""
         meeting = await self._live_meeting()
         if meeting is None:
             await ctx.send("⏳ No meeting is running right now.")
+            return
+        author = getattr(ctx, "author", None)
+        if (author is not None and not is_meeting_admin(author)
+                and str(author.id) != str(meeting.get("created_by"))):
+            await ctx.send("🔒 Only the meeting organizer or bureau can end it.",
+                           ephemeral=True)
             return
         channel = (self._find_channel(int(meeting["channel_id"]))
                    if meeting["channel_id"] else None)
@@ -1217,6 +1525,15 @@ class Meetings(commands.Cog):
         if channel is not None:
             snapshot = await store.meeting_channel_state(meeting["id"])
         created = meetlib.channel_was_created(snapshot)
+        voice = discord.utils.get(getattr(self.bot, "voice_clients", []), guild=ctx.guild)
+        if voice is not None and channel is not None and voice.channel == channel:
+            try:
+                await voice.disconnect()
+            except discord.HTTPException as exc:
+                LOG.warning("Meetings: could not leave channel %s: %s", channel.id, exc)
+        idle_task = self._idle_tasks.pop(channel.id, None) if channel is not None else None
+        if idle_task is not None and idle_task is not asyncio.current_task():
+            idle_task.cancel()
 
         # Every member the bot granted is expected + visitors, PLUS:
         #   * the ids /meeting unlock wrote to (a member outside `expected` was
@@ -1408,8 +1725,7 @@ class Meetings(commands.Cog):
 
     @meeting.command(
         name="last",
-        description="Stats for the most recent meeting. Bureau sees the "
-                    "full report; everyone else sees the headline.")
+        description="Private report for the most recent meeting (bureau and IT chief).")
     @commands.guild_only()
     async def meeting_last(self, ctx):
         """Show the last meeting's stats.
@@ -1418,10 +1734,13 @@ class Meetings(commands.Cog):
         attended and who didn't is not something to post where the whole server
         can scroll back through.
 
-        The bureau (and the whitelisted operators) additionally get the per-member
-        breakdown, the CSV, and the absentee page. Everyone else gets when,
-        where and how many — which is the part that is any member's business.
+        Only bureau members and the IT chief get the per-member breakdown,
+        CSV and absentee page.
         """
+        if not is_meeting_report_viewer(ctx.author):
+            await ctx.send("🔒 Meeting history is available to the bureau and IT chief only.",
+                           ephemeral=True)
+            return
         try:
             meeting = await store.latest_meeting()
         except StoreError as exc:
@@ -1434,30 +1753,23 @@ class Meetings(commands.Cog):
                            "`/meeting start`.", ephemeral=True)
             return
 
-        if not is_meeting_admin(ctx.author):
-            sessions = await self._sessions(meeting["id"])
-            attended = meetlib.attended_count(
-                meeting, meetlib.absentee_ids(meeting, sessions))
-            await ctx.send(embed=meetlib.redacted_stats_embed(meeting,
-                                                              attended=attended),
-                           ephemeral=True)
-            return
-
         view = MeetingStatsView(self, meeting, user=ctx.author)
         embed, view = await view.interaction_setup()
         await ctx.send(embed=embed, view=view, ephemeral=True)
 
     @meeting.command(
         name="list",
-        description="Browse past meetings. Bureau can open each report.")
+        description="Browse private meeting reports (bureau and IT chief).")
     @commands.guild_only()
     async def meeting_list(self, ctx):
         """Pick a meeting from the dropdown to see its attendance.
 
-        Answered privately. The dropdown is only attached for the bureau — it is
-        the door to the per-member report, so handing it to everyone would make
-        the redaction above theatre.
+        Answered privately for bureau members and the IT chief only.
         """
+        if not is_meeting_report_viewer(ctx.author):
+            await ctx.send("🔒 Meeting history is available to the bureau and IT chief only.",
+                           ephemeral=True)
+            return
         try:
             meetings = await store.list_meetings(25)
         except StoreError as exc:
@@ -1468,11 +1780,6 @@ class Meetings(commands.Cog):
         if not meetings:
             await ctx.send("🗓️ No meetings recorded yet. Start one with "
                            "`/meeting start`.", ephemeral=True)
-            return
-
-        if not is_meeting_admin(ctx.author):
-            await ctx.send(embed=meetlib.redacted_list_embed(meetings),
-                           ephemeral=True)
             return
 
         view = MeetingListView(self, meetings, user=ctx.author)
