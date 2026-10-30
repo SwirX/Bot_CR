@@ -72,15 +72,14 @@ command works as both `!prefix` and `/slash`.
 - 🔁 **JockieMusic migration nudge** — members who still type `m!` get a
   friendly pitch for `/play` and `/queue auto` (once per user, rarely per
   channel), so the old music bot converts without ever feeling like spam.
-- 🗣 **Club meetings with attendance** — `/meeting start` creates a channel for
-  the meeting, or name one to scope it instead; either way the bot restricts it
-  to the audience you pick from a dropdown (**Bureau**, **Cell members**, **All
-  members**, or **Custom** for a hand-picked list), records every join and leave
+- 🗣 **Club meetings with attendance** — `/meeting start` creates a private channel
+  and invites the selected audience by DM. `/meeting schedule` starts one at a
+  specified time. The bot records every join and leave
   as it happens, and hands back a report splitting the audience into who stayed,
   who left early and who never came — plus a CSV of the full timeline and a
   paged absentee list with a yellow-card button per absence. Reports are
-  answered privately, and per-member detail is limited to the bureau and the bot
-  developer. `/meeting lock` denies re-entry to leavers until an admin calls
+  answered privately and limited to the bureau and IT chief.
+  `/meeting lock` denies re-entry to leavers until an admin calls
   `/meeting unlock @member` by name. See
   [Meetings](#-meetings-meeting-start--end) below.
 - 🤖 **Private meeting rooms** — `/meeting create [name]` spins up a private VC
@@ -184,12 +183,14 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `radio <station>` | everyone | Stream any live internet radio station by name |
 | `stop`, `loop`, `volume <1-100>`, `nowplaying` | everyone | Music control |
 | `meeting create [name]`, `meeting endroom` | everyone | Private VC room, with a dropdown to pick who gets in (aliases: `closeroom`) |
-| `meeting start [<#channel>] [audience] [minutes]` | meeting admin | Start a tracked meeting. `audience` is a dropdown: Bureau / Cell members / All members / Custom. No channel? The bot makes one and deletes it at the end |
-| `meeting end` | meeting admin | End the meeting; restore the channel, or delete it if the bot made it |
+| `meeting start [<#channel>] [audience] [minutes] [role]` | bureau or cell chief | Start a tracked meeting. Defaults to everyone for bureau, or the chief's cell and bureau for a chief. A role can supply a custom audience |
+| `meeting schedule <when> [audience] [minutes] [role]` | bureau or cell chief | Schedule a private room with an ISO timestamp and timezone offset |
+| `meeting cancel <channel-id>` | organizer or bureau | Cancel a scheduled meeting |
+| `meeting end` | organizer or bureau | End the meeting; restore the channel, or delete it if the bot made it |
 | `meeting lock` | meeting admin | Deny re-entry to everyone who joined and left |
 | `meeting unlock <@member>` | meeting admin | Let one locked-out member back in |
-| `meeting list` | everyone | Meeting history. Meeting admins also get the report dropdown |
-| `meeting last` | everyone | Stats for the last meeting. Per-member detail for meeting admins only |
+| `meeting list` | bureau or IT chief | Private meeting history and report dropdown |
+| `meeting last` | bureau or IT chief | Private report for the latest meeting |
 | `link <club-id> [real-name]`, `unlink` | everyone | Link/unlink your club account |
 | `profile [member]` | everyone | Identity hub: Overview · Minecraft link · Robotics (soon) tabs |
 | `roles` | everyone | What your club role can do (scopes) |
@@ -464,41 +465,32 @@ ref `/bot update` pulls) — fetch is cached 120 s — and shows:
 
 ## 🗣 Meetings (`/meeting start` → `end`)
 
-A tracked meeting is an **event with a report**. The admin opens one in a voice
-channel, the bot scopes that channel to the invited audience for the duration,
-every join and leave is written to the hub as it happens, and ending the meeting
-produces an attendance report.
+A tracked meeting is an **event with a report**. The bot opens a private voice
+channel, sends each invitee a DM with its link, records every join, leave and
+rejoin in Appwrite, then produces an attendance report. It joins the voice room
+to monitor it. A bot-created room closes after ten minutes without people.
 
 ### 🚪 Who can run it
 
-Meeting commands and the per-member reports are gated on a tier of their own,
-separate from general bot staff: **Archon, President, Vice President, Manager,
-Bot Developer**, plus anyone in `MEETING_ADMIN_USER_IDS`. The bureau offices are
-matched on role *name* keywords (`BUREAU_OFFICE_KEYWORDS`), so a rename to
-`「👸」President` or `President of Robotics` still resolves. The **Server
-Developer** is deliberately **not** included — use `MEETING_ADMIN_USER_IDS` to
-add anyone by id.
-
-Two reasons the Bot Developer is in despite not being a bureau office. The
-reports name individual members and can write a yellow card to their profile,
-which is a judgement about people that whoever maintains the bot should be in
-the room for. And emoji are stripped before role names are compared, so a
-`.env` that spells the developer glyph without the server's zero-width joiner
-still resolves instead of silently failing.
-
-`MEETING_ADMIN_USER_IDS` is the escape hatch for a named person: list them by id
-and they keep the override without holding — or ever having held — the Archon
-role.
+**Archon, President, Vice President, Manager and cell chiefs** can create
+meetings. **Only the bureau offices and IT chief** can see meeting history,
+attendance, absences and CSV reports. Other members receive no history response
+or report.
 
 ### ▶️ Starting a meeting
 
 ```
-/meeting start minutes:60 audience:bureau                      # bot makes a channel
-/meeting start channel:#⦿Bureau⦿ minutes:60 audience:bureau    # use an existing one
+/meeting start minutes:60 audience:chiefs
+/meeting start role:@IT-Unit
+/meeting schedule when:2026-11-05T18:00+01:00 audience:cell-members
 ```
 
-The meeting begins immediately; `minutes` is how long it is *planned* to run
-(the report shows planned vs actual).
+`/meeting start` begins immediately; `minutes` is the planned length. Schedule
+times must include a timezone offset and be one minute to 30 days ahead. The
+bot creates a private room when scheduled, joins it ten minutes before start,
+and stops any music session that owns its voice connection. Invitees gain
+access and receive a DM when the meeting starts. `/meeting cancel <channel-id>`
+removes a pending meeting.
 
 `channel` is **optional**. Point it at an existing voice channel and the bot
 scopes that one for the meeting, restoring its permissions at the end. Leave it
@@ -513,10 +505,13 @@ rejected audience or a failed write cannot leave an orphan behind.
 
 | Audience | Who can join |
 | --- | --- |
-| `Bureau` | Archon, President, VP, Manager **and** the Chief/Lead/Head of every unit |
-| `Cell members` | everything in `Bureau`, plus every member of any cell |
-| `All members` | every club member |
+| `Default` | everyone for bureau organizers; own cell and bureau for cell chiefs |
+| `Bureau` | Archon, President, VP and Manager |
+| `Chiefs` | bureau and every cell chief |
+| `Cell members` | bureau, every chief and every cell member |
+| `All members` | every human server member |
 | `Custom` | only the people you pick from the dropdown that appears |
+| `My cell` | the organizer's cell and bureau |
 
 `Custom` ignores roles entirely — the people you pick are the whole audience, so
 a meeting cannot quietly widen itself to whoever happens to hold a qualifying
@@ -532,6 +527,11 @@ meetings is picked up automatically — and the **expected list is snapshotted a
 start**, so the absentee report describes who the meeting was for on the day
 rather than re-resolving the club org chart later. Managed integration roles and
 bot accounts are excluded.
+
+The `role` option can select a custom audience from all members holding one
+Discord role. It also works for scheduled meetings, where an interactive member
+picker cannot wait until start time. A role audience has a limit of 90 members
+to stay below Discord's channel overwrite limit. Audio recording is not enabled.
 
 ### 🔒 Lockouts
 
@@ -555,8 +555,7 @@ Both commands are answered **ephemeral**, including their error paths. A report
 that names who attended and who didn't is not something to post where the whole
 server can scroll back through it later.
 
-Everyone who runs them gets the headline — when, where, and how many of the
-invited audience attended. Only the meeting tier gets the rest:
+Only the bureau and IT chief can run them. Their report includes:
 
 - **the stats page** — three lists that partition the invited audience, so their
   counts add up to it: 🟢 **stayed to the end** (or *in the channel now*, while
@@ -571,11 +570,8 @@ invited audience attended. Only the meeting tier gets the rest:
   same path as `/warn`, so it lands on the member's profile as a real record
   and is mirrored to the modlog with the meeting as the reason.
 
-The `/meeting list` **dropdown is withheld from non-admins** — it is the door to
-the per-member report, so attaching it would make the redaction theatre. The
-meeting *history* is still shown, since "has the club been meeting" is not a
-secret, and a bot that refuses an ordinary question just trains people to ask
-someone who will answer.
+Other members cannot view `/meeting list` or `/meeting last`, including meeting
+titles, dates and attendance counts.
 
 The absentee list is its own page on purpose: a club-wide meeting can have
 forty absentees, which is eight rows of buttons, and Discord caps a view at 25
