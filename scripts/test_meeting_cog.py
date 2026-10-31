@@ -481,6 +481,9 @@ def _check_command_tree(*, check) -> None:
                                if o["name"] == "audience")
         check(f"{command_name} offers role-aware audience suggestions",
               audience_option.get("autocomplete"), True)
+    start_option = next(o for o in payload["options"] if o["name"] == "start")
+    also_option = next(o for o in start_option["options"] if o["name"] == "also")
+    check("also is a Discord member picker", also_option["type"], 6)
     developer = _Member("Developer", 8, config.ROLE_BOT_DEVELOPER)
     manager = _Member("Manager", 1, config.ROLE_MANAGER)
     developer_choices = {c.value for c in Meetings._audience_choices(developer, "")}
@@ -968,7 +971,7 @@ def main() -> int:
     # ── /meeting start audiences ───────────────────────────────────────
     print("\n/meeting start resolves each audience dropdown entry")
     bot_permissions = discord.Permissions(
-        manage_channels=True, manage_roles=True, connect=True)
+        manage_channels=True, manage_roles=True)
     permission_ctx = SimpleNamespace(
         author=mgr, guild=object(), bot_permissions=bot_permissions)
 
@@ -983,8 +986,20 @@ def main() -> int:
 
     check("tracked start works without Move Members",
           asyncio.run(_checks_accept(Meetings.meeting_start)), True)
+    check("tracked start works without global Connect",
+          asyncio.run(_checks_accept(Meetings.meeting_start)), True)
+    check("scheduled start works without global Connect",
+          asyncio.run(_checks_accept(Meetings.meeting_schedule)), True)
     check("private room works without Move Members",
           asyncio.run(_checks_accept(Meetings.meeting_create)), True)
+    meeting_category = SimpleNamespace(
+        id=config.MEETING_CATEGORY_ID, name=config.MEETING_CATEGORY_NAME)
+    alternate_category = SimpleNamespace(id=9, name="Other")
+    check("dedicated category wins over unrelated channels",
+          meetings_mod._meeting_category(SimpleNamespace(
+              categories=[alternate_category, meeting_category])), meeting_category)
+    check("missing category does not fall back to root",
+          meetings_mod._meeting_category(SimpleNamespace(categories=[])), None)
     for word, want_scope, want_ids in (
         ("bureau", "bureau", {"1"}),
         ("cell members", "cells", {"1", "2"}),
@@ -1141,7 +1156,7 @@ def main() -> int:
     ch = c._test_channel
     ctx = _Ctx(archon, guild=ch.guild, interaction=object())
     with as_admin("「🏴」Archon of Robotics Club"):
-        sent = start_meeting(c, s, ctx, ch, audience="custom", also=[cell])
+        sent = start_meeting(c, s, ctx, ch, audience="custom", also=cell)
     check("no picker was needed", sent[0]["view"], None)
     check("the tagged member is the audience, plus the invoker",
           set(s.created[0]["expected"]), {str(archon.id), "2"})

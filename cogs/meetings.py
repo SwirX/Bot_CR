@@ -46,6 +46,14 @@ LOG = logging.getLogger("bot.meetings")
 SETTINGS_KEY = "meetings"
 MAX_MEMBERS = 15  # sane cap on tagged members per private room
 
+
+def _meeting_category(guild):
+    categories = getattr(guild, "categories", ())
+    return (next((category for category in categories
+                  if category.id == config.MEETING_CATEGORY_ID), None)
+            or next((category for category in categories
+                     if category.name == config.MEETING_CATEGORY_NAME), None))
+
 # Rows the absentee card grid may occupy. Discord allows five buttons per row
 # and 25 components per view, so two rows leaves room for the pager and the
 # back/close pair below them.
@@ -894,10 +902,9 @@ class Meetings(commands.Cog):
     async def _make_meeting_channel(self, ctx, scope: str) -> discord.VoiceChannel | None:
         """Create the meeting's own voice channel, or ``None`` after explaining.
 
-        Placed in the same category as wherever the command was run, because in
-        this guild the text and voice channels that matter share categories and
-        a meeting channel at the guild root is harder to find than it should be.
-        Falls back to the root when the invoking channel has no category.
+        The guild's dedicated Team Meeting category keeps private rooms out of
+        the root channel list, even when the command was run from a DM-like
+        context or a channel with no category.
 
         Returns ``None`` rather than raising so the caller can keep its one
         error path; every failure here is a Discord-side one worth reporting in
@@ -912,9 +919,13 @@ class Meetings(commands.Cog):
                                 view_channel=True, connect=True,
                                 manage_channels=True, manage_roles=True),
                         }}
-        category = getattr(getattr(ctx, "channel", None), "category", None)
-        if category is not None:
-            kwargs["category"] = category
+        category = _meeting_category(ctx.guild)
+        if category is None:
+            await ctx.send("❌ The Team Meeting category is unavailable. "
+                           "Ask an admin to restore it or update the bot's "
+                           "meeting category setting.", ephemeral=True)
+            return None
+        kwargs["category"] = category
         try:
             return await ctx.guild.create_voice_channel(**kwargs)
         except discord.Forbidden:
@@ -937,8 +948,8 @@ class Meetings(commands.Cog):
         nobody may enter is not a meeting.
 
         Discord has no command option that accepts several users, which is the
-        only reason this is a second step at all; ``also:`` covers the same need
-        from the text form.
+        only reason this is a second step at all; ``also:`` covers one extra
+        member directly from the command form.
         """
         candidates = sorted(
             (m for m in ctx.guild.members
@@ -1167,7 +1178,7 @@ class Meetings(commands.Cog):
     @meeting.command(name="schedule", description="Schedule a private tracked meeting.")
     @commands.guild_only()
     @require_meeting_creator()
-    @commands.bot_has_permissions(manage_channels=True, manage_roles=True, connect=True)
+    @commands.bot_has_permissions(manage_channels=True, manage_roles=True)
     async def meeting_schedule(self, ctx, when: str, *,
                                audience: str | None = None,
                                minutes: int | None = None,
@@ -1277,14 +1288,14 @@ class Meetings(commands.Cog):
         name="start",
         description=("Start a tracked meeting. Pick a voice channel to scope, "
                      "or leave it blank and the bot makes one."))
+    @app_commands.describe(also="One extra member; use Custom to pick several")
     @commands.guild_only()
     @require_meeting_creator()
-    @commands.bot_has_permissions(manage_channels=True, manage_roles=True,
-                                  connect=True)
+    @commands.bot_has_permissions(manage_channels=True, manage_roles=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
                             audience: str | None = None,
                             minutes: int | None = None,
-                            also: commands.Greedy[discord.Member] = None,
+                            also: discord.Member | None = None,
                             role: discord.Role | None = None):
         """Start a meeting and track who attends.
 
@@ -1304,10 +1315,8 @@ class Meetings(commands.Cog):
         Omitting `audience` selects everyone for bureau organizers and the
         organizer's cell for chiefs. `role` selects everyone holding a Discord role.
         `minutes` is the planned length, recorded on the meeting so the report
-        can show planned vs actual. `also` adds members who don't qualify for
-        the audience (guests, visiting members) — it only works as a text
-        command, since Discord has no option that accepts several users at
-        once; in the Discord UI, use **Custom** and pick them there.
+        can show planned vs actual. `also` adds one member who does not qualify
+        for a wider audience. Use **Custom** to pick several members.
         """
         scope = ("my_cell" if is_cell_chief(ctx.author) and not is_meeting_admin(ctx.author)
                  else "all") if audience is None else meetlib.normalise_scope(audience)
@@ -1339,7 +1348,7 @@ class Meetings(commands.Cog):
             except discord.HTTPException:
                 pass
 
-        extras = [m for m in (also or []) if not m.bot]
+        extras = [also] if also is not None and not also.bot else []
         if role is not None:
             extras.extend(m for m in role.members if not m.bot)
             if audience is None:
@@ -1891,10 +1900,12 @@ class Meetings(commands.Cog):
         room_name = (name or "").strip() or f"{author.display_name}'s meeting"
         room_name = room_name[:100]
 
-        # Place the room in the same category as the author's current VC, if any.
-        category = None
-        if author.voice and author.voice.channel:
-            category = author.voice.channel.category
+        category = _meeting_category(guild)
+        if category is None:
+            await ctx.send("❌ The Team Meeting category is unavailable. "
+                           "Ask an admin to restore it or update the bot's "
+                           "meeting category setting.", ephemeral=True)
+            return
         try:
             channel = await guild.create_voice_channel(
                 f"🔒 {room_name}", category=category,
