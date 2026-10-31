@@ -1903,7 +1903,7 @@ class Meetings(commands.Cog):
                         view_channel=False, connect=False),
                     guild.me: discord.PermissionOverwrite(
                         view_channel=True, connect=True,
-                        manage_channels=True, move_members=True),
+                        manage_channels=True),
                 },
                 reason=f"Private meeting room by {author.name}",
             )
@@ -1920,7 +1920,7 @@ class Meetings(commands.Cog):
                                           view_channel=False, connect=False)
             await channel.set_permissions(
                 guild.me, view_channel=True, connect=True,
-                manage_channels=True, move_members=True,
+                manage_channels=True,
             )
         except discord.HTTPException as exc:
             LOG.error("Meetings: could not lock down %s: %s", channel.id, exc)

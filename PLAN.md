@@ -87,3 +87,7 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Follow-up `fix/sx-meeting-audience-suggestions` forks from integrated
   `nightly`: use role-aware autocomplete so the Test choice is shown only to
   the Bot Developer, then merge it with `--no-ff` before promotion.
+- Follow-up `fix/sx-meeting-optional-voice-move` forks from the release head:
+  remove Move Members from the bot's channel overwrites too. The live bot lacks
+  that permission and moving private-room occupants is optional. Merge to
+  `nightly` and then `master` with `--no-ff` after focused checks.
