@@ -28,7 +28,10 @@ DEPLOYED = os.path.exists(ROOT / ".env") and bool(os.environ.get("BOT_TOKEN")) \
     and os.environ.get("BOT_TOKEN") != "ci-placeholder-token"
 
 import config  # noqa: E402
-from cogs._perms import is_meeting_admin, meeting_tier, role_key  # noqa: E402
+from cogs._perms import (  # noqa: E402
+    is_cell_chief, is_it_chief, is_meeting_admin, is_meeting_creator,
+    is_meeting_report_viewer, meeting_tier, role_key,
+)
 
 SWIRX = 407922956757499905  # the bot operator, whitelisted in .env
 
@@ -120,15 +123,14 @@ def main() -> int:
         else:
             print(f"  ✓ {label} = {got!r}")
 
-    print("configured admin tier is the four bureau offices plus the developer")
+    print("configured meeting roles include the four bureau offices")
     if DEPLOYED:
         tier = {role_key(name) for name in config.MEETING_ADMIN_ROLES}
-        check("MEETING_ADMIN_ROLES", tier, {"manager", "president",
-                                            "vice president",
-                                            "archon of robotics club",
-                                            "bot developer"})
-        check("operator id whitelisted", SWIRX in config.MEETING_ADMIN_USER_IDS,
+        check("MEETING_ADMIN_ROLES", {"manager", "president",
+                                       "vice president", "archon of robotics club"} <= tier,
               True)
+        check("operator id alone is insufficient",
+              is_meeting_admin(_Member("New Member", uid=SWIRX)), False)
     else:
         # No deployment to inspect — assert the property that actually matters
         # and holds everywhere: every configured admin role resolves to a tier
@@ -178,7 +180,7 @@ def main() -> int:
           meeting_tier(_Member("「✨」New Member", "「👸」Manager")), "bureau")
     check("only decorations + level", meeting_tier(_Member("🌿 | LVL 05+")), None)
 
-    print("\nis_meeting_admin() — the bureau, the developer, and the operator")
+    print("\nis_meeting_admin() — the bureau and configured operators")
     # These assertions describe the *deployed* .env: the operator's id is only
     # whitelisted there, and the club's real role names are only in
     # MEETING_ADMIN_ROLES there. On CI the defaults apply, so the hardcoded
@@ -189,27 +191,20 @@ def main() -> int:
     # none, and is_meeting_admin correctly says False. Testing that here would
     # be asserting the absence of configuration, not the code — and it is what
     # made this file red in CI while the logic was fine.
-    if DEPLOYED and config.MEETING_ADMIN_USER_IDS:
-        operator_id = next(iter(config.MEETING_ADMIN_USER_IDS))
-        check("whitelisted operator",
-              is_meeting_admin(_Member("「✨」New Member", uid=operator_id)), True)
-        check("operator outranks a plain role set",
-              is_meeting_admin(_Member("🌿 | LVL 01+", uid=operator_id)), True)
-    else:
-        print("  – operator-id checks skipped (no deployment .env)")
+    check("operator needs a bureau role",
+          is_meeting_admin(_Member("「✨」New Member", uid=SWIRX)), False)
     for role in config.MEETING_ADMIN_ROLES:
+        if role_key(role) == "bot developer":
+            continue
         check(f"configured admin role {role_key(role)!r}",
               is_meeting_admin(_Member(role)), True)
     # Belt and braces on the club's real names, which are only in
     # MEETING_ADMIN_ROLES when a deployment is present.
     for role in ("「🏴」Archon of Robotics Club", "「👸」President",
-                 "「👸」Vice President", "「👸」Manager",
-                 "「👨‍💻」Bot Developer"):
+                 "「👸」Vice President", "「👸」Manager"):
         if DEPLOYED:
             check(role_key(role), is_meeting_admin(_Member(role)), True)
-    # The reports name individuals and can write a yellow card to a profile, so
-    # whoever maintains the bot is in on deciding that.
-    check("Bot Developer", is_meeting_admin(_Member("「👨‍💻」Bot Developer")), True)
+    check("Bot Developer", is_meeting_admin(_Member("「👨‍💻」Bot Developer")), False)
 
     print("\n...and nobody else, including the wider bot-staff tier")
     # Unit heads run their unit's work but are audience, not organisers.
@@ -223,7 +218,17 @@ def main() -> int:
     # The .env stores the developer role without the ZWJ the server uses; the
     # comparison must not care, or the developer silently loses access.
     check("developer role as written in .env, no ZWJ",
-          is_meeting_admin(_Member("「👨💻」Bot Developer")), True)
+          is_meeting_admin(_Member("「👨💻」Bot Developer")), False)
+    check("IT chief can create", is_meeting_creator(_Member("Head of IT Unit")), True)
+    check("IT chief can view reports", is_meeting_report_viewer(_Member("Head of IT Unit")), True)
+    check("technical chief can create",
+          is_meeting_creator(_Member("Head of Technical Unit")), True)
+    check("technical chief cannot view reports",
+          is_meeting_report_viewer(_Member("Head of Technical Unit")), False)
+    check("ordinary member cannot create",
+          is_meeting_creator(_Member("Member of IT Unit")), False)
+    check("cell chief recognition", is_cell_chief(_Member("Head of IT Unit")), True)
+    check("IT chief recognition", is_it_chief(_Member("Head of IT Unit")), True)
     # An office holder is an admin by role, Discord permission or not.
     admin = _Member("「👸」Manager")
     admin.guild_permissions.administrator = True

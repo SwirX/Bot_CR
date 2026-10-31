@@ -30,23 +30,22 @@ EXPECTED_COMMANDS = {
     "dashboard", "define", "del", "dice", "edit", "end", "endroom", "event", "events",
     "fact", "fixname", "github", "hierarchy", "hello", "help", "history",
     "hug", "joke", "kick", "language", "last", "leaderboard", "levelrewards", "link", "linkmember", "list", "lock", "loop", "lyrics",
-    "mc", "mclink", "mcotp", "mcrestart", "mcsession", "mcstart", "mcstop", "meeting", "meme", "minecraft", "modlog", "mute", "notifications", "nowplaying",
+    "mclink", "mcotp", "mcrestart", "mcsession", "mcstart", "mcstop", "meeting", "meme", "minecraft", "modlog", "mute", "notifications", "nowplaying",
     "overdue", "pause", "ping", "play", "playsearch", "poll", "profile", "queue",
     "quiz", "quote", "rank", "remind", "removerole", "resume", "results", "reverse", "roast",
     "robot", "roles", "rps", "set", "setbirthday", "setlead", "setname", "setprofile",
     "settings", "ship", "skip",
     "slap", "slowmode", "spacex", "start", "stats", "stop", "task", "tasks", "timeout", "today",
     "unban", "unlink", "unlinkmember", "unlock", "unmute",
-    "untimeout", "view", "voicetime", "volume", "vote", "warn", "weather", "website", "whois",
+    "untimeout", "uptime", "view", "voicetime", "volume", "vote", "warn", "weather", "website", "whois",
     "namesweep",
     # Identity / record sync — prefix-only (see PREFIX_ONLY_COMMANDS).
     "syncdb", "joindatesync", "askbirthday", "askname",
 }
 
-# Deliberately NOT hybrid: these are admin data-maintenance commands that must
-# never appear as slash commands, so they can't be triggered by clicking in the
-# Discord UI. Using a prefix command keeps them a deliberate typed action.
-PREFIX_ONLY_COMMANDS = {"syncdb", "joindatesync", "askbirthday", "askname"}
+# Admin data-maintenance commands remain typed actions. Uptime is also an
+# existing prefix-only health check.
+PREFIX_ONLY_COMMANDS = {"syncdb", "joindatesync", "askbirthday", "askname", "uptime"}
 
 # Commands that must NOT exist any more. Guards against a silent regression
 # reintroducing a self-service Minecraft-link path (see cogs/minecraft.py:
@@ -134,6 +133,13 @@ def main() -> int:
             loaded += 1
 
         names = {c.name for c in bot.walk_commands()}
+        mc_group = bot.tree.get_command("mc")
+        if not isinstance(mc_group, discord.app_commands.Group) or not mc_group.commands:
+            print("✗ Minecraft economy /mc group is missing")
+            raise SystemExit(1)
+        if "mc" in names:
+            print("✗ Duplicate prefix /mc menu command is back")
+            raise SystemExit(1)
         missing = EXPECTED_COMMANDS - names
         forbidden = FORBIDDEN_COMMANDS & names
         non_hybrid = [

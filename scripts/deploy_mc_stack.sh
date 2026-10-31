@@ -27,7 +27,7 @@
 #   BOT_SERVICE     systemd unit for the bot, e.g. "robotics-otp" (optional)
 #   BOT_PM2_NAME    pm2 process name for the bot, e.g. "robotics-otp" (optional)
 #   MC_JAR          path to the freshly built plugin jar
-#                     (default: /home/swirx/dev/projects/mc-link/build/libs/MCLink-0.1.0-SNAPSHOT.jar)
+#                     (default: /home/swirx/dev/robotics-cmc/minecraft/mc-link/build/libs/MCLink-0.1.0-SNAPSHOT.jar)
 #   MC_PLUGINS_DIR  Paper server's plugins/ directory (required for the plugin half)
 #   MC_RELOAD_CMD   optional; run verbatim after the jar swap (e.g. an rcon
 #                   "reload confirm") instead of just printing the hint.
@@ -58,7 +58,7 @@ done
 
 BOT_REPO="${BOT_REPO:-$REPO_ROOT}"
 BOT_PYTHON="${BOT_PYTHON:-$BOT_REPO/.venv-local/bin/python}"
-MC_JAR="${MC_JAR:-/home/swirx/dev/projects/mc-link/build/libs/MCLink-0.1.0-SNAPSHOT.jar}"
+MC_JAR="${MC_JAR:-/home/swirx/dev/robotics-cmc/minecraft/mc-link/build/libs/MCLink-0.1.0-SNAPSHOT.jar}"
 MC_PLUGINS_DIR="${MC_PLUGINS_DIR:-}"
 MC_RELOAD_CMD="${MC_RELOAD_CMD:-}"
 
