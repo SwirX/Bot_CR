@@ -493,12 +493,6 @@ class Minecraft(commands.Cog):
             LOG.warning("MC join rally failed: %s", exc)
 
     # ── status ────────────────────────────────────────────────
-    @commands.hybrid_command(name="mc",
-                             description="Robotics CMC menu: status, link, unlink, server control.")
-    @commands.guild_only()
-    async def mc(self, ctx: commands.Context):
-        await self._menu(ctx)
-
     @commands.hybrid_command(name="minecraft",
                              description="Robotics CMC menu: status, link, unlink, server control.")
     @commands.guild_only()
@@ -886,7 +880,7 @@ async def _back_to_home(view: discord.ui.View, interaction: discord.Interaction)
 
 
 class MinecraftHubView(LoggedView, discord.ui.View):
-    """/mc + /minecraft menu: live status content with action drill-downs."""
+    """/minecraft menu: live status content with action drill-downs."""
 
     def __init__(self, cog: "Minecraft", lang: str, member: discord.Member,
                  *, timeout: float = 180.0):
@@ -1029,7 +1023,7 @@ class ControlView(OwnerView, LoggedView, discord.ui.View):
         self.stop.label = t("mc.ctrl.stop", lang)
         self.restart.label = t("mc.ctrl.restart", lang)
         self.back.label = t("mc.hub.back", lang)
-        # The /mc hub is posted publicly, so these buttons are visible to every
+        # The /minecraft hub is posted publicly, so these buttons are visible to every
         # member — the construction-time gate only hid them from non-operators
         # *at that moment*. _run() re-checks at press time; this is cosmetic.
         if not cog._is_mc_operator(member):
@@ -1068,7 +1062,7 @@ class ControlView(OwnerView, LoggedView, discord.ui.View):
 
     async def _run(self, interaction: discord.Interaction, signal: str):
         # Re-check the *clicker*, not the member who opened the panel. Without
-        # this, any member could press ⏹ on an operator's public /mc panel and
+        # this, any member could press ⏹ on an operator's public /minecraft panel and
         # stop the Minecraft server on their behalf — the panel lives 180s and
         # the power action is issued with the original invoker's authority.
         if not Minecraft._is_mc_operator(interaction.user):

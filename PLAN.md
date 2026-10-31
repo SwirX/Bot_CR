@@ -58,3 +58,14 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Repository-wide Ruff has 168 existing findings. `scripts/smoke_test.py` is
   blocked by an existing `/mc` command registration conflict in `cogs.minecraft`.
 - Live Discord gateway and Appwrite table integration: not verified locally.
+
+## Release follow-up (2026-10-31)
+- Remove the duplicate Minecraft menu `/mc` command while retaining `/minecraft`
+  and the economy `/mc` group. Update its command docs and verify cog loading.
+- Preserve the three uncommitted files on the OCI host before updating its
+  checkout. Run the smoke test before and after restarting `bot-cr.service`.
+- History blueprint: commit the duplicate fix on
+  `fix/sx-mc-command-collision`, forked from the meeting feature. Merge current
+  `origin/master` into `nightly` with `--no-ff`, then merge the fix branch into
+  `nightly` with `--no-ff`. Push `nightly` and deploy that integration head.
+  Promote `nightly` into `master` with `--no-ff` only after deployment checks.

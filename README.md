@@ -346,12 +346,12 @@ before playing.
 
 ---
 
-## ⛏️ Minecraft server bridge (`/mc`, `/minecraft`)
+## ⛏️ Minecraft server bridge (`/minecraft`)
 
 The club's Minecraft server (Robotics CMC) is managed through **Pterodactyl's
 Client API** — no Minecraft plugins required:
 
-- `/mc` or `/minecraft` — opens the **interactive Minecraft hub**: the join
+- `/minecraft` — opens the **interactive Minecraft hub**: the join
   address `minecraft.alibks.dev:25566`, the server version (from a standard
   server-list ping), run state, player count and your own Discord ↔ Minecraft
   link status, with **Dank-Memer-style button drill-downs**:
@@ -391,7 +391,7 @@ mention pings the whole linked player base**:
   Joins are burst-coalesced, then capped at 5 names (+N) and posted as one
   role ping to the announcements channel, **at most once per
   `MC_RALLY_COOLDOWN`** (default 2700 s). The live names also enrich the
-  “Players” line on the `/mc` hub while the watcher is connected.
+  “Players” line on the `/minecraft` hub while the watcher is connected.
 
 Additional env vars:
 
@@ -438,7 +438,7 @@ credential, and the plugin only ever *consumes* backend state.
   `failed_attempts` — the plugin's brute-force lockout.
 - **Watchers (~`MC_LINK_POLL_SECONDS`)** — pending-OTP minting, pair expiry, and
   an activation sync that grants `MC_PLAYER_ROLE`, the thanks DM, the
-  `links.minecraft` record shown on `/mc` / `/profile`, and an audit entry. A
+  `links.minecraft` record shown on `/minecraft` / `/profile`, and an audit entry. A
   marker in `bot_settings` resumes after restarts (at-least-once delivery).
 
 ```
