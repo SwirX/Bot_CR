@@ -948,8 +948,8 @@ class Meetings(commands.Cog):
         nobody may enter is not a meeting.
 
         Discord has no command option that accepts several users, which is the
-        only reason this is a second step at all; ``also:`` covers the same need
-        from the text form.
+        only reason this is a second step at all; ``also:`` covers one extra
+        member directly from the command form.
         """
         candidates = sorted(
             (m for m in ctx.guild.members
@@ -1288,13 +1288,14 @@ class Meetings(commands.Cog):
         name="start",
         description=("Start a tracked meeting. Pick a voice channel to scope, "
                      "or leave it blank and the bot makes one."))
+    @app_commands.describe(also="One extra member; use Custom to pick several")
     @commands.guild_only()
     @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
                             audience: str | None = None,
                             minutes: int | None = None,
-                            also: commands.Greedy[discord.Member] = None,
+                            also: discord.Member | None = None,
                             role: discord.Role | None = None):
         """Start a meeting and track who attends.
 
@@ -1314,10 +1315,8 @@ class Meetings(commands.Cog):
         Omitting `audience` selects everyone for bureau organizers and the
         organizer's cell for chiefs. `role` selects everyone holding a Discord role.
         `minutes` is the planned length, recorded on the meeting so the report
-        can show planned vs actual. `also` adds members who don't qualify for
-        the audience (guests, visiting members) — it only works as a text
-        command, since Discord has no option that accepts several users at
-        once; in the Discord UI, use **Custom** and pick them there.
+        can show planned vs actual. `also` adds one member who does not qualify
+        for a wider audience. Use **Custom** to pick several members.
         """
         scope = ("my_cell" if is_cell_chief(ctx.author) and not is_meeting_admin(ctx.author)
                  else "all") if audience is None else meetlib.normalise_scope(audience)
@@ -1349,7 +1348,7 @@ class Meetings(commands.Cog):
             except discord.HTTPException:
                 pass
 
-        extras = [m for m in (also or []) if not m.bot]
+        extras = [also] if also is not None and not also.bot else []
         if role is not None:
             extras.extend(m for m in role.members if not m.bot)
             if audience is None:

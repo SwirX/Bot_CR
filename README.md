@@ -524,11 +524,9 @@ After choosing `Custom`, use the private member picker and press **Confirm**.
 Only those people and the organizer receive access or an invitation. `Test`
 is restricted to the Bot Developer and never invites the bureau or other cells.
 
-Extra members can be tagged on top of a role-based audience with `also:@a @b`
-(capped by `MEETING_MAX_EXTRA_MEMBERS`). `also` is **text-command only**:
-Discord has no command option that accepts several users at once, which is why
-the dropdown exists and why `Custom` is the way to choose people from the
-Discord UI. Resolution reads role names, not ids, so a promotion between
+`also` adds **one** extra member to a wider audience. Select them from Discord's
+member picker, or tag them in a text command. Use `Custom` to choose several
+individual people. Resolution reads role names, not ids, so a promotion between
 meetings is picked up automatically — and the **expected list is snapshotted at
 start**, so the absentee report describes who the meeting was for on the day
 rather than re-resolving the club org chart later. Managed integration roles and
