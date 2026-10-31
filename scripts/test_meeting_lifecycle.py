@@ -65,7 +65,8 @@ class MeetingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         guild = SimpleNamespace(id=7)
         channel = SimpleNamespace(id=8, guild=guild)
         guild.get_channel = lambda _id: channel
-        guild.get_member = lambda _id: SimpleNamespace(id=9)
+        guild.get_member = lambda _id: SimpleNamespace(
+            id=9, bot=False, roles=[SimpleNamespace(name="Manager", managed=False)])
         guild.get_role = lambda _id: None
         cog = Meetings(SimpleNamespace(get_guild=lambda _id: guild))
         cog._live_meeting = AsyncMock(return_value=None)
@@ -86,6 +87,23 @@ class MeetingLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await cog._advance_schedules()
         self.assertEqual(calls, [(8, 8)])
         self.assertEqual(cog._scheduled, [])
+
+    async def test_revoked_organizer_cannot_start_scheduled_meeting(self):
+        guild = SimpleNamespace(id=7)
+        channel = SimpleNamespace(id=8, guild=guild)
+        guild.get_channel = lambda _id: channel
+        guild.get_member = lambda _id: SimpleNamespace(id=9, bot=False, roles=[])
+        cog = Meetings(SimpleNamespace(get_guild=lambda _id: guild))
+        cog._live_meeting = AsyncMock(return_value=None)
+        cog._save_schedules = AsyncMock()
+        cog._discard_channel = AsyncMock()
+        cog._scheduled = [{"guild_id": 7, "channel_id": 8, "organizer_id": 9,
+                           "starts_at": (datetime.now(timezone.utc)
+                                         - timedelta(minutes=1)).isoformat(),
+                           "prepared": True}]
+        await cog._advance_schedules()
+        self.assertEqual(cog._scheduled, [])
+        cog._discard_channel.assert_awaited_once_with(channel)
 
     async def test_empty_room_closes_after_ten_minutes(self):
         guild = SimpleNamespace(id=7)

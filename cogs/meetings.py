@@ -32,6 +32,7 @@ from cogs import _meetings as meetlib
 from cogs._perms import (
     is_cell_chief,
     is_meeting_admin,
+    is_meeting_creator,
     is_meeting_report_viewer,
     require_meeting_admin,
     require_meeting_creator,
@@ -529,7 +530,7 @@ class Meetings(commands.Cog):
             if now < starts:
                 continue
             organizer = guild.get_member(item["organizer_id"])
-            if organizer is None:
+            if organizer is None or not is_meeting_creator(organizer):
                 await self._remove_schedule(item)
                 await self._discard_channel(channel)
                 continue
@@ -1158,6 +1159,22 @@ class Meetings(commands.Cog):
             return
         if audience == "custom" and role is None:
             await ctx.send("A scheduled custom audience needs a role.", ephemeral=True)
+            return
+        scope = ("my_cell" if is_cell_chief(ctx.author) and not is_meeting_admin(ctx.author)
+                 else "all") if audience == "default" else meetlib.normalise_scope(audience)
+        if role is not None and audience == "default":
+            scope = "custom"
+        try:
+            planned = await meetlib.resolve_audience(
+                ctx.guild, scope, organizer=ctx.author,
+                extra=[member for member in role.members if not member.bot] if role else [],
+                limit=(89 if scope == "custom" else 90) if role else
+                config.MEETING_MAX_EXTRA_MEMBERS)
+        except ValueError as exc:
+            await ctx.send(f"Cannot schedule this audience: {exc}", ephemeral=True)
+            return
+        if not planned:
+            await ctx.send("No members match that audience.", ephemeral=True)
             return
         if len(self._scheduled) >= 10:
             await ctx.send("The meeting schedule is full (10 pending meetings).",

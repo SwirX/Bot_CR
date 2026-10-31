@@ -530,7 +530,8 @@ bot accounts are excluded.
 
 The `role` option can select a custom audience from all members holding one
 Discord role. It also works for scheduled meetings, where an interactive member
-picker cannot wait until start time. A role audience has a limit of 90 members
+picker cannot wait until start time. A role audience has a limit of 90 people
+including the organizer
 to stay below Discord's channel overwrite limit. Audio recording is not enabled.
 
 ### 🔒 Lockouts

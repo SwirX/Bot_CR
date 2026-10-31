@@ -36,12 +36,14 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
   timeout failure path found during review.
 - Commit `docs(meetings): explain scheduling and access` for the command guide,
   repository notes, and this plan.
+- Follow-up `fix(meetings): validate scheduled organizers and audiences` closes
+  the role-revocation and custom-role size cases found in final review.
 - Keep the branch available for review; integration into `nightly` follows
   deployment testing against Discord and Appwrite.
 
 ## Verification (2026-10-30)
 - Meeting permission, helper and cog standalone checks: passed.
-- Lifecycle unittest (six scenarios): passed.
+- Lifecycle unittest (seven scenarios): passed.
 - Other offline `scripts/test_*.py` runners: passed after fixing the lifecycle
   script's direct-run import path.
 - Changed production files and new test lint: passed.
