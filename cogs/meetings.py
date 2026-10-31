@@ -46,6 +46,14 @@ LOG = logging.getLogger("bot.meetings")
 SETTINGS_KEY = "meetings"
 MAX_MEMBERS = 15  # sane cap on tagged members per private room
 
+
+def _meeting_category(guild):
+    categories = getattr(guild, "categories", ())
+    return (next((category for category in categories
+                  if category.id == config.MEETING_CATEGORY_ID), None)
+            or next((category for category in categories
+                     if category.name == config.MEETING_CATEGORY_NAME), None))
+
 # Rows the absentee card grid may occupy. Discord allows five buttons per row
 # and 25 components per view, so two rows leaves room for the pager and the
 # back/close pair below them.
@@ -894,10 +902,9 @@ class Meetings(commands.Cog):
     async def _make_meeting_channel(self, ctx, scope: str) -> discord.VoiceChannel | None:
         """Create the meeting's own voice channel, or ``None`` after explaining.
 
-        Placed in the same category as wherever the command was run, because in
-        this guild the text and voice channels that matter share categories and
-        a meeting channel at the guild root is harder to find than it should be.
-        Falls back to the root when the invoking channel has no category.
+        The guild's dedicated Team Meeting category keeps private rooms out of
+        the root channel list, even when the command was run from a DM-like
+        context or a channel with no category.
 
         Returns ``None`` rather than raising so the caller can keep its one
         error path; every failure here is a Discord-side one worth reporting in
@@ -912,9 +919,13 @@ class Meetings(commands.Cog):
                                 view_channel=True, connect=True,
                                 manage_channels=True, manage_roles=True),
                         }}
-        category = getattr(getattr(ctx, "channel", None), "category", None)
-        if category is not None:
-            kwargs["category"] = category
+        category = _meeting_category(ctx.guild)
+        if category is None:
+            await ctx.send("❌ The Team Meeting category is unavailable. "
+                           "Ask an admin to restore it or update the bot's "
+                           "meeting category setting.", ephemeral=True)
+            return None
+        kwargs["category"] = category
         try:
             return await ctx.guild.create_voice_channel(**kwargs)
         except discord.Forbidden:
@@ -1167,7 +1178,7 @@ class Meetings(commands.Cog):
     @meeting.command(name="schedule", description="Schedule a private tracked meeting.")
     @commands.guild_only()
     @require_meeting_creator()
-    @commands.bot_has_permissions(manage_channels=True, manage_roles=True, connect=True)
+    @commands.bot_has_permissions(manage_channels=True, manage_roles=True)
     async def meeting_schedule(self, ctx, when: str, *,
                                audience: str | None = None,
                                minutes: int | None = None,
@@ -1279,8 +1290,7 @@ class Meetings(commands.Cog):
                      "or leave it blank and the bot makes one."))
     @commands.guild_only()
     @require_meeting_creator()
-    @commands.bot_has_permissions(manage_channels=True, manage_roles=True,
-                                  connect=True)
+    @commands.bot_has_permissions(manage_channels=True, manage_roles=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
                             audience: str | None = None,
                             minutes: int | None = None,
@@ -1891,10 +1901,12 @@ class Meetings(commands.Cog):
         room_name = (name or "").strip() or f"{author.display_name}'s meeting"
         room_name = room_name[:100]
 
-        # Place the room in the same category as the author's current VC, if any.
-        category = None
-        if author.voice and author.voice.channel:
-            category = author.voice.channel.category
+        category = _meeting_category(guild)
+        if category is None:
+            await ctx.send("❌ The Team Meeting category is unavailable. "
+                           "Ask an admin to restore it or update the bot's "
+                           "meeting category setting.", ephemeral=True)
+            return
         try:
             channel = await guild.create_voice_channel(
                 f"🔒 {room_name}", category=category,

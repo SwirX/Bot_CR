@@ -91,3 +91,17 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
   remove Move Members from the bot's channel overwrites too. The live bot lacks
   that permission and moving private-room occupants is optional. Merge to
   `nightly` and then `master` with `--no-ff` after focused checks.
+
+## Meeting placement and start repair (2026-10-31)
+- Live log at 02:41:13 UTC: `/meeting start` was rejected by a bot-wide Connect
+  preflight even though a meeting room grants bot Connect on that channel.
+- The guild has a dedicated `[🔴] Team Meeting` category (ID
+  `1333113500318433397`). Place all bot-created meeting rooms there; fail
+  clearly if the category is unavailable rather than creating a root room.
+- Make `also` an optional single-member slash picker. A role or wider audience
+  can include that guest; Custom remains the multi-member picker.
+- History blueprint: `fix/sx-meeting-category-connect` from `master` for
+  category resolution and Connect repair, followed by
+  `fix/sx-meeting-also-picker` from that branch for the option contract.
+  Merge each into `nightly` with `--no-ff`, test, deploy, then merge `nightly`
+  into `master` with `--no-ff`.
