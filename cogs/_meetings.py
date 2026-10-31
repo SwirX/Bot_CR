@@ -46,7 +46,7 @@ ATTENDEE_KWARGS = dict(ATTENDEE_PERMS)
 # The /meeting start audiences, in the order they widen. ``custom`` is not a
 # role tier at all -- it is whatever the invoker picked from the member
 # dropdown -- so it sorts after the real tiers and skips role resolution.
-SCOPES = ("bureau", "chiefs", "cells", "all", "custom", "my_cell")
+SCOPES = ("bureau", "chiefs", "cells", "all", "custom", "my_cell", "test")
 SCOPE_LABELS = {
     "bureau": "Bureau",
     "chiefs": "Bureau and cell chiefs",
@@ -54,6 +54,7 @@ SCOPE_LABELS = {
     "all": "All members",
     "custom": "Custom",
     "my_cell": "My cell",
+    "test": "Test",
 }
 SCOPE_SUMMARY = {
     "bureau": "Archon, President, Vice President and Manager",
@@ -62,6 +63,7 @@ SCOPE_SUMMARY = {
     "all": "every robotics member in the server",
     "custom": "only the people picked from the dropdown",
     "my_cell": "your cell + bureau",
+    "test": "only the bot developer and the bot",
 }
 # Audience tiers from widest to narrowest. A member qualifies for a scope when
 # their tier is at least as *narrow* as it (higher index): a cell member belongs
@@ -76,7 +78,7 @@ _TIER_CUSTOM = 0
 
 # Permissions the meeting layer needs on the channel, for a clear error.
 REQUIRED_CHANNEL_PERMS = discord.Permissions(
-    manage_channels=True, manage_roles=True, connect=True, move_members=True
+    manage_channels=True, manage_roles=True, connect=True
 )
 
 
@@ -87,7 +89,7 @@ def scope_label(scope: str) -> str:
 # The words the ``/meeting start audience`` dropdown offers, in order. These are
 # also the literal values Discord validates against, so the text form takes the
 # same words the slash form displays instead of guessing at internal keys.
-SCOPE_CHOICES = ("bureau", "chiefs", "cell members", "all members", "custom", "my cell")
+SCOPE_CHOICES = ("bureau", "chiefs", "cell members", "all members", "custom", "my cell", "test")
 
 # Everything a person might reasonably type for a scope, folded to its key.
 # The display words come first: someone reading the dropdown sees "cell
@@ -112,6 +114,7 @@ _SCOPE_ALIASES = {
     "picked": "custom",
     "my cell": "my_cell",
     "my unit": "my_cell",
+    "test": "test",
 }
 
 
@@ -155,7 +158,7 @@ def _member_rank(member: discord.Member, scope: str) -> tuple[int, int, str]:
     write order — is stable across identical runs.
     """
     name = member.display_name.lower()
-    if scope in ("custom", "chiefs", "my_cell"):
+    if scope in ("custom", "chiefs", "my_cell", "test"):
         # Rank by name only. Comparing roles here would be meaningless — the
         # point of a chosen audience is that roles played no part in it — and
         # ``_TIER_ORDER.index(scope)`` would raise outright.
@@ -197,6 +200,10 @@ async def resolve_audience(guild: discord.Guild, scope: str, *,
             f"{len(extras)} tagged members exceeds the {ceiling} limit")
 
     seen: dict[int, discord.Member] = {}
+    if scope == "test":
+        if organizer is None or organizer.bot:
+            raise ValueError("test meetings need a human organizer")
+        return [organizer]
     if scope == "custom":
         for member in extras:
             seen.setdefault(member.id, member)
@@ -247,7 +254,7 @@ def scope_note_for(member: discord.Member, scope: str) -> str:
     outsider invited in".
     """
     tier = meeting_tier(member)
-    if scope in ("custom", "chiefs", "my_cell"):
+    if scope in ("custom", "chiefs", "my_cell", "test"):
         return tier or "visitor"
     if tier is None or _TIER_ORDER.index(tier) < _TIER_ORDER.index(scope):
         return "visitor"

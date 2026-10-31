@@ -169,8 +169,14 @@ def is_it_chief(member: discord.Member) -> bool:
                for key in _role_keys(member))
 
 
+def is_bot_developer(member: discord.Member) -> bool:
+    return not getattr(member, "bot", False) and role_key(
+        config.ROLE_BOT_DEVELOPER) in _role_keys(member)
+
+
 def is_meeting_creator(member: discord.Member) -> bool:
-    return is_meeting_admin(member) or is_cell_chief(member)
+    return (is_meeting_admin(member) or is_cell_chief(member)
+            or is_bot_developer(member))
 
 
 def is_meeting_report_viewer(member: discord.Member) -> bool:

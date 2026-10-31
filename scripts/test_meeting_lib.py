@@ -196,7 +196,7 @@ def main() -> int:
           [ml.meeting_channel_name(s) for s in ml.SCOPES],
           ["📣 Bureau Meeting", "📣 Bureau and cell chiefs Meeting",
            "📣 Cell members Meeting", "📣 All members Meeting",
-           "📣 Custom Meeting", "📣 My cell Meeting"])
+           "📣 Custom Meeting", "📣 My cell Meeting", "📣 Test Meeting"])
 
     print("\nnormalise_scope() accepts what a person would actually type")
     for text, want in (
