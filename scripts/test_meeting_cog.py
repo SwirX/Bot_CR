@@ -21,6 +21,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -966,6 +967,24 @@ def main() -> int:
 
     # ── /meeting start audiences ───────────────────────────────────────
     print("\n/meeting start resolves each audience dropdown entry")
+    bot_permissions = discord.Permissions(
+        manage_channels=True, manage_roles=True, connect=True)
+    permission_ctx = SimpleNamespace(
+        author=mgr, guild=object(), bot_permissions=bot_permissions)
+
+    async def _checks_accept(command):
+        for predicate in command.checks:
+            result = predicate(permission_ctx)
+            if asyncio.iscoroutine(result):
+                result = await result
+            if not result:
+                return False
+        return True
+
+    check("tracked start works without Move Members",
+          asyncio.run(_checks_accept(Meetings.meeting_start)), True)
+    check("private room works without Move Members",
+          asyncio.run(_checks_accept(Meetings.meeting_create)), True)
     for word, want_scope, want_ids in (
         ("bureau", "bureau", {"1"}),
         ("cell members", "cells", {"1", "2"}),

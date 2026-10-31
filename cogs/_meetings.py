@@ -408,7 +408,7 @@ async def ensure_bot_access(channel: discord.VoiceChannel) -> None:
     """
     await channel.set_permissions(
         channel.guild.me, **ATTENDEE_KWARGS,
-        move_members=True, manage_channels=True, manage_roles=True,
+        manage_channels=True, manage_roles=True,
         reason="Bot needs this to end the meeting")
 
 
