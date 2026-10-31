@@ -968,7 +968,7 @@ def main() -> int:
     # ── /meeting start audiences ───────────────────────────────────────
     print("\n/meeting start resolves each audience dropdown entry")
     bot_permissions = discord.Permissions(
-        manage_channels=True, manage_roles=True, connect=True)
+        manage_channels=True, manage_roles=True)
     permission_ctx = SimpleNamespace(
         author=mgr, guild=object(), bot_permissions=bot_permissions)
 
@@ -983,8 +983,20 @@ def main() -> int:
 
     check("tracked start works without Move Members",
           asyncio.run(_checks_accept(Meetings.meeting_start)), True)
+    check("tracked start works without global Connect",
+          asyncio.run(_checks_accept(Meetings.meeting_start)), True)
+    check("scheduled start works without global Connect",
+          asyncio.run(_checks_accept(Meetings.meeting_schedule)), True)
     check("private room works without Move Members",
           asyncio.run(_checks_accept(Meetings.meeting_create)), True)
+    meeting_category = SimpleNamespace(
+        id=config.MEETING_CATEGORY_ID, name=config.MEETING_CATEGORY_NAME)
+    alternate_category = SimpleNamespace(id=9, name="Other")
+    check("dedicated category wins over unrelated channels",
+          meetings_mod._meeting_category(SimpleNamespace(
+              categories=[alternate_category, meeting_category])), meeting_category)
+    check("missing category does not fall back to root",
+          meetings_mod._meeting_category(SimpleNamespace(categories=[])), None)
     for word, want_scope, want_ids in (
         ("bureau", "bureau", {"1"}),
         ("cell members", "cells", {"1", "2"}),

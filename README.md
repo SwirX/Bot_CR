@@ -497,8 +497,7 @@ removes a pending meeting.
 `channel` is **optional**. Point it at an existing voice channel and the bot
 scopes that one for the meeting, restoring its permissions at the end. Leave it
 blank and the bot **creates a dedicated channel**, named after the audience
-(`📣 Bureau Meeting`), in the same category as wherever the command was run —
-falling back to the guild root. A channel the bot made has no previous state to
+(`📣 Bureau Meeting`), in the server's `[🔴] Team Meeting` category. A channel the bot made has no previous state to
 return to, so `/meeting end` **deletes it** rather than restoring permissions
 onto it. Every failure path after creation removes the channel again, so a
 rejected audience or a failed write cannot leave an orphan behind.

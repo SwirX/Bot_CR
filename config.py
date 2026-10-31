@@ -101,6 +101,8 @@ MEETING_ADMIN_ROLES = frozenset(
     ).split(",") if r.strip()
 )
 MEETING_ADMIN_USER_IDS = frozenset()
+MEETING_CATEGORY_ID = _env("MEETING_CATEGORY_ID", 1333113500318433397, cast=int)
+MEETING_CATEGORY_NAME = _env("MEETING_CATEGORY_NAME", "[🔴] Team Meeting")
 # Audience resolution for /meeting start. Roles are matched by an
 # emoji-stripped, case-insensitive *keyword* so a club that renames
 # "「🦾」Head of Project Unit" to "「🦾」Head of Projects Unit" still resolves,
