@@ -16,6 +16,16 @@ from cogs.meetings import Meetings  # noqa: E402
 
 
 class MeetingLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def test_scheduler_wakes_at_start_time(self):
+        cog = Meetings(SimpleNamespace())
+        cog._scheduled = [{"starts_at": (datetime.now(timezone.utc)
+                                          + timedelta(seconds=3)).isoformat(),
+                           "prepared": True}]
+        self.assertGreater(cog._next_schedule_delay(), 0)
+        self.assertLessEqual(cog._next_schedule_delay(), 3)
+        cog._scheduled[0]["prepared"] = False
+        self.assertLessEqual(cog._next_schedule_delay(), 3)
+
     async def test_chief_default_audience_stays_inside_their_cell(self):
         def member(uid, role):
             return SimpleNamespace(id=uid, display_name=str(uid), bot=False,

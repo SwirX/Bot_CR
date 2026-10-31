@@ -499,14 +499,30 @@ class Meetings(commands.Cog):
     async def _schedule_loop(self) -> None:
         try:
             while True:
+                delay = 30.0
                 try:
                     await self._advance_schedules()
+                    delay = self._next_schedule_delay()
                 except (StoreError, discord.HTTPException, asyncio.TimeoutError,
                         ValueError, KeyError) as exc:
                     LOG.error("Meetings: schedule tick failed: %s", exc)
-                await asyncio.sleep(30)
+                await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
+
+    def _next_schedule_delay(self) -> float:
+        now = datetime.now(timezone.utc)
+        delay = 30.0
+        for item in self._scheduled:
+            starts = datetime.fromisoformat(item["starts_at"])
+            checkpoints = [starts]
+            if not item.get("prepared"):
+                checkpoints.append(starts - timedelta(minutes=10))
+            for checkpoint in checkpoints:
+                remaining = (checkpoint - now).total_seconds()
+                if remaining > 0:
+                    delay = min(delay, remaining)
+        return max(0.1, delay)
 
     async def _advance_schedules(self) -> None:
         now = datetime.now(timezone.utc)

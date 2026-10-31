@@ -40,12 +40,14 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
   the role-revocation and custom-role size cases found in final review.
 - Follow-up `fix(meetings): restrict legacy private rooms to organizers` closes
   the untracked `/meeting create` permission gap and hides rooms at creation.
+- Follow-up `fix(meetings): wake scheduler at meeting start` removes the
+  healthy-path 30-second start delay.
 - Keep the branch available for review; integration into `nightly` follows
   deployment testing against Discord and Appwrite.
 
 ## Verification (2026-10-30)
 - Meeting permission, helper and cog standalone checks: passed.
-- Lifecycle unittest (seven scenarios): passed.
+- Lifecycle unittest (eight scenarios): passed.
 - Other offline `scripts/test_*.py` runners: passed after fixing the lifecycle
   script's direct-run import path.
 - Changed production files and new test lint: passed.
