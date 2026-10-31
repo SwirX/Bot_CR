@@ -227,8 +227,7 @@ async def self_check() -> None:
              sorted(config.BOT_ADMIN_USER_IDS) or "— none (roles only)")
     LOG.info("  MC power (ids)   : %s",
              sorted(config.MC_CONTROL_USER_IDS) or "— none")
-    LOG.info("  meeting admin    : ids=%s roles=%s",
-             sorted(config.MEETING_ADMIN_USER_IDS) or "— none",
+    LOG.info("  meeting admin    : roles=%s",
              sorted(config.MEETING_ADMIN_ROLES) or "— none")
 
     LOG.info("── capabilities ───────────────────────────────")

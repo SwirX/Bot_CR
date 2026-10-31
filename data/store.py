@@ -55,6 +55,7 @@ from data.appwrite_client import (
     is_missing,
     seed_club_roles as _seed_roles_sync,
 )
+from data import mc_curve
 from data.levels import level_from_xp
 from data.names import best_match, normalize_name
 
@@ -82,6 +83,7 @@ _T = {
     "meetings": "meetings",
     "meeting_sessions": "meeting_sessions",
     "mc_profiles": "mc_profiles",
+    "mc_progression": "mc_progression",
     "mc_shop_items": "mc_shop_items",
     "mc_orders": "mc_orders",
 }
@@ -2059,6 +2061,50 @@ class Store:
     async def get_mc_profile(self, discord_id) -> dict | None:
         return await self._get(_T["mc_profiles"], str(discord_id))
 
+    async def get_mc_progression(self, key: str) -> dict | None:
+        """One ``mc_progression`` document, e.g. the live ``curve``.
+
+        The payload column is a JSON string because Appwrite has no JSON type.
+        """
+        row = await self._get(_T["mc_progression"], mc_curve.row_id_for(key))
+        if not row:
+            return None
+        payload = row.get("payload")
+        if isinstance(payload, dict):
+            return payload
+        try:
+            return json.loads(payload) if payload else None
+        except (TypeError, ValueError):
+            LOG.warning("mc_progression %s has an unparseable payload", key)
+            return None
+
+    async def live_curve(self) -> dict:
+        """The live curve, falling back to the shipped defaults.
+
+        Callers must not cache this for long: the server hot-reloads the curve
+        every five minutes and this bot derives its levels from the same data.
+        """
+        payload = await self.get_mc_progression("curve")
+        return payload or dict(mc_curve.DEFAULT_CURVE)
+
+    async def list_mc_profiles(self) -> list[dict]:
+        """Every synced RoboticsCMC profile, for the gameplay->hub XP sweep."""
+        return await self._list(_T["mc_profiles"], [])
+
+    async def record_mc_xp_credit(self, discord_id, *, credited: int,
+                                  day: str, credited_today: int) -> None:
+        """Advance the gameplay->hub XP watermark on one profile row.
+
+        Bot-owned columns only. The game server PATCHes the same row from
+        ProfileSyncService, so this must stay a partial update of just the
+        watermark triple and never a full-row write.
+        """
+        await self._write(_T["mc_profiles"], str(discord_id), {
+            "mc_xp_credited": max(0, int(credited)),
+            "mc_xp_credited_day": day,
+            "mc_xp_credited_today": max(0, int(credited_today)),
+        })
+
     async def get_discord_xp(self, discord_id) -> int:
         row = await self._get(_T["discord_data"], str(discord_id))
         return int((row or {}).get("xp") or 0)
@@ -2073,6 +2119,32 @@ class Store:
     async def top_mc_profiles(self, order_column: str, limit: int) -> list[dict]:
         return await self._list(_T["mc_profiles"],
                                 [Query.order_desc(order_column), Query.limit(min(limit, 25))])
+
+    async def top_mc_profiles_by_total_xp(self, limit: int) -> list[dict]:
+        """Rank by Minecraft gameplay XP *plus* Discord hub XP.
+
+        <p>Appwrite cannot sum across two tables, so the join happens here. The
+        two rows already share a key: ``mc_profiles`` is created by the game
+        server with ``rowId = discordUserId``, and ``discord_data`` is keyed by
+        that same Discord id. Each profile is therefore paired with its hub row
+        and ranked on the total.
+
+        <p>One lookup per profile rather than a query join: a profile table is
+        small (it only exists for players who have actually joined), so this is
+        a handful of round trips rather than a fan-out worth optimising.
+        """
+        profiles = await self.list_mc_profiles()
+        scored: list[dict] = []
+        for profile in profiles:
+            member_id = str(profile.get("$id") or "")
+            if not member_id:
+                continue
+            row = dict(profile)
+            row["discord_xp"] = await self.get_discord_xp(member_id)
+            row["total_xp"] = int(profile.get("gameplay_xp") or 0) + row["discord_xp"]
+            scored.append(row)
+        scored.sort(key=lambda row: row["total_xp"], reverse=True)
+        return scored[:max(1, min(limit, 25))]
 
     async def list_mc_shop_items(self, category: str | None = None) -> list[dict]:
         queries = [Query.limit(25)]

@@ -493,12 +493,10 @@ class Minecraft(commands.Cog):
             LOG.warning("MC join rally failed: %s", exc)
 
     # ── status ────────────────────────────────────────────────
-    @commands.hybrid_command(name="mc",
-                             description="Robotics CMC menu: status, link, unlink, server control.")
-    @commands.guild_only()
-    async def mc(self, ctx: commands.Context):
-        await self._menu(ctx)
-
+    # Only ``/minecraft`` remains here. ``/mc`` is now the economy group in
+    # mc_economy (profile/status/top/shop/buy); these two were byte-identical
+    # wrappers over the same menu, so keeping both only cost a second top-level
+    # slot out of the 100 the guild can hold.
     @commands.hybrid_command(name="minecraft",
                              description="Robotics CMC menu: status, link, unlink, server control.")
     @commands.guild_only()
@@ -634,6 +632,11 @@ class Minecraft(commands.Cog):
             embed.add_field(name=t("mc.field.players", lang), value=value)
         else:
             embed.add_field(name=t("mc.field.players", lang), value="—")
+        if config.MC_MAP_URL:
+            embed.add_field(
+                name=t("mc.field.map", lang),
+                value=t("mc.field.map_value", lang, url=config.MC_MAP_URL),
+            )
         if include_guide:
             embed.add_field(name=t("mc.linking.title", lang),
                             value=t("mc.linking.body", lang))

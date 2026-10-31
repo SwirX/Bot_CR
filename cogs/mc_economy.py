@@ -10,6 +10,14 @@ seconds old.
 
 Profiles are mirrored every 30 minutes, so numbers here can lag gameplay by half
 an hour. That is irrelevant for display and irrelevant for correctness.
+
+**Slash-command budget.** Discord allows 100 global slash commands. This bot
+already syncs 99 of them, and ``/mc`` and ``/minecraft`` are taken by
+``cogs.minecraft``. Everything here therefore lives under one ``/mceco`` group:
+a group costs a single top-level slot no matter how many children it holds, so
+all four commands fit in the one that remains. Adding a fifth top-level command
+anywhere in this bot will stop it booting with
+``CommandLimitReached``. If you need more, retire an existing command first.
 """
 
 import logging
@@ -19,6 +27,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from data import mc_curve
+from data.levels import level_from_xp
 from data.store import store
 
 LOG = logging.getLogger("bot.mc_economy")
@@ -57,49 +67,65 @@ def _seconds(value) -> str:
     return f"{value}s"
 
 
-def _progress(xp: int, level: int, width: int = 10) -> str:
-    """Mirror of the server's 120 * level^1.45 cumulative curve."""
-    if level >= 100:
-        return "█" * width
-    floor = 120 * level ** 1.45
-    span = 120 * (level + 1) ** 1.45 - floor
-    ratio = 0.0 if span <= 0 else max(0.0, min(1.0, (xp - floor) / span))
-    filled = max(0, min(width, round(ratio * width)))
-    return "█" * filled + "░" * (width - filled)
+def _job_xp(row: dict) -> list[tuple[str, int]]:
+    """Per-job experience from a profile row, in JOBS order."""
+    return [(key, int(row.get(f"xp_{key}") or 0)) for key, _ in JOBS]
+
+
+def _progress(xp: int, level: int, curve: dict | None = None, width: int = 10) -> str:
+    """Progress through the current level, on the live curve.
+
+    This mirrored the server's old 120 * level^1.45 formula by hand, which meant
+    every job bar was drawn against a curve the server had already stopped using
+    and would silently drift again on the next retune.
+    """
+    return mc_curve.progress_bar(xp, level, curve, width)
 
 
 class _Profile:
     """A parsed ``mc_profiles`` row with the Discord XP pool folded in."""
 
-    __slots__ = ("username", "minecraft_xp", "discord_xp", "level", "power", "money",
-                 "playtime_seconds", "active_seconds", "claims", "squads", "jobs")
+    __slots__ = ("username", "minecraft_xp", "discord_xp", "level", "discord_level",
+                 "power", "money", "playtime_seconds", "active_seconds", "claims",
+                 "squads", "jobs", "curve", "job_xp")
 
-    def __init__(self, row: dict, discord_xp: int):
+    def __init__(self, row: dict, discord_xp: int, curve: dict | None = None):
         self.username = row.get("username") or "?"
         self.minecraft_xp = int(row.get("gameplay_xp") or 0)
         self.discord_xp = int(discord_xp or 0)
-        combined = self.minecraft_xp + self.discord_xp
-        self.level = int((combined // 100) ** 0.5)
-        self.power = int(row.get("power") or 0)
+        # The two curves are unrelated and are never summed: a combined total has
+        # no meaning on either scale. This used to sqrt the sum, which produced a
+        # number that was neither level.
+        self.curve = curve or mc_curve.DEFAULT_CURVE
+        # The ladder follows total job XP. gameplay_xp is the AFK counter, which
+        # is deliberately not a levelling route, so it is reported but never
+        # used as a level.
+        self.job_xp = sum(xp for _, xp in _job_xp(row))
+        self.level = mc_curve.level_for_xp(self.job_xp, self.curve)
+        self.discord_level = level_from_xp(self.discord_xp)
+        self.power = sum(mc_curve.level_for_xp(xp, self.curve) for _, xp in _job_xp(row))
         self.money = int(row.get("money") or 0)
         self.playtime_seconds = int(row.get("playtime_seconds") or 0)
         self.active_seconds = int(row.get("active_seconds") or 0)
         self.claims = int(row.get("claims") or 0)
         self.squads = int(row.get("squads") or 0)
+        # Job levels are derived from experience. They used to be read from the
+        # lv_* columns, which the server no longer publishes because a published
+        # level is a snapshot of whichever curve was live at sync time.
         self.jobs = {
-            key: (int(row.get(f"lv_{key}") or 0), int(row.get(f"xp_{key}") or 0))
-            for key, _ in JOBS
+            key: (mc_curve.level_for_xp(xp, self.curve), xp)
+            for key, xp in _job_xp(row)
         }
 
 
 class MCEconomy(commands.Cog, name="MCEconomy"):
     """Profile, leaderboard and market commands for RoboticsCMC.
 
-    Every command lives under the ``/mc`` group. The global slash-command tree
-    is already at 98 of its 100 slots, so adding loose top-level commands
-    crashes the bot on start; a group consumes one slot and its children are
-    budgeted separately.
-    """
+Every command lives under the ``/mc`` group. The global slash-command tree sits
+at 99 of its 100 slots, and a group costs exactly one top-level slot however
+many children it holds, so everything fits in one. ``/minecraft`` still opens
+the RoboticsCMC server menu (link, unlink, server control).
+"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -110,28 +136,30 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
     # body, and it skips anything that already has a parent (the children).
     mc = app_commands.Group(
         name="mc",
-        description="RoboticsCMC — profiles, leaderboards and market.",
+        description="RoboticsCMC — profiles, leaderboards, market, orders and server status.",
     )
 
-    async def _resolve_discord_id(self, user) -> str | None:
-        """Resolve through the bot's own Minecraft link record."""
-        record = (await store.get_member(user.id)) or {}
-        username = record.get("mc_username") or ""
-        if not username:
-            return None
-        account = await store.get_minecraft_account_by_username(username)
-        if not account:
-            return None
-        link = await store.mc_active_link_for_user(user.id)
-        if link and link.get("discord_user"):
-            return str(link["discord_user"])
-        return str(account.get("discord_user")) if account.get("discord_user") else None
+    @mc.command(name="status",
+                description="Server status, address and the BlueMap link.")
+    async def mc_status(self, interaction: discord.Interaction):
+        cog = self.bot.get_cog("Minecraft")
+        if cog is None:
+            await interaction.response.send_message(
+                "The Minecraft cog is not loaded.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        status, error = await cog._fetch_status("en")
+        embed = await cog._status_embed("en", status)
+        if error:
+            embed.add_field(name="⚠️", value=error, inline=False)
+        await interaction.followup.send(embed=embed)
 
     async def _profile_for(self, discord_id: str) -> _Profile | None:
         row = await store.get_mc_profile(discord_id)
         if not row:
             return None
-        return _Profile(row, await store.get_discord_xp(discord_id))
+        curve = await store.live_curve()
+        return _Profile(row, await store.get_discord_xp(discord_id), curve)
 
     # ------------------------------------------------------------------
     @mc.command(name="profile", description="Show a Minecraft player profile.")
@@ -139,13 +167,14 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
     async def mc_profile(self, interaction: discord.Interaction,
                          member: discord.Member | None = None):
         target = member or interaction.user
-        discord_id = await self._resolve_discord_id(target)
-        if not discord_id:
-            await interaction.response.send_message(
-                "No active Minecraft link for that account. Link it in-game first.",
-                ephemeral=True)
-            return
-        profile = await self._profile_for(discord_id)
+        # A profile row's document id *is* the Discord account id (the server's
+        # ProfileSyncService creates it with rowId = discordUserId), so the
+        # account being asked about is already the key — there is nothing to
+        # resolve. This used to go through a legacy chain that read a Discord id
+        # off minecraft_accounts.discord_user, a column nothing populates, so it
+        # always resolved to None and refused players whose profiles had synced
+        # perfectly well.
+        profile = await self._profile_for(str(target.id))
         if not profile:
             await interaction.response.send_message(
                 "No synced profile yet — profiles appear within 30 minutes of first play.",
@@ -153,7 +182,10 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
             return
 
         embed = discord.Embed(title=profile.username, colour=discord.Colour.teal())
-        embed.add_field(name="Level", value=f"**{profile.level}**", inline=True)
+        # Discord and Minecraft level on unrelated curves, so they are reported
+        # side by side and never combined into one number.
+        embed.add_field(name="MC level", value=f"**{profile.level}**", inline=True)
+        embed.add_field(name="Discord level", value=f"**{profile.discord_level}**", inline=True)
         embed.add_field(name="Power", value=f"**{profile.power}**", inline=True)
         embed.add_field(name="Balance", value=f"{profile.money:,} R", inline=True)
         embed.add_field(name="Playtime", value=_seconds(profile.playtime_seconds), inline=True)
@@ -194,7 +226,8 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
             medal = {1: "1.", 2: "2.", 3: "3."}.get(index, f"{index}.")
             name = row.get("username") or "?"
             value = row.get(column) or 0
-            lines.append(f"**{medal}** `{name}` — {_seconds(value) if duration else f'{int(value):,}'}")
+            lines.append(f"**{medal}** `{name}` — "
+                         f"{_seconds(value) if duration else f'{int(value):,}'}")
         embed = discord.Embed(title=f"{label} leaderboard", colour=discord.Colour.gold())
         embed.description = "\n".join(lines)
         embed.set_footer(text="Mirror refreshes every 30 minutes.")
@@ -256,22 +289,25 @@ class MCEconomy(commands.Cog, name="MCEconomy"):
                 f"`{item_key}` is not currently for sale.", ephemeral=True)
             return
 
-        discord_id = await self._resolve_discord_id(interaction.user)
-        if not discord_id:
-            await interaction.followup.send(
-                "No active Minecraft link, so an order cannot be delivered to you.",
-                ephemeral=True)
-            return
-
+        # The order carries the Discord id and the server resolves the buyer from it
+        # when the player next logs in, so no legacy Minecraft link lookup is
+        # needed to order. Gating on mc_username refused orders from accounts
+        # whose profile had synced perfectly well.
+        discord_id = str(interaction.user.id)
         unit_price = int(listing.get("buy_price") or 0)
         total = unit_price * quantity
         profile = await self._profile_for(discord_id)
-        if profile and profile.money < total:
+        low_balance = profile is not None and profile.money < total
+        if low_balance:
+            # Warned, not blocked. The mirror can lag by up to 30 minutes and
+            # reads 0 for a player who has not been synced yet, so refusing here
+            # would block a purchase the server would happily accept. The
+            # authoritative check happens on the server at fulfilment.
             await interaction.followup.send(
-                f"That costs **{total:,} R** but your mirrored balance is "
-                f"**{profile.money:,} R**. Mirrors can lag 30 minutes, so this may "
-                "still go through — the server has the final say.", ephemeral=True)
-            return
+                f"⚠️ That costs **{total:,} R** but your mirrored balance is "
+                f"**{profile.money:,} R**. Placing the order anyway — the server "
+                "checks your real balance when you log in and rejects it if you "
+                "cannot pay.", ephemeral=True)
 
         order_id = str(uuidlib.uuid4())
         now = discord.utils.utcnow()

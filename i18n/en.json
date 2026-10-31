@@ -17,6 +17,8 @@
   "mc.field.version": "Version",
   "mc.field.status": "Status",
   "mc.field.players": "Players",
+  "mc.field.map": "Map",
+  "mc.field.map_value": "[Open BlueMap]({url})",
   "mc.status.running": "🟢 Running",
   "mc.status.starting": "🟡 Starting",
   "mc.status.stopping": "🟠 Stopping",

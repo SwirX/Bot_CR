@@ -46,7 +46,7 @@ _DECORATION = re.compile(
 # substring test would exclude "Archon of Robotics Club" itself, because
 # "robotics" contains "bot".
 _EXCLUDED = re.compile(
-    r"\b(?:%s)\b" % "|".join(re.escape(k) for k in config.MEETING_EXCLUDED_ROLE_KEYWORDS)
+    r"\b(?:{})\b".format("|".join(re.escape(k) for k in config.MEETING_EXCLUDED_ROLE_KEYWORDS))
 )
 
 
@@ -151,27 +151,39 @@ def meeting_tier(member: discord.Member) -> str | None:
 
 
 def is_meeting_admin(member: discord.Member) -> bool:
-    """True for the meeting tier: the bureau, the bot developer, or a whitelisted id.
-
-    Two sources, and only those two — the roles in ``MEETING_ADMIN_ROLES``
-    (Archon, President, Vice President, Manager, Bot Developer) and the ids in
-    ``MEETING_ADMIN_USER_IDS``. The rest of bot staff is intentionally *not*
-    folded in: :func:`is_bot_admin` is a separate, much wider tier (server
-    admins, the developer roles), and running a meeting is not a developer
-    action.
-
-    The developer role that *is* here is on the reports as much as the commands:
-    the per-member breakdown names individuals and can write a yellow card to
-    their profile, so that is not something to decide without whoever maintains
-    the bot in the room. Anyone else can be added by id instead of widening the
-    role list — that keeps the escape hatch explicit and auditable in ``.env``.
-    """
-    if member.id in config.MEETING_ADMIN_USER_IDS:
-        return True
+    """True for the four bureau offices, independent of general bot staff."""
     if getattr(member, "bot", False):
         return False
-    admin_keys = {role_key(name) for name in config.MEETING_ADMIN_ROLES}
+    admin_keys = {key for name in config.MEETING_ADMIN_ROLES
+                  if _is_bureau_office(key := role_key(name))}
     return bool(_role_keys(member) & admin_keys)
+
+
+def is_cell_chief(member: discord.Member) -> bool:
+    return any(_is_unit_head(key) and not _is_excluded(key)
+               for key in _role_keys(member))
+
+
+def is_it_chief(member: discord.Member) -> bool:
+    return any(_is_unit_head(key) and "it" in key.split() and not _is_excluded(key)
+               for key in _role_keys(member))
+
+
+def is_meeting_creator(member: discord.Member) -> bool:
+    return is_meeting_admin(member) or is_cell_chief(member)
+
+
+def is_meeting_report_viewer(member: discord.Member) -> bool:
+    return is_meeting_admin(member) or is_it_chief(member)
+
+
+def require_meeting_creator():
+    async def predicate(ctx):
+        if is_meeting_creator(ctx.author):
+            return True
+        raise commands.MissingPermissions(["meetings.create"])
+
+    return commands.check(predicate)
 
 
 def require_meeting_admin():

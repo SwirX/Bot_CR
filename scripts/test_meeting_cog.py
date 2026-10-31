@@ -333,7 +333,7 @@ def as_admin(*role_names):
     @contextlib.contextmanager
     def _swap():
         real = config.MEETING_ADMIN_ROLES
-        config.MEETING_ADMIN_ROLES = set(role_names)
+        config.MEETING_ADMIN_ROLES = set(role_names) | set(real)
         try:
             yield
         finally:
@@ -467,7 +467,7 @@ def _check_command_tree(*, check) -> None:
         return
 
     want = {"start", "end", "lock", "unlock", "last", "list", "create",
-            "endroom"}
+            "endroom", "schedule", "cancel"}
     check("every subcommand hangs off it",
           {c.name for c in roots[0].commands}, want)
     payload = roots[0].to_dict(bot.tree)
@@ -899,7 +899,8 @@ def main() -> int:
           sent[0]["view"], None)
     body = "".join(f.value or "" for f in (sent[0]["embed"] or
                                            discord.Embed()).fields)
-    check("the headcount is still there", "**1** of 2 invited" in body, True)
+    check("no headcount is disclosed", "**1** of 2 invited" in body, False)
+    check("report is denied", "history is available" in sent[0]["content"], True)
     check("but nobody is named",
           any(f"<@{uid}>" in body for uid in (1, 2, 3, 7)), False)
 
@@ -920,8 +921,7 @@ def main() -> int:
     check("ephemeral", sent[0]["ephemeral"], True)
     check("no dropdown — it is the door to the per-member report",
           sent[0]["view"], None)
-    check("the history itself is still shown",
-          "meeting(s) on record" in (sent[0]["embed"].description or ""), True)
+    check("history is denied", "history is available" in sent[0]["content"], True)
 
     print("\n/meeting list gives the bureau the dropdown")
     with as_admin("「🏴」Archon of Robotics Club"):
@@ -971,6 +971,25 @@ def main() -> int:
               s.created[0]["visitors"], [])
         check(f"{word!r} -> announced", "Meeting started" in (sent[-1]["content"] or ""),
               True)
+
+    print("\n/meeting start chooses a chief's cell by default")
+    chief = _Member("Chief", 6, "Head of Technical Unit")
+    s = _FakeStore()
+    c = build_cog(s, [mgr, chief, cell, other])
+    start_meeting(c, s, _Ctx(chief, guild=c._test_channel.guild),
+                  c._test_channel, audience="default")
+    check("chief default scope", s.created[0]["scope"], "my_cell")
+    check("chief default audience", set(s.created[0]["expected"]),
+          {"1", "2", "6"})
+
+    print("\n/meeting start chooses everyone by default for bureau")
+    s = _FakeStore()
+    c = build_cog(s, [mgr, cell, other])
+    start_meeting(c, s, _Ctx(archon, guild=c._test_channel.guild),
+                  c._test_channel, audience="default")
+    check("bureau default scope", s.created[0]["scope"], "all")
+    check("bureau default audience", set(s.created[0]["expected"]),
+          {"1", "2", "3"})
 
     print("\n/meeting start refuses an audience nobody qualifies for")
     s = _FakeStore()
@@ -1101,13 +1120,12 @@ def main() -> int:
         check("a plain member is not in the tier", is_meeting_admin(other),
               False)
         check("the archon is", is_meeting_admin(archon), True)
-        # IDs are the escape hatch that survives losing the role, which is the
-        # whole reason `MEETING_ADMIN_USER_IDS` exists.
+        # An ID override must not bypass the bureau role boundary.
         real_ids = config.MEETING_ADMIN_USER_IDS
         config.MEETING_ADMIN_USER_IDS = frozenset({other.id})
         try:
-            check("an explicitly whitelisted id is, though",
-                  is_meeting_admin(other), True)
+            check("an explicitly whitelisted id is still denied",
+                  is_meeting_admin(other), False)
         finally:
             config.MEETING_ADMIN_USER_IDS = real_ids
 

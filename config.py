@@ -90,40 +90,17 @@ LEADER_ROLES = [s.strip() for s in _env(
     "LEADER_ROLES", "Lead,Vice President,President").split(",") if s.strip()]
 
 # ── Meeting admin / audience roles ─────────────────────────────────────
-# /meeting start, /meeting end, /meeting lock, /meeting unlock and the per-member
-# half of /meeting list and /meeting last are gated on MEETING_ADMIN_ROLES plus
-# MEETING_ADMIN_USER_IDS. These are EXACT Discord role display names (emoji
-# prefixes included) — the bot matches role names literally, so a stale name here
-# silently drops an admin. Matched through _perms.role_key, which strips emoji
-# and brackets, so "👨‍💻" and "👨💻" compare equal and a glyph mismatch cannot
-# quietly exclude the developer.
-#
-# The Bot Developer is here because the reports name individuals and carry a
-# button that writes to their profile: keeping someone with the technical
-# details out of the room where that is decided is how it gets misused. The
-# *other* bot-staff roles (server admins, the Server Developer) stay out — the
-# audience's organisers are still not the whole staff team. An individual can be
-# added to MEETING_ADMIN_USER_IDS instead of widening this list.
-#
-# The bot operator is covered through MEETING_ADMIN_USER_IDS so a role reshuffle
-# can't lock the club out of its own meeting log.
+# Only the four bureau offices may administer meetings. Emoji decoration in
+# Discord role names is stripped before comparison.
 ROLE_MANAGER = _env("ROLE_MANAGER", "「👸」Manager")
 MEETING_ADMIN_ROLES = frozenset(
     r.strip() for r in _env(
         "MEETING_ADMIN_ROLES",
         f"{ROLE_ARCHON},{ROLE_PRESIDENT},{ROLE_VICE_PRESIDENT},"
-        f"{ROLE_MANAGER},{ROLE_BOT_DEVELOPER}",
+        f"{ROLE_MANAGER}",
     ).split(",") if r.strip()
 )
-# Discord user ids that may always run the /meeting admin commands, whether or
-# not they hold any of the roles above. Set this explicitly rather than relying
-# on the BOT_ADMIN_USER_IDS fallback when a named person needs an override that
-# survives losing (or never having) the Archon role.
-MEETING_ADMIN_USER_IDS = frozenset(
-    int(i) for i in _env("MEETING_ADMIN_USER_IDS", _env("BOT_ADMIN_USER_IDS", ""))
-    .split(",") if i.strip().isdigit()
-)
-
+MEETING_ADMIN_USER_IDS = frozenset()
 # Audience resolution for /meeting start. Roles are matched by an
 # emoji-stripped, case-insensitive *keyword* so a club that renames
 # "「🦾」Head of Project Unit" to "「🦾」Head of Projects Unit" still resolves,
@@ -202,6 +179,26 @@ MC_SERVER_ID = _env("MC_SERVER_ID", "")
 MC_ADDRESS = _env("MC_ADDRESS", "")
 MC_PORT = _env("MC_PORT", 25566, cast=int)
 MC_SERVER_NAME = _env("MC_SERVER_NAME", "Robotics CMC")
+
+# Public BlueMap web UI, shown on the /mc status card. Blank hides the field,
+# so the same build works before the map is published.
+MC_MAP_URL = _env("MC_MAP_URL", "https://mc-map.alibks.dev")
+
+# ── Minecraft → hub XP conversion ─────────────────────────────────────
+# Playing the game pays Discord XP so the game is worth the time. Rate is
+# hub XP per point of gameplay XP; gameplay XP accrues at 1 per 30s of active
+# play, capped by the server's daily-active cap (6h), so the ratio is chosen
+# against Discord's own faucets: a 3x payout puts an hour of play ~3.8x above
+# realistic chat (1 msg / 5min) without making chatter pointless.
+MC_XP_SYNC_ENABLED = _env("MC_XP_SYNC_ENABLED", True, cast=bool)
+MC_XP_RATIO = _env("MC_XP_RATIO", 3, cast=int)
+# Caps hub XP from Minecraft per member per day, independently of the server's
+# active-play cap. Raising gameplay generosity must not inflate the hub
+# economy, and this keeps a ratio change from retro-granting a large balance.
+MC_XP_DAILY_CAP = _env("MC_XP_DAILY_CAP", 2500, cast=int)
+# Conversion runs on a timer rather than inside the 30-minute profile sync so a
+# profile sync outage cannot stall or double-credit payouts.
+MC_XP_SYNC_SECONDS = _env("MC_XP_SYNC_SECONDS", 900, cast=int)
 
 # Auto-assigned to every member who links a Minecraft account, so a single
 # role mention pings the whole linked player base (used by /mcsession and the
