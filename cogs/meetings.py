@@ -489,6 +489,11 @@ class Meetings(commands.Cog):
     async def _load_schedules(self) -> None:
         try:
             self._scheduled = json.loads(await store.get_setting("meeting_schedules") or "[]")
+            if not isinstance(self._scheduled, list) or any(
+                    not isinstance(item, dict) for item in self._scheduled):
+                raise ValueError("schedule registry has an invalid shape")
+            for item in self._scheduled:
+                item["prepared"] = False
         except (StoreError, ValueError) as exc:
             LOG.error("Meetings: could not load schedules: %s", exc)
             self._scheduled = []

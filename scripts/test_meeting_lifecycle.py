@@ -1,5 +1,6 @@
 """Offline checks for scheduled activation and empty-room shutdown."""
 
+import json
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -12,10 +13,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from cogs import _meetings  # noqa: E402
+from cogs import meetings as meeting_module  # noqa: E402
 from cogs.meetings import Meetings  # noqa: E402
 
 
 class MeetingLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restart_reclaims_prepared_voice_room(self):
+        cog = Meetings(SimpleNamespace())
+        saved = json.dumps([{"channel_id": 8, "prepared": True}])
+        with patch.object(meeting_module.store, "get_setting",
+                          new=AsyncMock(return_value=saved)):
+            await cog._load_schedules()
+        self.assertFalse(cog._scheduled[0]["prepared"])
+
     def test_scheduler_wakes_at_start_time(self):
         cog = Meetings(SimpleNamespace())
         cog._scheduled = [{"starts_at": (datetime.now(timezone.utc)
