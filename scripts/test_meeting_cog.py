@@ -473,12 +473,20 @@ def _check_command_tree(*, check) -> None:
     payload = roots[0].to_dict(bot.tree)
     check("and all of them reach Discord",
           {o["name"] for o in payload.get("options", [])}, want)
-    start_option = next(o for o in payload["options"] if o["name"] == "start")
-    audience_option = next(o for o in start_option["options"]
-                           if o["name"] == "audience")
-    choices = {choice["value"] for choice in audience_option["choices"]}
-    check("no redundant default audience choice", "default" in choices, False)
-    check("test audience reaches Discord", "test" in choices, True)
+    for command_name in ("start", "schedule"):
+        command_option = next(o for o in payload["options"]
+                              if o["name"] == command_name)
+        audience_option = next(o for o in command_option["options"]
+                               if o["name"] == "audience")
+        check(f"{command_name} offers role-aware audience suggestions",
+              audience_option.get("autocomplete"), True)
+    developer = _Member("Developer", 8, config.ROLE_BOT_DEVELOPER)
+    manager = _Member("Manager", 1, config.ROLE_MANAGER)
+    developer_choices = {c.value for c in Meetings._audience_choices(developer, "")}
+    manager_choices = {c.value for c in Meetings._audience_choices(manager, "")}
+    check("no redundant default audience choice", "default" in manager_choices, False)
+    check("developer sees test audience", "test" in developer_choices, True)
+    check("non-developer does not see test audience", "test" in manager_choices, False)
 
 
 def main() -> int:

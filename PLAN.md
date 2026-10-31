@@ -84,3 +84,6 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
   the repair branch and contains the audience changes and focused checks.
   Merge the repair branch into `nightly` first, then the audience branch, both
   with `--no-ff`; promote tested `nightly` to `master` with `--no-ff`.
+- Follow-up `fix/sx-meeting-audience-suggestions` forks from integrated
+  `nightly`: use role-aware autocomplete so the Test choice is shown only to
+  the Bot Developer, then merge it with `--no-ff` before promotion.

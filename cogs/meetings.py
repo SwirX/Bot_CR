@@ -22,9 +22,9 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Literal
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import config
@@ -441,6 +441,15 @@ class Meetings(commands.Cog):
         self._scheduled: list[dict] = []
         self._schedule_task: asyncio.Task | None = None
         self._schedule_lock = asyncio.Lock()
+
+    @staticmethod
+    def _audience_choices(member: discord.Member, current: str) -> list[app_commands.Choice[str]]:
+        options = meetlib.SCOPE_CHOICES
+        if not is_bot_developer(member):
+            options = tuple(option for option in options if option != "test")
+        needle = current.casefold()
+        return [app_commands.Choice(name=option.title(), value=option)
+                for option in options if needle in option.casefold()]
 
     @property
     def _start_lock(self) -> asyncio.Lock:
@@ -1160,9 +1169,7 @@ class Meetings(commands.Cog):
     @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True, connect=True)
     async def meeting_schedule(self, ctx, when: str, *,
-                               audience: Literal["bureau", "chiefs", "cell members",
-                                                 "all members", "my cell", "custom",
-                                                 "test"] | None = None,
+                               audience: str | None = None,
                                minutes: int | None = None,
                                role: discord.Role | None = None):
         try:
@@ -1233,6 +1240,11 @@ class Meetings(commands.Cog):
                        f"The room will open at start time. ID: `{channel.id}`",
                        ephemeral=True)
 
+    @meeting_schedule.autocomplete("audience")
+    async def _schedule_audience_choices(self, interaction: discord.Interaction,
+                                         current: str) -> list[app_commands.Choice[str]]:
+        return self._audience_choices(interaction.user, current)
+
     @meeting.command(name="cancel", description="Cancel a scheduled meeting.")
     @commands.guild_only()
     @require_meeting_creator()
@@ -1270,9 +1282,7 @@ class Meetings(commands.Cog):
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True,
                                   connect=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
-                            audience: Literal["bureau", "chiefs", "cell members",
-                                              "all members", "custom", "my cell",
-                                              "test"] | None = None,
+                            audience: str | None = None,
                             minutes: int | None = None,
                             also: commands.Greedy[discord.Member] = None,
                             role: discord.Role | None = None):
@@ -1523,6 +1533,11 @@ class Meetings(commands.Cog):
                                          "granted": [], "title": "Meeting"}, occupant)
         await self._invite_audience(channel, audience_members)
         self._watch_empty(channel)
+
+    @meeting_start.autocomplete("audience")
+    async def _start_audience_choices(self, interaction: discord.Interaction,
+                                      current: str) -> list[app_commands.Choice[str]]:
+        return self._audience_choices(interaction.user, current)
 
     @meeting.command(name="end", aliases=["finish"],
                      description="End the running meeting and restore the channel.")
