@@ -504,7 +504,8 @@ onto it. Every failure path after creation removes the channel again, so a
 rejected audience or a failed write cannot leave an orphan behind.
 
 `audience` is optional. With it omitted, bureau organizers invite everyone;
-cell chiefs invite their cell and the bureau. The dropdown offers:
+cell chiefs invite their cell and the bureau. Type in the audience field to see
+suggestions. The `Test` suggestion appears only for the Bot Developer:
 
 | Audience | Who can join |
 | --- | --- |
