@@ -44,12 +44,14 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
   healthy-path 30-second start delay.
 - Follow-up `fix(meetings): reclaim scheduled voice after restart` rechecks
   a saved preparation marker after the bot reconnects.
+- Follow-up `fix(meetings): preserve partial grants for rollback` prevents
+  permission leaks when Discord rejects a member overwrite mid-start.
 - Keep the branch available for review; integration into `nightly` follows
   deployment testing against Discord and Appwrite.
 
 ## Verification (2026-10-30)
 - Meeting permission, helper and cog standalone checks: passed.
-- Lifecycle unittest (nine scenarios): passed.
+- Lifecycle unittest (ten scenarios): passed.
 - Other offline `scripts/test_*.py` runners: passed after fixing the lifecycle
   script's direct-run import path.
 - Changed production files and new test lint: passed.

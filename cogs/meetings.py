@@ -1456,10 +1456,9 @@ class Meetings(commands.Cog):
                 # assumed nothing had happened.
                 await meetlib.ensure_bot_access(channel)
                 written.add(str(ctx.guild.me.id))
-                written.update(
-                    await meetlib.apply_meeting_permissions(
-                        channel, audience=audience_members, everyone=scope == "all",
-                        grant_extra=extras))
+                await meetlib.apply_meeting_permissions(
+                    channel, audience=audience_members, everyone=scope == "all",
+                    grant_extra=extras, written=written)
             except StoreError as exc:
                 LOG.error("Meetings: /meeting start failed: %s", exc)
                 # Roll the channel back: a half-started meeting with a narrowed

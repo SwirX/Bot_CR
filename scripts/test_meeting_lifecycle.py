@@ -18,6 +18,28 @@ from cogs.meetings import Meetings  # noqa: E402
 
 
 class MeetingLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_partial_permission_grants_remain_visible_to_rollback(self):
+        class Target:
+            def __init__(self, identifier):
+                self.id = identifier
+
+        class Channel:
+            def __init__(self):
+                self.guild = SimpleNamespace(default_role=Target(0))
+                self.calls = 0
+
+            async def set_permissions(self, _target, **_kwargs):
+                self.calls += 1
+                if self.calls == 3:
+                    raise RuntimeError("Discord rejected the second member")
+
+        written = set()
+        with self.assertRaises(RuntimeError):
+            await _meetings.apply_meeting_permissions(
+                Channel(), audience=[Target(1), Target(2)], written=written)
+        self.assertEqual(len(written), 2)
+        self.assertIn("0", written)
+
     async def test_restart_reclaims_prepared_voice_room(self):
         cog = Meetings(SimpleNamespace())
         saved = json.dumps([{"channel_id": 8, "prepared": True}])

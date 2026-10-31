@@ -352,7 +352,8 @@ def restore_plan(snapshot: dict, *, granted: set[int]) -> dict[str, dict]:
 async def apply_meeting_permissions(channel: discord.VoiceChannel, *,
                                     audience: list[discord.Member],
                                     everyone: bool = False,
-                                    grant_extra: list[discord.Member] | None = None
+                                    grant_extra: list[discord.Member] | None = None,
+                                    written: set[str] | None = None,
                                     ) -> set[str]:
     """Open ``channel`` to the audience for the duration of the meeting.
 
@@ -373,7 +374,8 @@ async def apply_meeting_permissions(channel: discord.VoiceChannel, *,
       the whole server permanently, and the bot kept manage_channels/manage_roles
       on it.
     """
-    written: set[str] = set()
+    if written is None:
+        written = set()
     # A meeting's existence and membership are private to its audience.
     await channel.set_permissions(channel.guild.default_role,
                                   **(ATTENDEE_KWARGS if everyone else
