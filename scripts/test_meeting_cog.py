@@ -481,6 +481,9 @@ def _check_command_tree(*, check) -> None:
                                if o["name"] == "audience")
         check(f"{command_name} offers role-aware audience suggestions",
               audience_option.get("autocomplete"), True)
+    start_option = next(o for o in payload["options"] if o["name"] == "start")
+    also_option = next(o for o in start_option["options"] if o["name"] == "also")
+    check("also is a Discord member picker", also_option["type"], 6)
     developer = _Member("Developer", 8, config.ROLE_BOT_DEVELOPER)
     manager = _Member("Manager", 1, config.ROLE_MANAGER)
     developer_choices = {c.value for c in Meetings._audience_choices(developer, "")}
@@ -1153,7 +1156,7 @@ def main() -> int:
     ch = c._test_channel
     ctx = _Ctx(archon, guild=ch.guild, interaction=object())
     with as_admin("「🏴」Archon of Robotics Club"):
-        sent = start_meeting(c, s, ctx, ch, audience="custom", also=[cell])
+        sent = start_meeting(c, s, ctx, ch, audience="custom", also=cell)
     check("no picker was needed", sent[0]["view"], None)
     check("the tagged member is the audience, plus the invoker",
           set(s.created[0]["expected"]), {str(archon.id), "2"})
