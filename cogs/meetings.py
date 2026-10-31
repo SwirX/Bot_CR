@@ -1263,7 +1263,7 @@ class Meetings(commands.Cog):
     @commands.guild_only()
     @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True,
-                                  connect=True, move_members=True)
+                                  connect=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
                             audience: Literal["default", "bureau", "chiefs",
                                               "cell members", "all members",
@@ -1837,7 +1837,7 @@ class Meetings(commands.Cog):
                      description="Create a private voice room with you + the picked members.")
     @commands.guild_only()
     @require_meeting_creator()
-    @commands.bot_has_permissions(manage_channels=True, move_members=True)
+    @commands.bot_has_permissions(manage_channels=True)
     async def meeting_create(self, ctx, members: commands.Greedy[discord.Member] = None, *,
                              name: str | None = None):
         """Spin up a private voice room only the invitees can enter.
