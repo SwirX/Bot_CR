@@ -69,3 +69,21 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
   `origin/master` into `nightly` with `--no-ff`, then merge the fix branch into
   `nightly` with `--no-ff`. Push `nightly` and deploy that integration head.
   Promote `nightly` into `master` with `--no-ff` only after deployment checks.
+
+## Meeting command repair (2026-10-31)
+- Remove the unnecessary Move Members preflight from private room creation and
+  tracked meeting start; moving occupants remains optional.
+- Remove the visible Default audience choice while preserving omission behavior:
+  everyone for bureau, own cell plus bureau for a chief.
+- Add a bot-developer-only Test audience containing only the invoker as a human
+  attendee. The bot retains voice access. No other member receives an invite.
+- Verify command registration, audience isolation, permissions and lifecycle;
+  deploy to the existing OCI service and check startup logs.
+- History blueprint: `fix/sx-meeting-create-permission` forks from `master` and
+  contains the permission repair. `feat/sx-meeting-test-audience` forks from
+  the repair branch and contains the audience changes and focused checks.
+  Merge the repair branch into `nightly` first, then the audience branch, both
+  with `--no-ff`; promote tested `nightly` to `master` with `--no-ff`.
+- Follow-up `fix/sx-meeting-audience-suggestions` forks from integrated
+  `nightly`: use role-aware autocomplete so the Test choice is shown only to
+  the Bot Developer, then merge it with `--no-ff` before promotion.

@@ -22,14 +22,15 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Literal
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import config
 from cogs import _meetings as meetlib
 from cogs._perms import (
+    is_bot_developer,
     is_cell_chief,
     is_meeting_admin,
     is_meeting_creator,
@@ -440,6 +441,15 @@ class Meetings(commands.Cog):
         self._scheduled: list[dict] = []
         self._schedule_task: asyncio.Task | None = None
         self._schedule_lock = asyncio.Lock()
+
+    @staticmethod
+    def _audience_choices(member: discord.Member, current: str) -> list[app_commands.Choice[str]]:
+        options = meetlib.SCOPE_CHOICES
+        if not is_bot_developer(member):
+            options = tuple(option for option in options if option != "test")
+        needle = current.casefold()
+        return [app_commands.Choice(name=option.title(), value=option)
+                for option in options if needle in option.casefold()]
 
     @property
     def _start_lock(self) -> asyncio.Lock:
@@ -1159,9 +1169,7 @@ class Meetings(commands.Cog):
     @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True, connect=True)
     async def meeting_schedule(self, ctx, when: str, *,
-                               audience: Literal["default", "bureau", "chiefs",
-                                                 "cell members", "all members",
-                                                 "my cell", "custom"] = "default",
+                               audience: str | None = None,
                                minutes: int | None = None,
                                role: discord.Role | None = None):
         try:
@@ -1182,8 +1190,12 @@ class Meetings(commands.Cog):
             await ctx.send("A scheduled custom audience needs a role.", ephemeral=True)
             return
         scope = ("my_cell" if is_cell_chief(ctx.author) and not is_meeting_admin(ctx.author)
-                 else "all") if audience == "default" else meetlib.normalise_scope(audience)
-        if role is not None and audience == "default":
+                 else "all") if audience is None else meetlib.normalise_scope(audience)
+        if scope == "test" and (not is_bot_developer(ctx.author) or role is not None):
+            await ctx.send("Test meetings are only for the Bot Developer and bot; "
+                           "leave `role` blank.", ephemeral=True)
+            return
+        if role is not None and audience is None:
             scope = "custom"
         try:
             planned = await meetlib.resolve_audience(
@@ -1204,7 +1216,7 @@ class Meetings(commands.Cog):
         interaction = getattr(ctx, "interaction", None)
         if interaction is not None and not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
-        channel = await self._make_meeting_channel(ctx, audience)
+        channel = await self._make_meeting_channel(ctx, scope)
         if channel is None:
             return
         item = {"guild_id": ctx.guild.id, "channel_id": channel.id,
@@ -1227,6 +1239,11 @@ class Meetings(commands.Cog):
         await ctx.send(f"Meeting scheduled for <t:{int(start.timestamp())}:F>. "
                        f"The room will open at start time. ID: `{channel.id}`",
                        ephemeral=True)
+
+    @meeting_schedule.autocomplete("audience")
+    async def _schedule_audience_choices(self, interaction: discord.Interaction,
+                                         current: str) -> list[app_commands.Choice[str]]:
+        return self._audience_choices(interaction.user, current)
 
     @meeting.command(name="cancel", description="Cancel a scheduled meeting.")
     @commands.guild_only()
@@ -1263,11 +1280,9 @@ class Meetings(commands.Cog):
     @commands.guild_only()
     @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True,
-                                  connect=True, move_members=True)
+                                  connect=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
-                            audience: Literal["default", "bureau", "chiefs",
-                                              "cell members", "all members",
-                                              "custom", "my cell"] = "default",
+                            audience: str | None = None,
                             minutes: int | None = None,
                             also: commands.Greedy[discord.Member] = None,
                             role: discord.Role | None = None):
@@ -1284,9 +1299,10 @@ class Meetings(commands.Cog):
         **All members** — every human member in the server.
         **My cell** — the organizer's cell plus bureau.
         **Custom** — only the people you pick from the dropdown that appears.
+        **Test** — only the Bot Developer and this bot (developer only).
 
-        `default` selects everyone for bureau organizers and the organizer's
-        cell for chiefs. `role` selects everyone holding a Discord role.
+        Omitting `audience` selects everyone for bureau organizers and the
+        organizer's cell for chiefs. `role` selects everyone holding a Discord role.
         `minutes` is the planned length, recorded on the meeting so the report
         can show planned vs actual. `also` adds members who don't qualify for
         the audience (guests, visiting members) — it only works as a text
@@ -1294,7 +1310,7 @@ class Meetings(commands.Cog):
         once; in the Discord UI, use **Custom** and pick them there.
         """
         scope = ("my_cell" if is_cell_chief(ctx.author) and not is_meeting_admin(ctx.author)
-                 else "all") if audience == "default" else meetlib.normalise_scope(audience)
+                 else "all") if audience is None else meetlib.normalise_scope(audience)
         if scope is None:
             await ctx.send(
                 f"❓ Unknown audience `{audience}`. Pick one of: "
@@ -1302,6 +1318,11 @@ class Meetings(commands.Cog):
             return
         if minutes is not None and not 1 <= minutes <= 24 * 60:
             await ctx.send("❌ `minutes` must be between 1 and 1440.")
+            return
+        if scope == "test" and (not is_bot_developer(ctx.author)
+                                or role is not None or also):
+            await ctx.send("Test meetings are only for the Bot Developer and bot; "
+                           "leave `role` and `also` blank.", ephemeral=True)
             return
 
         # `ctx.typing()` only shows a channel typing indicator — it does NOT
@@ -1321,7 +1342,7 @@ class Meetings(commands.Cog):
         extras = [m for m in (also or []) if not m.bot]
         if role is not None:
             extras.extend(m for m in role.members if not m.bot)
-            if audience == "default":
+            if audience is None:
                 scope = "custom"
         extras = list({member.id: member for member in extras}.values())
         extra_limit = 90 if role is not None else config.MEETING_MAX_EXTRA_MEMBERS
@@ -1512,6 +1533,11 @@ class Meetings(commands.Cog):
                                          "granted": [], "title": "Meeting"}, occupant)
         await self._invite_audience(channel, audience_members)
         self._watch_empty(channel)
+
+    @meeting_start.autocomplete("audience")
+    async def _start_audience_choices(self, interaction: discord.Interaction,
+                                      current: str) -> list[app_commands.Choice[str]]:
+        return self._audience_choices(interaction.user, current)
 
     @meeting.command(name="end", aliases=["finish"],
                      description="End the running meeting and restore the channel.")
@@ -1837,7 +1863,7 @@ class Meetings(commands.Cog):
                      description="Create a private voice room with you + the picked members.")
     @commands.guild_only()
     @require_meeting_creator()
-    @commands.bot_has_permissions(manage_channels=True, move_members=True)
+    @commands.bot_has_permissions(manage_channels=True)
     async def meeting_create(self, ctx, members: commands.Greedy[discord.Member] = None, *,
                              name: str | None = None):
         """Spin up a private voice room only the invitees can enter.

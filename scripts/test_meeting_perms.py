@@ -29,7 +29,7 @@ DEPLOYED = os.path.exists(ROOT / ".env") and bool(os.environ.get("BOT_TOKEN")) \
 
 import config  # noqa: E402
 from cogs._perms import (  # noqa: E402
-    is_cell_chief, is_it_chief, is_meeting_admin, is_meeting_creator,
+    is_bot_developer, is_cell_chief, is_it_chief, is_meeting_admin, is_meeting_creator,
     is_meeting_report_viewer, meeting_tier, role_key,
 )
 
@@ -205,6 +205,12 @@ def main() -> int:
         if DEPLOYED:
             check(role_key(role), is_meeting_admin(_Member(role)), True)
     check("Bot Developer", is_meeting_admin(_Member("「👨‍💻」Bot Developer")), False)
+    check("Bot Developer can run test meetings",
+          is_bot_developer(_Member(config.ROLE_BOT_DEVELOPER)), True)
+    check("Bot Developer can create meetings",
+          is_meeting_creator(_Member(config.ROLE_BOT_DEVELOPER)), True)
+    check("server developer cannot use test audience",
+          is_bot_developer(_Member("Server Developer")), False)
 
     print("\n...and nobody else, including the wider bot-staff tier")
     # Unit heads run their unit's work but are audience, not organisers.

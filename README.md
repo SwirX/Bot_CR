@@ -183,9 +183,9 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `remove <n>` | requester / host / staff | Remove queue song #n |
 | `radio <station>` | everyone | Stream any live internet radio station by name |
 | `stop`, `loop`, `volume <1-100>`, `nowplaying` | everyone | Music control |
-| `meeting create [name]`, `meeting endroom` | bureau or cell chief | Legacy private VC room without attendance tracking; use `meeting start` for tracked meetings |
-| `meeting start [<#channel>] [audience] [minutes] [role]` | bureau or cell chief | Start a tracked meeting. Defaults to everyone for bureau, or the chief's cell and bureau for a chief. A role can supply a custom audience |
-| `meeting schedule <when> [audience] [minutes] [role]` | bureau or cell chief | Schedule a private room with an ISO timestamp and timezone offset |
+| `meeting create [name]`, `meeting endroom` | bureau, cell chief or Bot Developer | Private VC room without attendance tracking; use `meeting start` for tracked meetings |
+| `meeting start [<#channel>] [audience] [minutes] [role]` | bureau, cell chief or Bot Developer | Start a tracked meeting. Defaults to everyone for bureau, or the chief's cell and bureau for a chief. A role can supply a custom audience |
+| `meeting schedule <when> [audience] [minutes] [role]` | bureau, cell chief or Bot Developer | Schedule a private room with an ISO timestamp and timezone offset |
 | `meeting cancel <channel-id>` | organizer or bureau | Cancel a scheduled meeting |
 | `meeting end` | organizer or bureau | End the meeting; restore the channel, or delete it if the bot made it |
 | `meeting lock` | meeting admin | Deny re-entry to everyone who joined and left |
@@ -473,7 +473,7 @@ to monitor it. A bot-created room closes after ten minutes without people.
 
 ### 🚪 Who can run it
 
-**Archon, President, Vice President, Manager and cell chiefs** can create
+**Archon, President, Vice President, Manager, cell chiefs and the Bot Developer** can create
 meetings. **Only the bureau offices and IT chief** can see meeting history,
 attendance, absences and CSV reports. Other members receive no history response
 or report.
@@ -483,6 +483,7 @@ or report.
 ```
 /meeting start minutes:60 audience:chiefs
 /meeting start role:@IT-Unit
+/meeting start audience:test
 /meeting schedule when:2026-11-05T18:00+01:00 audience:cell-members
 ```
 
@@ -502,22 +503,27 @@ return to, so `/meeting end` **deletes it** rather than restoring permissions
 onto it. Every failure path after creation removes the channel again, so a
 rejected audience or a failed write cannot leave an orphan behind.
 
-`audience` is a **dropdown**:
+`audience` is optional. With it omitted, bureau organizers invite everyone;
+cell chiefs invite their cell and the bureau. Type in the audience field to see
+suggestions. The `Test` suggestion appears only for the Bot Developer:
 
 | Audience | Who can join |
 | --- | --- |
-| `Default` | everyone for bureau organizers; own cell and bureau for cell chiefs |
 | `Bureau` | Archon, President, VP and Manager |
 | `Chiefs` | bureau and every cell chief |
 | `Cell members` | bureau, every chief and every cell member |
 | `All members` | every human server member |
 | `Custom` | only the people you pick from the dropdown that appears |
 | `My cell` | the organizer's cell and bureau |
+| `Test` | Bot Developer only; the bot also joins the room |
 
 `Custom` ignores roles entirely — the people you pick are the whole audience, so
 a meeting cannot quietly widen itself to whoever happens to hold a qualifying
 role. The bot adds whoever ran the command, since no role would have put them in
 a custom audience and they need to be able to hear the meeting they opened.
+After choosing `Custom`, use the private member picker and press **Confirm**.
+Only those people and the organizer receive access or an invitation. `Test`
+is restricted to the Bot Developer and never invites the bureau or other cells.
 
 Extra members can be tagged on top of a role-based audience with `also:@a @b`
 (capped by `MEETING_MAX_EXTRA_MEMBERS`). `also` is **text-command only**:

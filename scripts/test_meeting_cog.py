@@ -473,6 +473,20 @@ def _check_command_tree(*, check) -> None:
     payload = roots[0].to_dict(bot.tree)
     check("and all of them reach Discord",
           {o["name"] for o in payload.get("options", [])}, want)
+    for command_name in ("start", "schedule"):
+        command_option = next(o for o in payload["options"]
+                              if o["name"] == command_name)
+        audience_option = next(o for o in command_option["options"]
+                               if o["name"] == "audience")
+        check(f"{command_name} offers role-aware audience suggestions",
+              audience_option.get("autocomplete"), True)
+    developer = _Member("Developer", 8, config.ROLE_BOT_DEVELOPER)
+    manager = _Member("Manager", 1, config.ROLE_MANAGER)
+    developer_choices = {c.value for c in Meetings._audience_choices(developer, "")}
+    manager_choices = {c.value for c in Meetings._audience_choices(manager, "")}
+    check("no redundant default audience choice", "default" in manager_choices, False)
+    check("developer sees test audience", "test" in developer_choices, True)
+    check("non-developer does not see test audience", "test" in manager_choices, False)
 
 
 def main() -> int:
@@ -977,7 +991,7 @@ def main() -> int:
     s = _FakeStore()
     c = build_cog(s, [mgr, chief, cell, other])
     start_meeting(c, s, _Ctx(chief, guild=c._test_channel.guild),
-                  c._test_channel, audience="default")
+                  c._test_channel, audience=None)
     check("chief default scope", s.created[0]["scope"], "my_cell")
     check("chief default audience", set(s.created[0]["expected"]),
           {"1", "2", "6"})
@@ -986,10 +1000,32 @@ def main() -> int:
     s = _FakeStore()
     c = build_cog(s, [mgr, cell, other])
     start_meeting(c, s, _Ctx(archon, guild=c._test_channel.guild),
-                  c._test_channel, audience="default")
+                  c._test_channel, audience=None)
     check("bureau default scope", s.created[0]["scope"], "all")
     check("bureau default audience", set(s.created[0]["expected"]),
           {"1", "2", "3"})
+
+    print("\n/meeting start isolates the Bot Developer test audience")
+    developer = _Member("Developer", 8, config.ROLE_BOT_DEVELOPER)
+    s = _FakeStore()
+    c = build_cog(s, [developer, mgr, cell, other])
+    start_meeting(c, s, _Ctx(developer, guild=c._test_channel.guild),
+                  c._test_channel, audience="test")
+    check("test meeting created", len(s.created), 1)
+    check("test scope", s.created[0]["scope"], "test")
+    check("only developer is expected", s.created[0]["expected"], ["8"])
+    check("no cell member is granted access",
+          any(target == 2 for target, _ in c._test_channel.writes), False)
+    check("no ordinary member is granted access",
+          any(target == 3 for target, _ in c._test_channel.writes), False)
+
+    s = _FakeStore()
+    c = build_cog(s, [mgr, cell, other])
+    sent = start_meeting(c, s, _Ctx(mgr, guild=c._test_channel.guild),
+                         c._test_channel, audience="test")
+    check("non-developer cannot start test meeting", len(s.created), 0)
+    check("non-developer sees rejection",
+          "only for the Bot Developer" in (sent[-1]["content"] or ""), True)
 
     print("\n/meeting start refuses an audience nobody qualifies for")
     s = _FakeStore()
