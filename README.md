@@ -82,8 +82,9 @@ command works as both `!prefix` and `/slash`.
   `/meeting lock` denies re-entry to leavers until an admin calls
   `/meeting unlock @member` by name. See
   [Meetings](#-meetings-meeting-start--end) below.
-- 🤖 **Private meeting rooms** — `/meeting create [name]` spins up a private VC
-  (auto-deleted when empty) and offers a dropdown to pick who gets in;
+- 🤖 **Private meeting rooms** — organizers can use `/meeting create [name]` for
+  a private VC without attendance tracking (auto-deleted when empty), with a
+  dropdown to pick who gets in;
   `/meeting endroom` cleans it up.
 - 🔐 **Club permission scopes** — an authorization layer instead of scattered
   role checks: every club command is gated on a scope (`tasks.create`,
@@ -182,7 +183,7 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `remove <n>` | requester / host / staff | Remove queue song #n |
 | `radio <station>` | everyone | Stream any live internet radio station by name |
 | `stop`, `loop`, `volume <1-100>`, `nowplaying` | everyone | Music control |
-| `meeting create [name]`, `meeting endroom` | everyone | Private VC room, with a dropdown to pick who gets in (aliases: `closeroom`) |
+| `meeting create [name]`, `meeting endroom` | bureau or cell chief | Legacy private VC room without attendance tracking; use `meeting start` for tracked meetings |
 | `meeting start [<#channel>] [audience] [minutes] [role]` | bureau or cell chief | Start a tracked meeting. Defaults to everyone for bureau, or the chief's cell and bureau for a chief. A role can supply a custom audience |
 | `meeting schedule <when> [audience] [minutes] [role]` | bureau or cell chief | Schedule a private room with an ISO timestamp and timezone offset |
 | `meeting cancel <channel-id>` | organizer or bureau | Cancel a scheduled meeting |

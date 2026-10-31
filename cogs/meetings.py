@@ -1816,6 +1816,7 @@ class Meetings(commands.Cog):
     @meeting.command(name="create",
                      description="Create a private voice room with you + the picked members.")
     @commands.guild_only()
+    @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, move_members=True)
     async def meeting_create(self, ctx, members: commands.Greedy[discord.Member] = None, *,
                              name: str | None = None):
@@ -1851,6 +1852,13 @@ class Meetings(commands.Cog):
         try:
             channel = await guild.create_voice_channel(
                 f"🔒 {room_name}", category=category,
+                overwrites={
+                    guild.default_role: discord.PermissionOverwrite(
+                        view_channel=False, connect=False),
+                    guild.me: discord.PermissionOverwrite(
+                        view_channel=True, connect=True,
+                        manage_channels=True, move_members=True),
+                },
                 reason=f"Private meeting room by {author.name}",
             )
         except discord.Forbidden:

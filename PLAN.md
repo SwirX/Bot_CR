@@ -38,6 +38,8 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
   repository notes, and this plan.
 - Follow-up `fix(meetings): validate scheduled organizers and audiences` closes
   the role-revocation and custom-role size cases found in final review.
+- Follow-up `fix(meetings): restrict legacy private rooms to organizers` closes
+  the untracked `/meeting create` permission gap and hides rooms at creation.
 - Keep the branch available for review; integration into `nightly` follows
   deployment testing against Discord and Appwrite.
 
