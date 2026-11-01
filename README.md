@@ -37,8 +37,10 @@ command works as both `!prefix` and `/slash`.
   refreshed every `DASHBOARD_REFRESH_SECONDS` (default 60 s). No more
   full-channel history scans.
 - 🛡️ **Moderation** — `/kick`, `/ban`, `/unban`, `/timeout`, `/untimeout`,
-  `/mute`, `/unmute`, `/warn`, `/modlog`, and `/del`. Every action is recorded
-  in the Appwrite modlog with the moderator, target, reason and timestamp.
+  `/mute`, `/unmute`, `/warn`, `/modlog`, `/del`, plus `/move` and `/massmove`
+  for voice (bureau offices + IT Lead + bot operator only). Every action is
+  recorded in the Appwrite modlog with the moderator, target, reason and
+  timestamp.
 - 🔑 **Bot-staff override** — the Archon, bot-developer and bot-admin roles
   (config `ROLE_ARCHON` / `ROLE_BOT_DEVELOPER` / `ROLE_BOT_ADMIN`) can run
   every staff command without needing the guild permissions, exactly like the
@@ -126,7 +128,10 @@ command works as both `!prefix` and `/slash`.
 - 🔬 **Robotics fun** — `/robot` telemetry readout and a multiple-choice
   `/quiz` (engineering + robotics questions).
 - 🛡️ **Channel controls** — `/slowmode`, `/lock`, `/unlock`.
-- 👋 **Welcome & goodbye**, 📜 **rules board**, and 🎲 **fun commands**
+- 👋 **Welcome & goodbye**, 📜 **rules board** (posted once into
+  `CHANNEL_RULES`; on every boot the bot reuses the existing post when it is
+  already current, edits it in place when the text changed, and sweeps stray
+  duplicates), and 🎲 **fun commands**
   (8ball, coinflip, dice, slap, hug, joke, fact, compliment, rps, ship,
   choose, reverse, clap, roast, quote, website).
 
@@ -168,6 +173,8 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `ban <member> [reason]`, `unban <id>` | staff | Ban / unban |
 | `fixname <member>` | staff | Re-apply cursive nickname |
 | `modlog [limit]` | staff | Recent moderation actions |
+| `move <member> <vc>` | bureau + IT Lead + bot operator | Move one connected member into a voice channel |
+| `massmove <vc> [source-vc]` | bureau + IT Lead + bot operator | Move everyone (bots excepted) from one voice channel to another; musical bots stay behind |
 | `addrole <role> <@members...>` | staff | Give a role |
 | `removerole <role> <@members...>` | staff | Take a role away |
 | `setlead <role> <@members...>` | staff | Replace leadership holders (Lead/VP/President) |
@@ -662,7 +669,7 @@ cogs/                     one file per feature; auto-discovered
   engagement.py           XP & levels, daily challenges, level-reward roles
   reminders.py            Appwrite-persisted /remind me DM scheduler
   fun.py                  lighthearted commands (+ robot status, quiz, account-age flex)
-  moderation.py           kick/ban/timeout/warn + modlog + lock/slowmode/unlock
+  moderation.py           kick/ban/timeout/warn + move/massmove (voice) + modlog + lock/slowmode/unlock
   welcome.py / goodbye.py join / leave messages
   rules.py                rules board
   general.py              hello / ping / custom help
