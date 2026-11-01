@@ -10,7 +10,7 @@ from data.store import store
 from data.store import StoreError
 from cogs.onboarding import cursive_nickname
 from cogs._ui import ConfirmView, PaginatorView
-from cogs._perms import is_bot_admin, mod_perms
+from cogs._perms import is_bot_admin, mod_perms, require_move_perms
 
 LOG = logging.getLogger("bot.moderation")
 
@@ -185,7 +185,83 @@ class Moderation(commands.Cog):
     @mod_perms(moderate_members=True)
     
     async def unmute(self, ctx, member: discord.Member, *, reason: str = "Mute lifted"):
-        await self._remove_timeout(ctx, member, reason, "unmute", "Unmuted")
+        await self._remove_timeout(ctx, member, reason, "unmute", "Unmute lifted")
+
+    # ── voice moves ────────────────────────────────────────────
+    def _can_reach(self, ctx, member: discord.Member) -> bool:
+        """Hierarchy guard: never move someone ranked at or above the invoker."""
+        return (member == ctx.author or is_bot_admin(ctx.author)
+                or member.top_role < ctx.author.top_role)
+
+    async def _move_one(self, ctx, member: discord.Member,
+                        channel: discord.VoiceChannel) -> bool:
+        """Move a single connected member into `channel`; False when refused."""
+        if member == self.bot.user:
+            await ctx.send("I'm staying right here. 🤖")
+            return False
+        if not self._can_reach(ctx, member):
+            await ctx.send(f"⛔ **{member.display_name}** is ranked at or above you.")
+            return False
+        if member.voice is None:
+            await ctx.send(f"⚠️ **{member.display_name}** isn't in a voice channel.")
+            return False
+        try:
+            await member.move_to(channel, reason=f"move by {ctx.author.name}")
+            return True
+        except discord.Forbidden:
+            await ctx.send("⛔ I need *Move Members* in both the source and "
+                           "destination voice channels.")
+            return False
+
+    @commands.hybrid_command(name="move",
+                             description="Move a member into another voice channel.")
+    @commands.guild_only()
+    @require_move_perms()
+    async def move(self, ctx, member: discord.Member, channel: discord.VoiceChannel):
+        """Move one connected member: tag them, then the destination channel."""
+        if member.voice and member.voice.channel.id == channel.id:
+            await ctx.send(f"ℹ️ **{member.display_name}** is already in {channel.name}.")
+            return
+        if await self._move_one(ctx, member, channel):
+            await ctx.send(f"📻 Moved **{member.display_name}** → **{channel.name}**.")
+            await self._log(ctx, "move", member, f"→ {channel.name}")
+
+    @commands.hybrid_command(name="massmove",
+                             description="Move everyone from one voice channel to another.")
+    @commands.guild_only()
+    @require_move_perms()
+    async def massmove(self, ctx, to_channel: discord.VoiceChannel,
+                       from_channel: discord.VoiceChannel = None):
+        """Move a whole voice channel: `!massmove <dest> [source]`.
+
+        The source defaults to the channel you are currently in. Music and
+        other bot clients are deliberately left behind so playback survives.
+        """
+        source = from_channel or (ctx.author.voice.channel if ctx.author.voice else None)
+        if source is None:
+            await ctx.send("⚠️ Join a voice channel or pass the source one: "
+                           "`!massmove <dest> <source>`.")
+            return
+        me = source.guild.me
+        for c in (source, to_channel):
+            if not c.permissions_for(me).move_members:
+                await ctx.send(f"⛔ I don't have *Move Members* in <#{c.id}>.")
+                return
+        if source.id == to_channel.id:
+            await ctx.send("ℹ️ Those are the same channel — nothing to move.")
+            return
+        targets = [m for m in source.members if not m.bot]
+        moved = skipped = 0
+        for member in targets:
+            if await self._move_one(ctx, member, to_channel):
+                moved += 1
+            else:
+                skipped += 1
+        label = f"**{source.name} → {to_channel.name}**"
+        suffix = f" ({skipped} skipped)" if skipped else ""
+        await ctx.send(f"📻 Moved **{moved}** member(s) — {label}{suffix}")
+        if moved:
+            await self._log(ctx, "massmove", ctx.author, f"{source.name} → {to_channel.name}")
 
     # ── warn ───────────────────────────────────────────────────
     @commands.hybrid_command(name="warn", description="Warn a member (recorded in the modlog).")
