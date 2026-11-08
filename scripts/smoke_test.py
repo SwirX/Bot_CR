@@ -27,7 +27,7 @@ EXPECTED_COMMANDS = {
     "challenge",
     "choose", "claim", "clap", "close", "coinflip", "competition",
     "competitions", "complete", "compliment", "create", "crypto",
-    "dashboard", "define", "del", "dice", "edit", "end", "endroom", "event", "events",
+    "dashboard", "define", "del", "deletemessage", "dice", "edit", "end", "endroom", "event", "events",
     "fact", "fixname", "github", "hierarchy", "hello", "help", "history",
     "hug", "joke", "kick", "language", "last", "leaderboard", "levelrewards", "link", "linkmember", "list", "lock", "loop", "lyrics",
     "mclink", "mcotp", "mcrestart", "mcsession", "mcstart", "mcstop", "meeting", "meme", "minecraft", "modlog", "mute", "notifications", "nowplaying",
@@ -133,6 +133,11 @@ def main() -> int:
             loaded += 1
 
         names = {c.name for c in bot.walk_commands()}
+        admin_group = bot.tree.get_command("admin")
+        if not isinstance(admin_group, discord.app_commands.Group) or not admin_group.get_command(
+                "deletemessage"):
+            print("✗ /admin deletemessage is missing")
+            raise SystemExit(1)
         mc_group = bot.tree.get_command("mc")
         if not isinstance(mc_group, discord.app_commands.Group) or not mc_group.commands:
             print("✗ Minecraft economy /mc group is missing")

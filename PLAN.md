@@ -136,3 +136,10 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Assign New Member, selected gender, member and verified roles after saving the name; remove the pending role only after those grants succeed.
 - Send the success response before nonessential profile synchronisation and bound the latter. Repair members stuck with a pending role after saving name and gender.
 - History: `fix/sx-onboarding-role-completion` from `nightly`, then merge to `nightly` and `master` with `--no-ff`, deploy, and repair affected members.
+
+## Delete a message by ID
+- Add `/admin deletemessage` and `!admin deletemessage` with a text ID and an optional target channel; default to the current channel. The existing group avoids Discord's 100-command limit.
+- Require bot staff or target-channel message management and read access; report invalid IDs, missing messages and permission failures privately when invoked as a slash command.
+- Verify successful deletion, permissions and failure handling with mocked Discord interactions; check command registration, deploy and inspect startup.
+- History: `feat/sx-delete-message-id` from `nightly`, then merge to `nightly` and `master` with `--no-ff` and deploy.
+- Verification: Six deletion tests, onboarding regression tests, lint and cog/command smoke checks pass; no live message is deleted during testing.
