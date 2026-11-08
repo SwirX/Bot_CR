@@ -9,13 +9,18 @@ os.environ.setdefault("APPWRITE_API_KEY", "y")
 from cogs.details_reminder import DetailsReminder, needs_reminder  # noqa: E402
 
 EXPECTED_MESSAGE = (
-    "Salam! Xfnak bli ba9i ma3titinax smiya dyalk kamla, clicki 3la botona li l7t "
-    "bax tdkhlha, ghadi n3tiwk wa7d smiya cursive o mnha n9dro ndiro lik verification "
-    "fl server, t9dr tgul 7ta wax dri ula bnt o 3idmilad dyalk bax nsifto msg fl server "
+    "Salam! Xfnak bli ba9i ma3titinax smiya dyalk kamla,\n"
+    "clicki 3la botona li l7t bax tdkhlha,\n"
+    "ghadi n3tiwk wa7d smiya cursive o mnha n9dro ndiro lik verification fl server,\n"
+    "t9dr tgul 7ta wax dri ula bnt\n"
+    "o 3idmilad dyalk bax nsifto msg fl server "
     "mnin ywsl bax nbarko lik\n\n\n"
-    "سلام! شفناك بلي باقي ما عطيتيناش سميتك كاملة، كليكي على bouton اللي لتحت "
-    "باش تدخلها، غادي نعطيوك واحد السمية cursive ومنها نقدرو نديرو ليك verification "
-    "فال serveur، تقدر تقول حتى واش دري ولا بنت وعيد ميلاد ديالك باش نصيفطو message فال serveur "
+    "سلام! شفناك بلي باقي ما عطيتيناش سميتك كاملة،\n"
+    "كليكي على bouton اللي لتحت باش تدخلها،\n"
+    "غادي نعطيوك واحد السمية cursive\n"
+    "ومنها نقدرو نديرو ليك verification فال serveur،\n"
+    "تقدر تقول حتى واش دري ولا بنت\n"
+    "وعيد ميلاد ديالك باش نصيفطو message فال serveur\n"
     "منين يوصل باش نباركو ليك"
 )
 

@@ -180,3 +180,9 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Verify the exact content and onboarding button, send an updated preview to the same requested user, then deploy without sending a bulk reminder.
 - History: `fix/sx-darija-french-words` from `nightly`, then merge into `nightly` and `master` with `--no-ff` and deploy.
 - Verification: Three reminder tests and lint pass; an updated preview was sent to the requested user. No bulk reminder was sent.
+
+## Reminder line breaks
+- Split both Darija versions into shorter lines, preserving the French words and two blank lines between versions.
+- Verify the message and send a preview to the previously specified user, then deploy without sending bulk reminders.
+- History: `fix/sx-darija-line-breaks` from `nightly`, then merge to `nightly` and `master` with `--no-ff` and deploy.
+- Verification: Reminder tests and lint pass, and a preview was sent to the requested user. No bulk reminders were sent.
