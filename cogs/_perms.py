@@ -203,6 +203,39 @@ def require_meeting_admin():
     return commands.check(predicate)
 
 
+# ── Voice moves ────────────────────────────────────────────────────────
+_IT_LEAD = re.compile(r"\bit lead\b")
+
+
+def can_move_members(member: discord.Member) -> bool:
+    """True for the bureau offices, the IT chief/lead and the bot operator.
+
+    The four bureau offices come from :func:`is_meeting_admin` (Archon,
+    President, Vice President, Manager); ``is_it_chief`` recognises a
+    "Head of IT Unit" role, and the plain "IT Lead" name is accepted here
+    too (word-boundary match, so "Digit Lead" cannot slip through) since
+    it is the same office.
+    """
+    if getattr(member, "bot", False):
+        return False
+    if is_meeting_admin(member) or is_it_chief(member):
+        return True
+    if member.id in config.BOT_ADMIN_USER_IDS:
+        return True
+    return any(_IT_LEAD.search(key) for key in _role_keys(member))
+
+
+def require_move_perms():
+    """Gate a command on :func:`can_move_members`."""
+
+    async def predicate(ctx):
+        if can_move_members(ctx.author):
+            return True
+        raise commands.MissingPermissions(["voice.move_members"])
+
+    return commands.check(predicate)
+
+
 def mod_perms(**perms):
     """Permission gate that bot-staff bypass.
 

@@ -5,11 +5,11 @@ import discord
 from discord.ext import commands
 
 import config
-from data.store import store
-from data.store import StoreError
-from cogs.birthday_tracker import announce_birthday, parse_birthday
+from cogs._member_identity import member_for_interaction
 from cogs._perms import mod_perms
+from cogs.birthday_tracker import announce_birthday, parse_birthday
 from data.names import decursive, has_cursive
+from data.store import StoreError, store
 
 LOG = logging.getLogger("bot.onboarding")
 
@@ -107,10 +107,17 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        member = interaction.user
         name = self.full_name.value.strip()
         if not name:
-            await interaction.response.send_message("⚠️ Please enter your real full name.", ephemeral=True)
+            await interaction.response.send_message(
+                "⚠️ Please enter your real full name.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        member = await member_for_interaction(interaction)
+        if member is None:
+            await interaction.followup.send(
+                "⚠️ I couldn't find you in the club server. Please contact an admin.",
+                ephemeral=True)
             return
 
         nickname = cursive_nickname(name)
@@ -125,7 +132,7 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
                 LOG.warning("Failed to set nickname for %s: %s", member, exc)
 
         # Grant verified roles, drop the temp role.
-        guild = interaction.guild
+        guild = member.guild
         temp_role = discord.utils.get(guild.roles, name=config.ROLE_TEMP)
         verified_role = discord.utils.get(guild.roles, name=config.ROLE_VERIFIED)
         member_role = discord.utils.get(guild.roles, name=config.ROLE_MEMBER)
@@ -142,8 +149,8 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
                     await member.add_roles(role, reason="Onboarding verified")
                 else:
                     await member.remove_roles(role, reason="Verification complete")
-        except discord.Forbidden:
-            LOG.warning("Missing permissions to update roles for %s", member)
+        except discord.HTTPException as exc:
+            LOG.warning("Failed to update roles for %s: %s", member, exc)
 
         # Persist the verified profile.
         try:
@@ -165,8 +172,9 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
         ok_name = nickname or name
         reply = f"✅ Verified! Your nickname is now **{ok_name}**."
         if not nickname_applied:
-            reply += "\n(⚠️ I couldn't change your nickname — I need the *Manage Nicknames* permission.)"
-        await interaction.response.send_message(reply, ephemeral=True)
+            reply += ("\n(⚠️ I couldn't change your nickname — I need the "
+                      "*Manage Nicknames* permission.)")
+        await interaction.followup.send(reply, ephemeral=True)
 
         await self.cog.prompt_birthday(member)
 

@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 import discord
 from discord.ext import commands
 
+from cogs._member_identity import member_for_interaction
 from cogs._perms import is_bot_admin
 from cogs.birthday_tracker import announce_birthday, parse_birthday
 from cogs.onboarding import cursive_nickname
@@ -165,31 +166,40 @@ class CollectNameModal(discord.ui.Modal, title="Your real full name"):
             await interaction.response.send_message(
                 "⚠️ Please enter your real full name.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True)
+        member = await member_for_interaction(interaction)
+        if member is None:
+            await interaction.followup.send(
+                "⚠️ I couldn't find you in the club server. Please contact an admin.",
+                ephemeral=True)
+            return
         nickname = cursive_nickname(name)
         applied = False
         try:
-            await interaction.user.edit(
+            await member.edit(
                 nick=nickname or None,
                 reason="Record sync: real name collected via DM",
             )
             applied = True
         except discord.Forbidden:
             LOG.warning("Cannot set nickname for %s (missing permission)",
-                        interaction.user.id)
+                        member.id)
         except discord.HTTPException as exc:
-            LOG.warning("Failed to set nickname for %s: %s", interaction.user.id, exc)
+            LOG.warning("Failed to set nickname for %s: %s", member.id, exc)
 
         try:
-            await self.store_ref.merge_member(interaction.user.id, {
+            await self.store_ref.merge_member(member.id, {
                 "real_name": name,
-                "display_name": nickname or interaction.user.display_name,
+                "display_name": nickname or member.display_name,
             })
         except StoreError as exc:
             LOG.error("recordsync: could not persist name for %s: %s",
-                      interaction.user.id, exc)
-            await interaction.response.send_message(
-                "⚠️ Saved locally but the club database rejected the write — "
-                "an admin has been notified.", ephemeral=True)
+                      member.id, exc)
+            detail = ("Your server nickname was updated, but your name was not saved"
+                      if applied else "Your name was not saved")
+            await interaction.followup.send(
+                f"⚠️ {detail} in the club database. Please contact an admin.",
+                ephemeral=True)
             return
 
         msg = f"✅ Thanks! Your name is now **{name}**."
@@ -198,7 +208,7 @@ class CollectNameModal(discord.ui.Modal, title="Your real full name"):
         elif nickname:
             msg += ("\n(⚠️ I couldn't change your nickname — I need the "
                     "*Manage Nicknames* permission.)")
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 class CollectNameView(discord.ui.View):
