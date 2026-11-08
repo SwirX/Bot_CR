@@ -174,3 +174,9 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Verify the full message and button; send a single preview to Discord user `407922956757499905`, then deploy. Do not send the bulk reminder.
 - History: `feat/sx-darija-reminder-preview` from `nightly`, then merge to `nightly` and `master` with `--no-ff` and deploy.
 - Verification: 19 focused tests and lint pass. One preview was sent to the requested Discord user; no bulk reminder was sent.
+
+## Darija with French words
+- Preserve French words in Latin letters in the Arabic-script version; keep the original Latin-script message and spacing.
+- Verify the exact content and onboarding button, send an updated preview to the same requested user, then deploy without sending a bulk reminder.
+- History: `fix/sx-darija-french-words` from `nightly`, then merge into `nightly` and `master` with `--no-ff` and deploy.
+- Verification: Three reminder tests and lint pass; an updated preview was sent to the requested user. No bulk reminder was sent.
