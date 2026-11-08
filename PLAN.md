@@ -105,3 +105,12 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
   `fix/sx-meeting-also-picker` from that branch for the option contract.
   Merge each into `nightly` with `--no-ff`, test, deploy, then merge `nightly`
   into `master` with `--no-ff`.
+
+## DM name form repair (2026-11-08)
+- Goal: A name submitted through a DM updates the member's server nickname and saves the name.
+- Constraint: Keep existing onboarding roles, birthday prompt, and record-sync data fields.
+- Acceptance: DM submissions resolve a guild member, acknowledge promptly, and report unavailable members or nickname permissions without crashing.
+- Steps: Add shared DM member resolution; update both name modals; verify with focused fake interactions and existing smoke checks; deploy and inspect service startup.
+- Risk: The bot may not have the member cached; fetch from the configured guild and give a useful error if Discord cannot find them.
+- History: `fix/sx-dm-name-form` forks from `nightly` for one focused fix commit, then merges into `nightly` with `--no-ff`. The integrated head is pushed and deployed to the existing OCI service.
+- Verification: 16 focused name/record-sync tests pass; all cogs load in the smoke test. Full pytest: 286 passed, one unrelated existing music-source tuple/list assertion failed.
