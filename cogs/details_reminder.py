@@ -12,18 +12,31 @@ from cogs.onboarding import StartOnboardingView
 from data.names import has_cursive
 
 LOG = logging.getLogger("bot.details_reminder")
-MESSAGE = (
+LATIN_MESSAGE = (
     "Salam! Xfnak bli ba9i ma3titinax smiya dyalk kamla, clicki 3la botona li l7t "
     "bax tdkhlha, ghadi n3tiwk wa7d smiya cursive o mnha n9dro ndiro lik verification "
     "fl server, t9dr tgul 7ta wax dri ula bnt o 3idmilad dyalk bax nsifto msg fl server "
     "mnin ywsl bax nbarko lik"
 )
+ARABIC_MESSAGE = (
+    "سلام! شفناك بلي باقي ما عطيتيناش سميتك كاملة، كليكي على البوطونة اللي لتحت "
+    "باش تدخلها، غادي نعطيوك واحد السمية كيرسيف ومنها نقدرو نديرو ليك ڤيريفيكاسيون "
+    "فالسيرفر، تقدر تقول حتى واش دري ولا بنت وعيد ميلاد ديالك باش نصيفطو مساج فالسيرفر "
+    "منين يوصل باش نباركو ليك"
+)
+MESSAGE = f"{LATIN_MESSAGE}\n\n\n{ARABIC_MESSAGE}"
 
 
 def needs_reminder(member, pending_id: int, new_member_id: int) -> bool:
     roles = {role.id for role in member.roles}
     return (not member.bot and pending_id in roles and new_member_id not in roles
             and not has_cursive(member.nick))
+
+
+def reminder_view(onboarding):
+    view = StartOnboardingView(onboarding)
+    view.start.label = "Dkhel ma3loumatk"
+    return view
 
 
 class DetailsReminder(commands.Cog):
@@ -71,9 +84,7 @@ class DetailsReminder(commands.Cog):
                 skipped += 1
                 continue
             try:
-                view = StartOnboardingView(onboarding)
-                view.start.label = "Dkhel ma3loumatk"
-                await current.send(MESSAGE, view=view)
+                await current.send(MESSAGE, view=reminder_view(onboarding))
                 sent += 1
             except discord.Forbidden:
                 blocked += 1

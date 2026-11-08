@@ -167,7 +167,7 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `slap <member>`, `hug <member>` | everyone | Social fun |
 | `del <n>` | staff | Bulk-delete up to 100 messages |
 | `admin deletemessage <message_id> [channel]` | bot staff or channel moderators | Delete one message by ID, in the current or selected channel |
-| `!detailsreminder` | bot admins | Privately remind pending members to complete their onboarding details |
+| `!detailsreminder` | bot admins | Privately remind pending members in Darija using Latin and Arabic script |
 | `warn <member> [reason]` | staff | Record a warning + modlog entry |
 | `timeout <member> <min> [reason]`, `untimeout` | staff | Timeouts |
 | `mute <member> [min]`, `unmute` | staff | Mute via Discord timeout |

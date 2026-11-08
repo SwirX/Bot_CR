@@ -168,3 +168,9 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Verify the exact message, button, eligibility checks and command registration; deploy without sending reminders.
 - History: `feat/sx-details-reminder` from `nightly`, then merge to `nightly` and `master` with `--no-ff` and deploy.
 - Verification: 19 reminder/onboarding tests pass, including the exact message and persistent button; the cog/command smoke test passes. No reminders were sent.
+
+## Darija reminder preview
+- Send one reminder with the requested Latin text followed by an Arabic-script Darija version, separated by two blank lines, using the same onboarding button.
+- Verify the full message and button; send a single preview to Discord user `407922956757499905`, then deploy. Do not send the bulk reminder.
+- History: `feat/sx-darija-reminder-preview` from `nightly`, then merge to `nightly` and `master` with `--no-ff` and deploy.
+- Verification: 19 focused tests and lint pass. One preview was sent to the requested Discord user; no bulk reminder was sent.
