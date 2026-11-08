@@ -1,4 +1,4 @@
-"""Private onboarding reminders for the C language lesson."""
+"""Private reminders to complete onboarding details."""
 
 import asyncio
 import logging
@@ -10,27 +10,14 @@ import config
 from cogs._perms import is_bot_admin
 from cogs.onboarding import StartOnboardingView
 from data.names import has_cursive
-from data.store import StoreError, store
 
-LOG = logging.getLogger("bot.lesson_reminder")
-MESSAGES = {
-    "fr": (
-        "Bonjour ! Pour participer au cours de langage C d’aujourd’hui, complète ta "
-        "vérification : utilise le bouton ci-dessous pour renseigner ton nom complet "
-        "et ton genre. La date de naissance est facultative.",
-        "Compléter mes informations",
-    ),
-    "en": (
-        "Hello! To take part in today's C language lesson, please finish verification: "
-        "use the button below to enter your full name and gender. Your birthday is optional.",
-        "Complete my details",
-    ),
-    "ar": (
-        "مرحباً! للمشاركة في درس لغة C اليوم، يرجى إكمال التحقق: اضغط على الزر أدناه "
-        "وأدخل اسمك الكامل وجنسك. تاريخ الميلاد اختياري.",
-        "إكمال معلوماتي",
-    ),
-}
+LOG = logging.getLogger("bot.details_reminder")
+MESSAGE = (
+    "Salam! Xfnak bli ba9i ma3titinax smiya dyalk kamla, clicki 3la botona li l7t "
+    "bax tdkhlha, ghadi n3tiwk wa7d smiya cursive o mnha n9dro ndiro lik verification "
+    "fl server, t9dr tgul 7ta wax dri ula bnt o 3idmilad dyalk bax nsifto msg fl server "
+    "mnin ywsl bax nbarko lik"
+)
 
 
 def needs_reminder(member, pending_id: int, new_member_id: int) -> bool:
@@ -39,19 +26,15 @@ def needs_reminder(member, pending_id: int, new_member_id: int) -> bool:
             and not has_cursive(member.nick))
 
 
-def reminder_text(lang: str | None) -> tuple[str, str]:
-    return MESSAGES.get(str(lang or "").strip().lower(), MESSAGES["fr"])
-
-
-class LessonReminder(commands.Cog):
+class DetailsReminder(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="rappelc")
+    @commands.command(name="detailsreminder")
     @commands.guild_only()
     @commands.max_concurrency(1, per=commands.BucketType.guild, wait=False)
-    async def remind_c_lesson(self, ctx):
-        """DM eligible pending members an onboarding reminder for today's C lesson."""
+    async def remind_details(self, ctx):
+        """DM eligible pending members a reminder to complete their details."""
         if not is_bot_admin(ctx.author):
             await ctx.send("Bot admins only.")
             return
@@ -64,7 +47,7 @@ class LessonReminder(commands.Cog):
         try:
             members = [member async for member in ctx.guild.fetch_members(limit=None)]
         except discord.HTTPException as exc:
-            LOG.warning("Could not fetch members for C lesson reminders: %s", exc)
+            LOG.warning("Could not fetch members for details reminders: %s", exc)
             await ctx.send("Couldn't fetch the server members; no reminders sent.")
             return
         targets = [member for member in members
@@ -72,13 +55,7 @@ class LessonReminder(commands.Cog):
         if not targets:
             await ctx.send("No pending members need a reminder.")
             return
-        try:
-            records = await asyncio.wait_for(store.get_members([m.id for m in targets]), timeout=20)
-            languages = {str(record["user_id"]): record.get("lang") for record in records}
-        except (StoreError, TimeoutError) as exc:
-            LOG.warning("Could not load reminder languages; using French: %s", exc)
-            languages = {}
-        await ctx.send(f"Sending C lesson reminders to up to {len(targets)} pending member(s).")
+        await ctx.send(f"Sending details reminders to up to {len(targets)} pending member(s).")
         sent = blocked = skipped = failed = 0
         for member in targets:
             try:
@@ -88,26 +65,25 @@ class LessonReminder(commands.Cog):
                 continue
             except discord.HTTPException as exc:
                 failed += 1
-                LOG.warning("Could not recheck C lesson reminder for %s: %s", member.id, exc)
+                LOG.warning("Could not recheck details reminder for %s: %s", member.id, exc)
                 continue
             if not needs_reminder(current, pending.id, new_member.id):
                 skipped += 1
                 continue
             try:
-                text, label = reminder_text(languages.get(str(current.id)))
                 view = StartOnboardingView(onboarding)
-                view.start.label = label
-                await current.send(text, view=view)
+                view.start.label = "Dkhel ma3loumatk"
+                await current.send(MESSAGE, view=view)
                 sent += 1
             except discord.Forbidden:
                 blocked += 1
             except discord.HTTPException as exc:
                 failed += 1
-                LOG.warning("C lesson reminder failed for %s: %s", member.id, exc)
+                LOG.warning("Details reminder failed for %s: %s", member.id, exc)
             await asyncio.sleep(0.6)
-        await ctx.send(f"C lesson reminders: {sent} sent, {blocked} DMs closed, "
+        await ctx.send(f"Details reminders: {sent} sent, {blocked} DMs closed, "
                        f"{skipped} no longer eligible, {failed} failed.")
 
 
 async def setup(bot):
-    await bot.add_cog(LessonReminder(bot))
+    await bot.add_cog(DetailsReminder(bot))
