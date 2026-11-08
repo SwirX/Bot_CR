@@ -571,6 +571,7 @@ class Store:
             "avatar_url": (duser or {}).get("avatar_url") or "",
             "joined_at": (duser or {}).get("joined_at") or None,
             "real_name": (ddata or {}).get("real_name") or "",
+            "gender": (ddata or {}).get("gender") or "",
             "birthday": (ddata or {}).get("birthday") or "",
             "birthday_full": (ddata or {}).get("birthday_full") or "",
             "verified": bool((ddata or {}).get("verified")),
@@ -609,7 +610,7 @@ class Store:
 
         # Discord-only stats/prefs -> discord_data.
         dd = {k: data[k] for k in (
-            "real_name", "verified", "birthday", "birthday_full", "lang",
+            "real_name", "gender", "verified", "birthday", "birthday_full", "lang",
             "last_xp_at", "notify_tasks", "notify_events",
             "notify_competitions", "notify_announcements") if k in data}
         if dd:
