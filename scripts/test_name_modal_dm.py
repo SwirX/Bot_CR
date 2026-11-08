@@ -26,8 +26,11 @@ def dm_interaction(*, cached=True):
         add_roles=AsyncMock(), remove_roles=AsyncMock(),
         guild=None,
     )
+    role_map = {role_id: SimpleNamespace(id=role_id, name=str(role_id)) for role_id in (
+        config.ROLE_NEW_MEMBER_ID, config.ROLE_MALE_ID, config.ROLE_FEMALE_ID)}
     guild = SimpleNamespace(
         id=123, roles=[SimpleNamespace(name=config.ROLE_VERIFIED)],
+        get_role=lambda role_id: role_map.get(role_id),
         get_member=lambda _id: member if cached else None,
         fetch_member=AsyncMock(return_value=member),
     )
@@ -71,8 +74,29 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
                          (member.id, {"real_name": "Ada Lovelace", "gender": "female"}))
         self.assertTrue(store.merge_member.await_args_list[1].args[1]["verified"])
         member.add_roles.assert_awaited_once()
+        assigned = member.add_roles.await_args.args
+        assigned_ids = [role.id for role in assigned if hasattr(role, "id")]
+        self.assertIn(config.ROLE_NEW_MEMBER_ID, assigned_ids)
+        self.assertIn(config.ROLE_FEMALE_ID, assigned_ids)
         cog.prompt_birthday.assert_not_awaited()
         self.assertIn("Verified", interaction.followup.send.await_args.args[0])
+
+    async def test_success_reply_precedes_secondary_database_sync(self):
+        interaction, member, guild = dm_interaction()
+
+        async def save(_member_id, values):
+            if values.get("verified"):
+                interaction.followup.send.assert_awaited_once()
+
+        store = SimpleNamespace(merge_member=AsyncMock(side_effect=save),
+                                maybe_auto_link_club_member=AsyncMock())
+        modal = NameModal(None)
+        modal.full_name._value = "Ada Lovelace"
+        modal.gender._value = "male"
+        with patch.object(config, "GUILD_ID", guild.id), patch("cogs.onboarding.store", store):
+            await modal.on_submit(interaction)
+        assigned_ids = [role.id for role in member.add_roles.await_args.args if hasattr(role, "id")]
+        self.assertIn(config.ROLE_MALE_ID, assigned_ids)
 
     async def test_birthday_is_optional_and_saved_when_entered(self):
         interaction, member, guild = dm_interaction()
@@ -140,6 +164,23 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.merge_member.await_count, 1)
         member.add_roles.assert_not_awaited()
         self.assertIn("couldn't change", interaction.followup.send.await_args.args[0])
+
+    async def test_role_failure_does_not_remove_pending_role(self):
+        interaction, member, guild = dm_interaction()
+        temp = SimpleNamespace(name=config.ROLE_TEMP, id=999)
+        guild.roles.append(temp)
+        member.roles.append(temp)
+        response = SimpleNamespace(status=403, reason="Forbidden")
+        member.add_roles.side_effect = discord.Forbidden(response, "permission denied")
+        store = SimpleNamespace(merge_member=AsyncMock())
+        modal = NameModal(None)
+        modal.full_name._value = "Ada Lovelace"
+        modal.gender._value = "female"
+        with patch.object(config, "GUILD_ID", guild.id), patch("cogs.onboarding.store", store):
+            await modal.on_submit(interaction)
+        member.remove_roles.assert_not_awaited()
+        self.assertEqual(store.merge_member.await_count, 1)
+        self.assertIn("couldn't finish", interaction.followup.send.await_args.args[0])
 
     async def test_invalid_gender_is_rejected(self):
         interaction, member, _ = dm_interaction()

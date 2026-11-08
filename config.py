@@ -55,6 +55,8 @@ CHANNEL_MAIN = _env("CHANNEL_MAIN", "「💬」main-chat")
 # ── Role names ─────────────────────────────────────────────────────────
 ROLE_TEMP = _env("ROLE_TEMP", "⛔ | None")
 ROLE_NEW_MEMBER_ID = _env("ROLE_NEW_MEMBER_ID", 1333538137091215380, cast=int)
+ROLE_MALE_ID = _env("ROLE_MALE_ID", 1333113498669940904, cast=int)
+ROLE_FEMALE_ID = _env("ROLE_FEMALE_ID", 1333113498669940903, cast=int)
 ROLE_VERIFIED = _env("ROLE_VERIFIED", "「📗」Verified")
 ROLE_MEMBER = _env("ROLE_MEMBER", "🌿 | LVL 01+")
 
