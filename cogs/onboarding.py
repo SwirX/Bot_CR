@@ -105,6 +105,11 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
         placeholder="e.g. Yasser El Joundi",
         max_length=64,
     )
+    gender = discord.ui.TextInput(
+        label="Gender (Male or Female)",
+        placeholder="Male or Female",
+        max_length=6,
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         name = self.full_name.value.strip()
@@ -112,7 +117,12 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
             await interaction.response.send_message(
                 "⚠️ Please enter your real full name.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
+        gender = self.gender.value.strip().lower()
+        if gender not in {"male", "female"}:
+            await interaction.response.send_message(
+                "⚠️ Please open the form again and enter Male or Female.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         member = await member_for_interaction(interaction)
         if member is None:
             await interaction.followup.send(
@@ -120,22 +130,46 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
                 ephemeral=True)
             return
 
+        try:
+            await store.merge_member(member.id, {"real_name": name, "gender": gender})
+        except StoreError as exc:
+            LOG.error("Failed to save onboarding profile for %s: %s", member.id, exc)
+            await interaction.followup.send(
+                "⚠️ I couldn't save your name. Please try again later or contact an admin.",
+                ephemeral=True)
+            return
+
         nickname = cursive_nickname(name)
-        nickname_applied = False
-        if nickname:
-            try:
-                await member.edit(nick=nickname, reason="Onboarding: real name → cursive nickname")
-                nickname_applied = True
-            except discord.Forbidden:
-                LOG.warning("Cannot change nickname of %s (permission missing)", member)
-            except discord.HTTPException as exc:
-                LOG.warning("Failed to set nickname for %s: %s", member, exc)
+        try:
+            await member.edit(nick=nickname, reason="Onboarding: real name → cursive nickname")
+        except discord.HTTPException as exc:
+            LOG.warning("Failed to set nickname for %s: %s", member.id, exc)
+            await interaction.followup.send(
+                "⚠️ Your name was saved, but I couldn't change your server nickname. "
+                "Please contact an admin to finish verification.", ephemeral=True)
+            return
 
         # Grant verified roles, drop the temp role.
         guild = member.guild
         temp_role = discord.utils.get(guild.roles, name=config.ROLE_TEMP)
         verified_role = discord.utils.get(guild.roles, name=config.ROLE_VERIFIED)
         member_role = discord.utils.get(guild.roles, name=config.ROLE_MEMBER)
+        if not verified_role:
+            LOG.error("Verified role is missing in guild %s", guild.id)
+            await interaction.followup.send(
+                "⚠️ Your name was saved, but verification is unavailable. Please contact an admin.",
+                ephemeral=True)
+            return
+
+        try:
+            await store.merge_member(member.id, {"display_name": nickname, "verified": True})
+        except StoreError as exc:
+            LOG.error("Failed to save verification for %s: %s", member.id, exc)
+            await interaction.followup.send(
+                "⚠️ Your name was saved, but verification could not be completed. "
+                "Please try again later or contact an admin.", ephemeral=True)
+            return
+
         try:
             role_updates = []
             if verified_role:
@@ -151,16 +185,10 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
                     await member.remove_roles(role, reason="Verification complete")
         except discord.HTTPException as exc:
             LOG.warning("Failed to update roles for %s: %s", member, exc)
-
-        # Persist the verified profile.
-        try:
-            await store.merge_member(member.id, {
-                "real_name": name,
-                "display_name": nickname or member.display_name,
-                "verified": True,
-            })
-        except StoreError:
-            LOG.error("Failed to persist onboarding profile for %s", member)
+            await interaction.followup.send(
+                "⚠️ Your name was saved, but I couldn't finish assigning your roles. "
+                "Please contact an admin.", ephemeral=True)
+            return
 
         # Best-effort join: match this Discord user to their club-registry row.
         try:
@@ -169,12 +197,8 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
             LOG.warning("onboarding: auto-link club member failed for %s",
                         member.id)
 
-        ok_name = nickname or name
-        reply = f"✅ Verified! Your nickname is now **{ok_name}**."
-        if not nickname_applied:
-            reply += ("\n(⚠️ I couldn't change your nickname — I need the "
-                      "*Manage Nicknames* permission.)")
-        await interaction.followup.send(reply, ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Verified! Your nickname is now **{nickname}**.", ephemeral=True)
 
         await self.cog.prompt_birthday(member)
 
@@ -279,7 +303,7 @@ class Onboarding(commands.Cog):
         try:
             await member.send(
                 "👋 Welcome to the Robotics Club server!\n\n"
-                "To finish onboarding, tap the button and enter your **real full name** "
+                "To finish onboarding, tap the button and enter your **real full name** and gender "
                 "— you'll get a fancy cursive nickname. 🎨",
                 view=StartOnboardingView(self),
             )

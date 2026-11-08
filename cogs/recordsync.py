@@ -166,7 +166,7 @@ class CollectNameModal(discord.ui.Modal, title="Your real full name"):
             await interaction.response.send_message(
                 "⚠️ Please enter your real full name.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         member = await member_for_interaction(interaction)
         if member is None:
             await interaction.followup.send(
