@@ -123,3 +123,11 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Risk: Appwrite column availability may lag creation; confirm it is available before deployment. Discord may reject nickname or role edits; report those failures to the member.
 - History: `feat/sx-onboarding-gender-verification` forks from `nightly` for one focused implementation commit, then merges into `nightly` with `--no-ff` and into `master` after verification.
 - Verification: The Appwrite column is available; the bot has nickname and role permissions and its onboarding roles are below it. Twenty focused tests and the smoke test pass; the broader suite passes 290 tests with one unrelated existing music test deselected.
+
+## Onboarding follow-up (2026-11-08)
+- Assign the New Member role on join and collect an optional birthday in the existing name and gender form.
+- Find users without a stored name using the live roster and database, then send one private form invitation per eligible human member. Abort the sweep on database errors.
+- Repair historical welcome messages where departed members' mentions no longer resolve; retain valid mentions for current members and suppress notifications during edits.
+- Verify role assignment, form validation, and sweep selection with offline tests; deploy before the one-time messages and report results.
+- History: `feat/sx-onboarding-followup` from `nightly`; merge into `nightly` and `master` with `--no-ff`, push, and deploy.
+- Verification: 27 focused tests and the cog smoke test pass. Live dry run found 55 human members without a stored name and eight unresolved welcome messages; the New Member role is below the bot's highest role.

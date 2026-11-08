@@ -34,7 +34,7 @@ from discord.ext import commands
 from cogs._member_identity import member_for_interaction
 from cogs._perms import is_bot_admin
 from cogs.birthday_tracker import announce_birthday, parse_birthday
-from cogs.onboarding import cursive_nickname
+from cogs.onboarding import NameModal, cursive_nickname
 from data.store import StoreError, store
 
 LOG = logging.getLogger("bot.recordsync")
@@ -222,8 +222,12 @@ class CollectNameView(discord.ui.View):
     @discord.ui.button(label="✍️ Set my real name", style=discord.ButtonStyle.primary,
                        custom_id="recordsync:ask_name")
     async def set_name(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        await interaction.response.send_modal(
-            CollectNameModal(self.member_id, self.store_ref))
+        onboarding = interaction.client.get_cog("Onboarding")
+        if onboarding is None:
+            await interaction.response.send_message(
+                "⚠️ The form is unavailable. Please try again later.", ephemeral=True)
+            return
+        await interaction.response.send_modal(NameModal(onboarding))
 
 
 class CollectBirthdayModal(discord.ui.Modal, title="Your birthday"):
@@ -452,7 +456,7 @@ class RecordSync(commands.Cog):
         needs_name, _ = plan_collection(members, records)
         sent, blocked, failed = await self._dm_sweep(
             ctx, needs_name, lambda m: CollectNameView(m.id, self.store),
-            "real name ✍️")
+            "full name and gender (birthday optional) ✍️")
         await ctx.send(
             f"✍️ **Name sweep done** for **{len(needs_name)}** member(s) "
             f"missing one.\n📨 DM'd: **{sent}**\n"

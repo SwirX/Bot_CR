@@ -110,6 +110,12 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
         placeholder="Male or Female",
         max_length=6,
     )
+    birthday = discord.ui.TextInput(
+        label="Birthday (optional, YYYY-MM-DD)",
+        placeholder="e.g. 2004-12-25",
+        max_length=10,
+        required=False,
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         name = self.full_name.value.strip()
@@ -122,6 +128,16 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
             await interaction.response.send_message(
                 "⚠️ Please open the form again and enter Male or Female.", ephemeral=True)
             return
+        profile = {"real_name": name, "gender": gender}
+        if self.birthday.value.strip():
+            try:
+                full_date, month_day = parse_birthday(self.birthday.value)
+            except ValueError:
+                await interaction.response.send_message(
+                    "⚠️ Please open the form again and enter a valid birthday as YYYY-MM-DD.",
+                    ephemeral=True)
+                return
+            profile.update({"birthday_full": full_date, "birthday": month_day})
         await interaction.response.defer(ephemeral=True, thinking=True)
         member = await member_for_interaction(interaction)
         if member is None:
@@ -131,7 +147,7 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
             return
 
         try:
-            await store.merge_member(member.id, {"real_name": name, "gender": gender})
+            await store.merge_member(member.id, profile)
         except StoreError as exc:
             LOG.error("Failed to save onboarding profile for %s: %s", member.id, exc)
             await interaction.followup.send(
@@ -199,8 +215,6 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
 
         await interaction.followup.send(
             f"✅ Verified! Your nickname is now **{nickname}**.", ephemeral=True)
-
-        await self.cog.prompt_birthday(member)
 
 
 # ── Persistent views ────────────────────────────────────────────────────
@@ -282,13 +296,17 @@ class Onboarding(commands.Cog):
         if member.bot:
             return
 
-        # 1. Assign the temp role.
+        # 1. Assign the onboarding roles.
         temp_role = discord.utils.get(member.guild.roles, name=config.ROLE_TEMP)
-        if temp_role:
+        new_member_role = member.guild.get_role(config.ROLE_NEW_MEMBER_ID)
+        for role in (temp_role, new_member_role):
+            if role is None:
+                LOG.warning("An onboarding role is missing in guild %s", member.guild.id)
+                continue
             try:
-                await member.add_roles(temp_role, reason="Onboarding: pending verification")
-            except discord.Forbidden:
-                LOG.warning("Cannot assign %r to %s (permission missing)", config.ROLE_TEMP, member)
+                await member.add_roles(role, reason="Onboarding: new member")
+            except discord.HTTPException as exc:
+                LOG.warning("Cannot assign onboarding role %s to %s: %s", role.id, member.id, exc)
 
         # 2. Seed the member record so stats/XP have a doc to attach to.
         try:
@@ -303,8 +321,8 @@ class Onboarding(commands.Cog):
         try:
             await member.send(
                 "👋 Welcome to the Robotics Club server!\n\n"
-                "To finish onboarding, tap the button and enter your **real full name** and gender "
-                "— you'll get a fancy cursive nickname. 🎨",
+                "To finish onboarding, tap the button and enter your **real full name** and gender. "
+                "You can also add your birthday for birthday messages. 🎨",
                 view=StartOnboardingView(self),
             )
         except discord.Forbidden:

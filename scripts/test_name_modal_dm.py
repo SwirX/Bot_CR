@@ -3,7 +3,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 
@@ -14,8 +14,8 @@ os.environ.setdefault("APPWRITE_DATABASE_ID", "robotics_hub")
 
 import config  # noqa: E402
 from cogs._member_identity import member_for_interaction  # noqa: E402
-from cogs.onboarding import NameModal, cursive_nickname  # noqa: E402
-from cogs.recordsync import CollectNameModal  # noqa: E402
+from cogs.onboarding import NameModal, Onboarding, cursive_nickname  # noqa: E402
+from cogs.recordsync import CollectNameModal, CollectNameView  # noqa: E402
 from data.store import Store, StoreError  # noqa: E402
 
 
@@ -71,8 +71,49 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
                          (member.id, {"real_name": "Ada Lovelace", "gender": "female"}))
         self.assertTrue(store.merge_member.await_args_list[1].args[1]["verified"])
         member.add_roles.assert_awaited_once()
-        cog.prompt_birthday.assert_awaited_once_with(member)
+        cog.prompt_birthday.assert_not_awaited()
         self.assertIn("Verified", interaction.followup.send.await_args.args[0])
+
+    async def test_birthday_is_optional_and_saved_when_entered(self):
+        interaction, member, guild = dm_interaction()
+        store = SimpleNamespace(merge_member=AsyncMock(),
+                                maybe_auto_link_club_member=AsyncMock())
+        modal = NameModal(None)
+        modal.full_name._value = "Ada Lovelace"
+        modal.gender._value = "female"
+        modal.birthday._value = "2000-12-10"
+        with patch.object(config, "GUILD_ID", guild.id), patch("cogs.onboarding.store", store):
+            await modal.on_submit(interaction)
+        self.assertEqual(store.merge_member.await_args_list[0].args[1]["birthday"], "12-10")
+        saved = store.merge_member.await_args_list[0].args[1]
+        self.assertEqual(saved["birthday_full"], "2000-12-10")
+        member.add_roles.assert_awaited_once()
+
+    async def test_invalid_birthday_does_not_save_profile(self):
+        interaction, member, _ = dm_interaction()
+        modal = NameModal(None)
+        modal.full_name._value = "Ada Lovelace"
+        modal.gender._value = "female"
+        modal.birthday._value = "not-a-date"
+        await modal.on_submit(interaction)
+        member.edit.assert_not_awaited()
+        self.assertIn("valid birthday", interaction.response.send_message.await_args.args[0])
+
+    async def test_join_assigns_new_member_and_pending_roles(self):
+        interaction, member, guild = dm_interaction()
+        temp = SimpleNamespace(name=config.ROLE_TEMP, id=1)
+        new = SimpleNamespace(name="New Member", id=config.ROLE_NEW_MEMBER_ID)
+        guild.roles.append(temp)
+        guild.get_role = lambda role_id: new if role_id == new.id else None
+        member.bot = False
+        member.name = "newuser"
+        member.send = AsyncMock()
+        cog = Onboarding(SimpleNamespace(add_view=lambda _view: None))
+        store = SimpleNamespace(merge_member=AsyncMock())
+        with patch("cogs.onboarding.store", store):
+            await cog.on_member_join(member)
+        self.assertEqual([call.args[0] for call in member.add_roles.await_args_list], [temp, new])
+        member.send.assert_awaited_once()
 
     async def test_database_failure_does_not_grant_verification(self):
         interaction, member, guild = dm_interaction()
@@ -144,6 +185,18 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
         interaction, member, guild = dm_interaction()
         with patch.object(config, "GUILD_ID", guild.id):
             self.assertIs(await member_for_interaction(interaction), member)
+
+    async def test_old_name_button_opens_updated_onboarding_form(self):
+        cog = SimpleNamespace()
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(get_cog=Mock(return_value=cog)),
+            response=SimpleNamespace(send_modal=AsyncMock()),
+        )
+        view = CollectNameView(42)
+        await view.set_name.callback(interaction)
+        modal = interaction.response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, NameModal)
+        self.assertFalse(modal.birthday.required)
 
 
 if __name__ == "__main__":
