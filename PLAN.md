@@ -154,3 +154,11 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Audit the live roster; grant New Member to verified humans who lack it and remove it from unverified pending members with no saved name.
 - History: `fix/sx-onboarding-roles-gender` from `nightly`, then merge to `nightly` and `master` with `--no-ff`, deploy and perform the requested role sweep.
 - Verification: 32 focused tests and the smoke test pass; live preview found 77 verified people missing New Member and 19 unnamed pending members without that role. Two unnamed unverified accounts without None joined in 2025 and September 2026.
+
+## C lesson onboarding reminder
+- Add a bot-admin-only prefix command that sends one private reminder to human members with None, without New Member, and without a cursive nickname.
+- Use the member's saved English, French or Arabic preference; default to French. Include the existing onboarding button and mention today's C lesson without inventing its time or location.
+- Fetch the current roster, recheck eligibility before each send, and report sent, closed DMs, changed eligibility and failures. Do not send messages until the command is invoked.
+- Verify selection, translations, role rechecks and command registration; deploy the command.
+- History: `feat/sx-c-lesson-reminder` from `nightly`, then merge into `nightly` and `master` with `--no-ff` and deploy.
+- Verification: 20 focused tests and the cog/command smoke test pass. A read-only live preview found 21 eligible members, all using the French fallback; no reminders were sent.
