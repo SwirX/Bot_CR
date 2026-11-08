@@ -7,6 +7,7 @@ from discord.ext import commands
 
 import config
 from cogs._member_identity import member_for_interaction
+from cogs._message_moderation import delete_message
 from cogs._perms import mod_perms
 from cogs.birthday_tracker import announce_birthday, parse_birthday
 from data.names import decursive, has_cursive
@@ -366,6 +367,12 @@ class Onboarding(commands.Cog):
         await ctx.send("🛠️ Admin tools — try `/admin namesweep` to backfill real "
                        "names from cursive nicknames and nudge members with "
                        "missing name/birthday.")
+
+    @admin.command(name="deletemessage", description="Delete one message by ID in a channel.")
+    async def admin_delete_message(self, ctx, message_id: str,
+                                   channel: discord.TextChannel | None = None):
+        """Delete one message from this channel or another server text channel."""
+        await delete_message(ctx, message_id, channel)
 
     @admin.command(name="namesweep",
                    description="Backfill real names from cursive nicknames and DM members missing name/birthday.")
