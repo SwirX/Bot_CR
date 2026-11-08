@@ -12,7 +12,11 @@ EXPECTED_MESSAGE = (
     "Salam! Xfnak bli ba9i ma3titinax smiya dyalk kamla, clicki 3la botona li l7t "
     "bax tdkhlha, ghadi n3tiwk wa7d smiya cursive o mnha n9dro ndiro lik verification "
     "fl server, t9dr tgul 7ta wax dri ula bnt o 3idmilad dyalk bax nsifto msg fl server "
-    "mnin ywsl bax nbarko lik"
+    "mnin ywsl bax nbarko lik\n\n\n"
+    "سلام! شفناك بلي باقي ما عطيتيناش سميتك كاملة، كليكي على البوطونة اللي لتحت "
+    "باش تدخلها، غادي نعطيوك واحد السمية كيرسيف ومنها نقدرو نديرو ليك ڤيريفيكاسيون "
+    "فالسيرفر، تقدر تقول حتى واش دري ولا بنت وعيد ميلاد ديالك باش نصيفطو مساج فالسيرفر "
+    "منين يوصل باش نباركو ليك"
 )
 
 
