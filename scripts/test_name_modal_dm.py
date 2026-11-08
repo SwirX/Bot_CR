@@ -13,6 +13,7 @@ os.environ.setdefault("APPWRITE_PROJECT_ID", "robotics-ops")
 os.environ.setdefault("APPWRITE_DATABASE_ID", "robotics_hub")
 
 import config  # noqa: E402
+from cogs._gender import normalize_gender  # noqa: E402
 from cogs._member_identity import member_for_interaction  # noqa: E402
 from cogs.onboarding import NameModal, Onboarding, cursive_nickname  # noqa: E402
 from cogs.recordsync import CollectNameModal, CollectNameView  # noqa: E402
@@ -123,7 +124,7 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
         member.edit.assert_not_awaited()
         self.assertIn("valid birthday", interaction.response.send_message.await_args.args[0])
 
-    async def test_join_assigns_new_member_and_pending_roles(self):
+    async def test_join_assigns_only_pending_role(self):
         interaction, member, guild = dm_interaction()
         temp = SimpleNamespace(name=config.ROLE_TEMP, id=1)
         new = SimpleNamespace(name="New Member", id=config.ROLE_NEW_MEMBER_ID)
@@ -136,7 +137,7 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
         store = SimpleNamespace(merge_member=AsyncMock())
         with patch("cogs.onboarding.store", store):
             await cog.on_member_join(member)
-        self.assertEqual([call.args[0] for call in member.add_roles.await_args_list], [temp, new])
+        self.assertEqual([call.args[0] for call in member.add_roles.await_args_list], [temp])
         member.send.assert_awaited_once()
 
     async def test_database_failure_does_not_grant_verification(self):
@@ -189,7 +190,33 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
         modal.gender._value = "unknown"
         await modal.on_submit(interaction)
         member.edit.assert_not_awaited()
-        self.assertIn("Male or Female", interaction.response.send_message.await_args.args[0])
+        self.assertIn("Homme/Femme", interaction.response.send_message.await_args.args[0])
+
+    async def test_french_gender_is_saved_and_assigned(self):
+        for answer, expected, role_id in (("Femme", "female", config.ROLE_FEMALE_ID),
+                                          ("garçon", "male", config.ROLE_MALE_ID)):
+            with self.subTest(answer=answer):
+                interaction, member, guild = dm_interaction()
+                store = SimpleNamespace(merge_member=AsyncMock(),
+                                        maybe_auto_link_club_member=AsyncMock())
+                modal = NameModal(None)
+                modal.full_name._value = "Test Name"
+                modal.gender._value = answer
+                with (patch.object(config, "GUILD_ID", guild.id),
+                      patch("cogs.onboarding.store", store)):
+                    await modal.on_submit(interaction)
+                self.assertEqual(store.merge_member.await_args_list[0].args[1]["gender"], expected)
+                self.assertIn(role_id, [role.id for role in member.add_roles.await_args.args
+                                        if hasattr(role, "id")])
+
+    def test_gender_english_and_french_synonyms(self):
+        for answer in ("Femme", "Female", "Girl", "Woman", "FILLE", "féminin"):
+            with self.subTest(answer=answer):
+                self.assertEqual(normalize_gender(answer), "female")
+        for answer in ("Male", "Man", "Boy", "Homme", "garçon", "MÂLE"):
+            with self.subTest(answer=answer):
+                self.assertEqual(normalize_gender(answer), "male")
+        self.assertIsNone(normalize_gender("unknown"))
 
     async def test_recordsync_fetches_uncached_member_then_edits_it(self):
         interaction, member, guild = dm_interaction(cached=False)
