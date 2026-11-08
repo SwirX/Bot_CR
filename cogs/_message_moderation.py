@@ -28,7 +28,7 @@ async def delete_message(ctx, message_id: str, channel=None):
     await ctx.defer(ephemeral=True)
     try:
         message = await target.fetch_message(int(raw_id))
-        await message.delete(reason=f"Requested by {ctx.author} ({ctx.author.id})")
+        await message.delete()
     except discord.NotFound:
         await ctx.send("I couldn't find that message in the selected channel.", ephemeral=True)
         return

@@ -1,7 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 import discord
 
@@ -14,7 +14,7 @@ from cogs._message_moderation import delete_message  # noqa: E402
 def make_context(*, permitted=True):
     permissions = SimpleNamespace(view_channel=permitted, read_message_history=permitted,
                                   manage_messages=permitted)
-    message = SimpleNamespace(delete=AsyncMock())
+    message = create_autospec(discord.Message, instance=True)
     channel = SimpleNamespace(id=123, permissions_for=Mock(return_value=permissions),
                               fetch_message=AsyncMock(return_value=message))
     ctx = SimpleNamespace(author=SimpleNamespace(id=5), channel=channel,
@@ -29,7 +29,7 @@ class DeleteMessageTests(unittest.IsolatedAsyncioTestCase):
         with patch("cogs._message_moderation.is_bot_admin", return_value=False):
             await delete_message(ctx, "1333538137091215380", target)
         target.fetch_message.assert_awaited_once_with(1333538137091215380)
-        message.delete.assert_awaited_once()
+        message.delete.assert_awaited_once_with()
         self.assertIn("Message deleted", ctx.send.await_args.args[0])
 
     async def test_target_channel_permission_required(self):
@@ -61,7 +61,7 @@ class DeleteMessageTests(unittest.IsolatedAsyncioTestCase):
         with patch("cogs._message_moderation.is_bot_admin", return_value=True):
             await delete_message(ctx, "123")
         target.fetch_message.assert_awaited_once_with(123)
-        message.delete.assert_awaited_once()
+        message.delete.assert_awaited_once_with()
 
     async def test_discord_permission_failure_is_reported(self):
         ctx, target, _ = make_context()
