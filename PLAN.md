@@ -131,3 +131,8 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Verify role assignment, form validation, and sweep selection with offline tests; deploy before the one-time messages and report results.
 - History: `feat/sx-onboarding-followup` from `nightly`; merge into `nightly` and `master` with `--no-ff`, push, and deploy.
 - Verification: 27 focused tests and the cog smoke test pass. Live dry run found 55 human members without a stored name and eight unresolved welcome messages; the New Member role is below the bot's highest role.
+
+## Finish stalled onboarding (2026-11-08)
+- Assign New Member, selected gender, member and verified roles after saving the name; remove the pending role only after those grants succeed.
+- Send the success response before nonessential profile synchronisation and bound the latter. Repair members stuck with a pending role after saving name and gender.
+- History: `fix/sx-onboarding-role-completion` from `nightly`, then merge to `nightly` and `master` with `--no-ff`, deploy, and repair affected members.

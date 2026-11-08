@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -170,35 +171,27 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
         temp_role = discord.utils.get(guild.roles, name=config.ROLE_TEMP)
         verified_role = discord.utils.get(guild.roles, name=config.ROLE_VERIFIED)
         member_role = discord.utils.get(guild.roles, name=config.ROLE_MEMBER)
-        if not verified_role:
-            LOG.error("Verified role is missing in guild %s", guild.id)
+        new_member_role = guild.get_role(config.ROLE_NEW_MEMBER_ID)
+        gender_id = config.ROLE_MALE_ID if gender == "male" else config.ROLE_FEMALE_ID
+        other_gender_id = config.ROLE_FEMALE_ID if gender == "male" else config.ROLE_MALE_ID
+        gender_role = guild.get_role(gender_id)
+        other_gender_role = guild.get_role(other_gender_id)
+        if not all((verified_role, new_member_role, gender_role)):
+            LOG.error("An onboarding role is missing in guild %s", guild.id)
             await interaction.followup.send(
                 "⚠️ Your name was saved, but verification is unavailable. Please contact an admin.",
                 ephemeral=True)
             return
 
         try:
-            await store.merge_member(member.id, {"display_name": nickname, "verified": True})
-        except StoreError as exc:
-            LOG.error("Failed to save verification for %s: %s", member.id, exc)
-            await interaction.followup.send(
-                "⚠️ Your name was saved, but verification could not be completed. "
-                "Please try again later or contact an admin.", ephemeral=True)
-            return
-
-        try:
-            role_updates = []
-            if verified_role:
-                role_updates.append(("add", verified_role))
-            if member_role:
-                role_updates.append(("add", member_role))
+            roles = [role for role in (new_member_role, gender_role, member_role, verified_role)
+                     if role is not None and role not in member.roles]
+            if roles:
+                await member.add_roles(*roles, reason="Onboarding verified")
+            if other_gender_role and other_gender_role in member.roles:
+                await member.remove_roles(other_gender_role, reason="Onboarding gender selected")
             if temp_role and temp_role in member.roles:
-                role_updates.append(("remove", temp_role))
-            for action, role in role_updates:
-                if action == "add":
-                    await member.add_roles(role, reason="Onboarding verified")
-                else:
-                    await member.remove_roles(role, reason="Verification complete")
+                await member.remove_roles(temp_role, reason="Verification complete")
         except discord.HTTPException as exc:
             LOG.warning("Failed to update roles for %s: %s", member, exc)
             await interaction.followup.send(
@@ -206,15 +199,16 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
                 "Please contact an admin.", ephemeral=True)
             return
 
-        # Best-effort join: match this Discord user to their club-registry row.
-        try:
-            await store.maybe_auto_link_club_member(member.id, name)
-        except StoreError:
-            LOG.warning("onboarding: auto-link club member failed for %s",
-                        member.id)
-
         await interaction.followup.send(
             f"✅ Verified! Your nickname is now **{nickname}**.", ephemeral=True)
+
+        try:
+            await asyncio.wait_for(
+                store.merge_member(member.id, {"display_name": nickname, "verified": True}),
+                timeout=10)
+            await asyncio.wait_for(store.maybe_auto_link_club_member(member.id, name), timeout=10)
+        except (StoreError, TimeoutError) as exc:
+            LOG.warning("onboarding: profile follow-up failed for %s: %s", member.id, exc)
 
 
 # ── Persistent views ────────────────────────────────────────────────────
