@@ -40,12 +40,12 @@ EXPECTED_COMMANDS = {
     "untimeout", "uptime", "view", "voicetime", "volume", "vote", "warn", "weather", "website", "whois",
     "namesweep",
     # Identity / record sync — prefix-only (see PREFIX_ONLY_COMMANDS).
-    "syncdb", "joindatesync", "askbirthday", "askname", "rappelc",
+    "syncdb", "joindatesync", "askbirthday", "askname", "detailsreminder",
 }
 
 # Admin data-maintenance commands remain typed actions. Uptime is also an
 # existing prefix-only health check.
-PREFIX_ONLY_COMMANDS = {"syncdb", "joindatesync", "askbirthday", "askname", "rappelc", "uptime"}
+PREFIX_ONLY_COMMANDS = {"syncdb", "joindatesync", "askbirthday", "askname", "detailsreminder", "uptime"}
 
 # Commands that must NOT exist any more. Guards against a silent regression
 # reintroducing a self-service Minecraft-link path (see cogs/minecraft.py:

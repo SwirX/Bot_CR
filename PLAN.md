@@ -162,3 +162,9 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Verify selection, translations, role rechecks and command registration; deploy the command.
 - History: `feat/sx-c-lesson-reminder` from `nightly`, then merge into `nightly` and `master` with `--no-ff` and deploy.
 - Verification: 20 focused tests and the cog/command smoke test pass. A read-only live preview found 21 eligible members, all using the French fallback; no reminders were sent.
+
+## General details reminder
+- Replace the lesson-specific prefix command with `!detailsreminder` and the exact Darija message requested by the user. Keep the existing recipient checks and onboarding form button.
+- Verify the exact message, button, eligibility checks and command registration; deploy without sending reminders.
+- History: `feat/sx-details-reminder` from `nightly`, then merge to `nightly` and `master` with `--no-ff` and deploy.
+- Verification: 19 reminder/onboarding tests pass, including the exact message and persistent button; the cog/command smoke test passes. No reminders were sent.

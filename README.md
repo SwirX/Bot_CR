@@ -167,7 +167,7 @@ Moderation & Rules, Server Ops), with General front and centre.
 | `slap <member>`, `hug <member>` | everyone | Social fun |
 | `del <n>` | staff | Bulk-delete up to 100 messages |
 | `admin deletemessage <message_id> [channel]` | bot staff or channel moderators | Delete one message by ID, in the current or selected channel |
-| `!rappelc` | bot admins | Privately remind pending members to complete onboarding for today's C lesson |
+| `!detailsreminder` | bot admins | Privately remind pending members to complete their onboarding details |
 | `warn <member> [reason]` | staff | Record a warning + modlog entry |
 | `timeout <member> <min> [reason]`, `untimeout` | staff | Timeouts |
 | `mute <member> [min]`, `unmute` | staff | Mute via Discord timeout |
