@@ -147,3 +147,10 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 ## Repair deletion API call
 - Discord logs show `Message.delete()` rejected an unsupported `reason` argument. Remove it and verify against an autospecced Discord message, preserving the bot's own action log.
 - History: `fix/sx-delete-message-api` from `nightly`, merged into `nightly` and `master` with `--no-ff`, then deployed.
+
+## Onboarding roles and French gender answers
+- Keep new arrivals in the pending role until their form is complete; give New Member and the chosen gender role on successful verification.
+- Accept English and French gender synonyms, including accented spellings, and store the existing canonical values.
+- Audit the live roster; grant New Member to verified humans who lack it and remove it from unverified pending members with no saved name.
+- History: `fix/sx-onboarding-roles-gender` from `nightly`, then merge to `nightly` and `master` with `--no-ff`, deploy and perform the requested role sweep.
+- Verification: 32 focused tests and the smoke test pass; live preview found 77 verified people missing New Member and 19 unnamed pending members without that role. Two unnamed unverified accounts without None joined in 2025 and September 2026.

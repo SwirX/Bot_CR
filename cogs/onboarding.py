@@ -6,6 +6,7 @@ import discord
 from discord.ext import commands
 
 import config
+from cogs._gender import normalize_gender
 from cogs._member_identity import member_for_interaction
 from cogs._message_moderation import delete_message
 from cogs._perms import mod_perms
@@ -108,9 +109,9 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
         max_length=64,
     )
     gender = discord.ui.TextInput(
-        label="Gender (Male or Female)",
-        placeholder="Male or Female",
-        max_length=6,
+        label="Gender / Genre",
+        placeholder="Male / Female or Homme / Femme",
+        max_length=32,
     )
     birthday = discord.ui.TextInput(
         label="Birthday (optional, YYYY-MM-DD)",
@@ -125,10 +126,11 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
             await interaction.response.send_message(
                 "⚠️ Please enter your real full name.", ephemeral=True)
             return
-        gender = self.gender.value.strip().lower()
-        if gender not in {"male", "female"}:
+        gender = normalize_gender(self.gender.value)
+        if gender is None:
             await interaction.response.send_message(
-                "⚠️ Please open the form again and enter Male or Female.", ephemeral=True)
+                "⚠️ Please reopen the form and enter Male/Female or Homme/Femme.",
+                ephemeral=True)
             return
         profile = {"real_name": name, "gender": gender}
         if self.birthday.value.strip():
@@ -291,17 +293,15 @@ class Onboarding(commands.Cog):
         if member.bot:
             return
 
-        # 1. Assign the onboarding roles.
+        # 1. Assign the pending role.
         temp_role = discord.utils.get(member.guild.roles, name=config.ROLE_TEMP)
-        new_member_role = member.guild.get_role(config.ROLE_NEW_MEMBER_ID)
-        for role in (temp_role, new_member_role):
-            if role is None:
-                LOG.warning("An onboarding role is missing in guild %s", member.guild.id)
-                continue
+        if temp_role is None:
+            LOG.warning("Pending onboarding role is missing in guild %s", member.guild.id)
+        else:
             try:
-                await member.add_roles(role, reason="Onboarding: new member")
+                await member.add_roles(temp_role, reason="Onboarding: pending verification")
             except discord.HTTPException as exc:
-                LOG.warning("Cannot assign onboarding role %s to %s: %s", role.id, member.id, exc)
+                LOG.warning("Cannot assign pending role to %s: %s", member.id, exc)
 
         # 2. Seed the member record so stats/XP have a doc to attach to.
         try:

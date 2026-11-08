@@ -8,11 +8,11 @@ command works as both `!prefix` and `/slash`.
 
 ## ✨ Features
 
-- 🪪 **Real-name onboarding** — new members get the New Member and temporary roles, then a DM button
-  opens a form for their **real full name**, gender (Male or Female), and optional birthday. The bot saves these,
+- 🪪 **Real-name onboarding** — new members get a temporary role, then a DM button
+  opens a form for their **real full name**, gender in English or French, and optional birthday. The bot saves these,
   applies a
-  title-cased *cursive* nickname (`𝓨𝓪𝓼𝓼𝓮𝓻 𝓔𝓵 𝓙𝓸𝓾𝓷𝓭𝓲`), grants the verified +
-  member roles. No more reaction-based
+  title-cased *cursive* nickname (`𝓨𝓪𝓼𝓼𝓮𝓻 𝓔𝓵 𝓙𝓸𝓾𝓷𝓭𝓲`), grants the New Member, gender,
+  verified and member roles, and removes the temporary role. No more reaction-based
   verification (anyone could have verified or kicked others).
 - 🎂 **Birthday tracker** — birthdays are stored per member in Appwrite and
   announced in the announcements channel on the day (plus an immediate
