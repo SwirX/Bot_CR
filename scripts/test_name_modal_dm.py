@@ -5,6 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import discord
+
 os.environ.setdefault("BOT_TOKEN", "x")
 os.environ.setdefault("APPWRITE_API_KEY", "y")
 os.environ.setdefault("APPWRITE_PROJECT_ID", "robotics-ops")
@@ -14,16 +16,19 @@ import config  # noqa: E402
 from cogs._member_identity import member_for_interaction  # noqa: E402
 from cogs.onboarding import NameModal, cursive_nickname  # noqa: E402
 from cogs.recordsync import CollectNameModal  # noqa: E402
+from data.store import Store, StoreError  # noqa: E402
 
 
 def dm_interaction(*, cached=True):
     user = SimpleNamespace(id=42, display_name="Original")
     member = SimpleNamespace(
         id=42, display_name="Original", roles=[], edit=AsyncMock(),
+        add_roles=AsyncMock(), remove_roles=AsyncMock(),
         guild=None,
     )
     guild = SimpleNamespace(
-        id=123, roles=[], get_member=lambda _id: member if cached else None,
+        id=123, roles=[SimpleNamespace(name=config.ROLE_VERIFIED)],
+        get_member=lambda _id: member if cached else None,
         fetch_member=AsyncMock(return_value=member),
     )
     member.guild = guild
@@ -37,6 +42,13 @@ def dm_interaction(*, cached=True):
 
 
 class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gender_is_written_to_member_record(self):
+        store = Store()
+        store._write = AsyncMock()
+        await store.merge_member(42, {"real_name": "Ada Lovelace", "gender": "female"})
+        self.assertEqual(store._write.await_args.args[:3],
+                         ("discord_data", "42", {"real_name": "Ada Lovelace", "gender": "female"}))
+
     async def test_onboarding_edits_member_and_saves_name(self):
         interaction, member, guild = dm_interaction()
         store = SimpleNamespace(merge_member=AsyncMock(),
@@ -44,20 +56,58 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
         cog = SimpleNamespace(prompt_birthday=AsyncMock())
         modal = NameModal(cog)
         modal.full_name._value = "Ada Lovelace"
+        modal.gender._value = "Female"
 
         with patch.object(config, "GUILD_ID", guild.id), patch("cogs.onboarding.store", store):
             await modal.on_submit(interaction)
 
-        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
         member.edit.assert_awaited_once_with(
             nick=cursive_nickname("Ada Lovelace"),
             reason="Onboarding: real name → cursive nickname",
         )
-        store.merge_member.assert_awaited_once()
-        self.assertEqual(store.merge_member.await_args.args[0], member.id)
-        self.assertEqual(store.merge_member.await_args.args[1]["real_name"], "Ada Lovelace")
+        self.assertEqual(store.merge_member.await_count, 2)
+        self.assertEqual(store.merge_member.await_args_list[0].args,
+                         (member.id, {"real_name": "Ada Lovelace", "gender": "female"}))
+        self.assertTrue(store.merge_member.await_args_list[1].args[1]["verified"])
+        member.add_roles.assert_awaited_once()
         cog.prompt_birthday.assert_awaited_once_with(member)
         self.assertIn("Verified", interaction.followup.send.await_args.args[0])
+
+    async def test_database_failure_does_not_grant_verification(self):
+        interaction, member, guild = dm_interaction()
+        store = SimpleNamespace(merge_member=AsyncMock(side_effect=StoreError("unavailable")))
+        modal = NameModal(SimpleNamespace(prompt_birthday=AsyncMock()))
+        modal.full_name._value = "Ada Lovelace"
+        modal.gender._value = "female"
+        with patch.object(config, "GUILD_ID", guild.id), patch("cogs.onboarding.store", store):
+            await modal.on_submit(interaction)
+        member.edit.assert_not_awaited()
+        member.add_roles.assert_not_awaited()
+        self.assertIn("couldn't save", interaction.followup.send.await_args.args[0])
+
+    async def test_nickname_failure_does_not_grant_verification(self):
+        interaction, member, guild = dm_interaction()
+        response = SimpleNamespace(status=403, reason="Forbidden")
+        member.edit.side_effect = discord.Forbidden(response, "permission denied")
+        store = SimpleNamespace(merge_member=AsyncMock())
+        modal = NameModal(SimpleNamespace(prompt_birthday=AsyncMock()))
+        modal.full_name._value = "Ada Lovelace"
+        modal.gender._value = "female"
+        with patch.object(config, "GUILD_ID", guild.id), patch("cogs.onboarding.store", store):
+            await modal.on_submit(interaction)
+        self.assertEqual(store.merge_member.await_count, 1)
+        member.add_roles.assert_not_awaited()
+        self.assertIn("couldn't change", interaction.followup.send.await_args.args[0])
+
+    async def test_invalid_gender_is_rejected(self):
+        interaction, member, _ = dm_interaction()
+        modal = NameModal(None)
+        modal.full_name._value = "Ada Lovelace"
+        modal.gender._value = "unknown"
+        await modal.on_submit(interaction)
+        member.edit.assert_not_awaited()
+        self.assertIn("Male or Female", interaction.response.send_message.await_args.args[0])
 
     async def test_recordsync_fetches_uncached_member_then_edits_it(self):
         interaction, member, guild = dm_interaction(cached=False)

@@ -114,3 +114,12 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Risk: The bot may not have the member cached; fetch from the configured guild and give a useful error if Discord cannot find them.
 - History: `fix/sx-dm-name-form` forks from `nightly` for one focused fix commit, then merges into `nightly` with `--no-ff`. The integrated head is pushed and deployed to the existing OCI service.
 - Verification: 16 focused name/record-sync tests pass; all cogs load in the smoke test. Full pytest: 286 passed, one unrelated existing music-source tuple/list assertion failed.
+
+## Join form gender and verification order (2026-11-08)
+- Goal: New members supply a name and Male/Female value, receive a cursive nickname, and become verified only after their name is saved.
+- Constraints: Keep the existing DM button and birthday follow-up; preserve existing member data. Store gender as an optional `discord_data` column so old rows remain valid.
+- Acceptance: Invalid gender is rejected; a database or nickname failure leaves the new member unverified; success persists both fields, applies the nickname, and then grants verified roles.
+- Steps: Add focused modal tests; update onboarding and store mapping; create the optional Appwrite column; run focused and smoke checks; merge, push, deploy, and check startup logs.
+- Risk: Appwrite column availability may lag creation; confirm it is available before deployment. Discord may reject nickname or role edits; report those failures to the member.
+- History: `feat/sx-onboarding-gender-verification` forks from `nightly` for one focused implementation commit, then merges into `nightly` with `--no-ff` and into `master` after verification.
+- Verification: The Appwrite column is available; the bot has nickname and role permissions and its onboarding roles are below it. Twenty focused tests and the smoke test pass; the broader suite passes 290 tests with one unrelated existing music test deselected.
