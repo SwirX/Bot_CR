@@ -143,3 +143,7 @@ Make tracked meetings private, role aware, scheduled when requested, and automat
 - Verify successful deletion, permissions and failure handling with mocked Discord interactions; check command registration, deploy and inspect startup.
 - History: `feat/sx-delete-message-id` from `nightly`, then merge to `nightly` and `master` with `--no-ff` and deploy.
 - Verification: Six deletion tests, onboarding regression tests, lint and cog/command smoke checks pass; no live message is deleted during testing.
+
+## Repair deletion API call
+- Discord logs show `Message.delete()` rejected an unsupported `reason` argument. Remove it and verify against an autospecced Discord message, preserving the bot's own action log.
+- History: `fix/sx-delete-message-api` from `nightly`, merged into `nightly` and `master` with `--no-ff`, then deployed.
