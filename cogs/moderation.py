@@ -1,9 +1,9 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import config
@@ -12,6 +12,7 @@ from data.store import StoreError
 from cogs.onboarding import cursive_nickname
 from cogs._ui import ConfirmView, PaginatorView
 from cogs._perms import is_bot_admin, mod_perms, require_move_perms
+from cogs._purge import MESSAGE_CHANNELS, all_targets, day_bounds, purge
 
 LOG = logging.getLogger("bot.moderation")
 
@@ -53,44 +54,61 @@ class Moderation(commands.Cog):
             LOG.error("Modlog write failed: %s", exc)
 
     # ── purge (from the legacy suite) ──────────────────────────
-    @commands.hybrid_command(name="del", description="Delete messages by count or by date (YYYY-MM-DD).")
+    @commands.hybrid_command(name="del", description="Delete messages using count, date, member and channel filters.")
+    @app_commands.describe(
+        number="Maximum matching messages across all chosen channels (1–100)",
+        date="YYYY-MM-DD, today, yesterday, 2 days ago, today last week, or a Discord timestamp",
+        member="Only delete messages from this member",
+        channel="First channel (defaults to the current channel)",
+        channel2="Optional second channel", channel3="Optional third channel",
+        all_channels="Search all accessible channels except the Bureau category",
+    )
+    @commands.guild_only()
     @mod_perms(manage_messages=True)
     @commands.cooldown(1, 3, commands.BucketType.user)
-    async def delete_messages(self, ctx, number: Optional[int] = None, date: Optional[str] = None):
-        """Delete the last N messages, or messages from a Casablanca calendar day."""
-        if not isinstance(ctx.channel, (discord.TextChannel, discord.VoiceChannel,
-                                        discord.StageChannel, discord.Thread)):
-            await ctx.send("This command can only be used in server channel chats.")
-            return
-
-        if number is None and date is None:
-            await ctx.send("Provide a number of messages or a date (YYYY-MM-DD).")
+    async def delete_messages(self, ctx, number: Optional[int] = None, date: Optional[str] = None,
+                              member: Optional[discord.Member] = None,
+                              channel: Optional[discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread] = None,
+                              channel2: Optional[discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread] = None,
+                              channel3: Optional[discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread] = None,
+                              all_channels: bool = False):
+        """Delete matching messages in selected server channel chats."""
+        if number is None and date is None and member is None:
+            await ctx.send("Provide a number, date, or member filter.", ephemeral=True)
             return
         if number is not None and not 1 <= number <= 100:
             await ctx.send("The number must be between 1 and 100.")
             return
         start = end = None
+        if all_channels and (channel or channel2 or channel3):
+            await ctx.send("Choose specific channels or all channels, not both.", ephemeral=True)
+            return
         if date:
             try:
-                start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ZoneInfo("Africa/Casablanca"))
-            except ValueError:
-                await ctx.send("Use a valid date in YYYY-MM-DD format.")
+                start, end = day_bounds(date)
+            except (ValueError, OverflowError, OSError):
+                await ctx.send("Use YYYY-MM-DD, today, yesterday, N days ago, today last week, or a Discord timestamp.", ephemeral=True)
                 return
-            end = start + timedelta(days=1)
         try:
             if ctx.interaction:
                 await ctx.defer(ephemeral=True)
             command_message = ctx.message if not ctx.interaction else None
-            deleted = await ctx.channel.purge(
-                limit=number, before=end or command_message, after=start,
-                check=lambda message: not command_message or message.id != command_message.id,
+            failures = 0
+            if all_channels:
+                targets, failures = await all_targets(ctx.guild, ctx.author)
+            else:
+                targets = [c for c in (channel, channel2, channel3) if c]
+                targets = list({c.id: c for c in targets}.values()) or [ctx.channel]
+            deleted, skipped, failed = await purge(
+                targets, ctx.author, ctx.guild.me, number, start, end, member, command_message,
             )
             if command_message:
                 try:
                     await command_message.delete()
                 except discord.HTTPException:
                     pass
-            await ctx.send(f"Deleted {len(deleted)} message(s) in #{ctx.channel.name}.", delete_after=3)
+            await ctx.send(f"Deleted {deleted} message(s). Skipped {skipped} channel(s) due to permissions; "
+                           f"{failed + failures} operation(s) failed.", ephemeral=True)
         except discord.Forbidden:
             await ctx.send("I don't have permission to delete messages here.", delete_after=5)
         except discord.HTTPException as exc:
