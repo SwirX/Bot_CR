@@ -27,6 +27,7 @@ class MessageExpiryTests(IsolatedAsyncioTestCase):
             channel=SimpleNamespace(id=456), id=789, created_at=now, is_system=lambda: False,
         )
         with patch("cogs.message_expiry.config.GUILD_ID", 123), \
+             patch("cogs.message_expiry.public_channel", return_value=True), \
              patch("cogs.message_expiry.store.get_setting", AsyncMock(return_value=None)), \
              patch("cogs.message_expiry.store.set_setting", AsyncMock()) as save:
             await self.cog.on_message(message)
@@ -46,7 +47,8 @@ class MessageExpiryTests(IsolatedAsyncioTestCase):
         now = discord.utils.utcnow().timestamp()
         self.cog.pending = {"1": {"channel": 2, "due": now - 1},
                             "3": {"channel": 2, "due": now + 100}}
-        with patch("cogs.message_expiry.store.set_setting", AsyncMock()) as save:
+        with patch("cogs.message_expiry.public_channel", return_value=True), \
+             patch("cogs.message_expiry.store.set_setting", AsyncMock()) as save:
             await self.cog.poll.coro(self.cog)
         channel.get_partial_message.assert_called_once_with(1)
         delete.assert_awaited_once()

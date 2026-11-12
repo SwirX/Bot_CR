@@ -1,6 +1,7 @@
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands
@@ -52,22 +53,38 @@ class Moderation(commands.Cog):
             LOG.error("Modlog write failed: %s", exc)
 
     # ── purge (from the legacy suite) ──────────────────────────
-    @commands.hybrid_command(name="del", description="Delete the last N messages (1–100).")
+    @commands.hybrid_command(name="del", description="Delete messages by count or by date (YYYY-MM-DD).")
     @mod_perms(manage_messages=True)
     @commands.cooldown(1, 3, commands.BucketType.user)
-    async def delete_messages(self, ctx, number: int):
-        """Delete the last N messages in this channel plus the command itself."""
+    async def delete_messages(self, ctx, number: Optional[int] = None, date: Optional[str] = None):
+        """Delete the last N messages, or messages from a Casablanca calendar day."""
         if not isinstance(ctx.channel, (discord.TextChannel, discord.VoiceChannel,
                                         discord.StageChannel, discord.Thread)):
             await ctx.send("This command can only be used in server channel chats.")
             return
 
-        number = max(1, min(number, 100))
+        if number is None and date is None:
+            await ctx.send("Provide a number of messages or a date (YYYY-MM-DD).")
+            return
+        if number is not None and not 1 <= number <= 100:
+            await ctx.send("The number must be between 1 and 100.")
+            return
+        start = end = None
+        if date:
+            try:
+                start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ZoneInfo("Africa/Casablanca"))
+            except ValueError:
+                await ctx.send("Use a valid date in YYYY-MM-DD format.")
+                return
+            end = start + timedelta(days=1)
         try:
             if ctx.interaction:
                 await ctx.defer(ephemeral=True)
             command_message = ctx.message if not ctx.interaction else None
-            deleted = await ctx.channel.purge(limit=number, before=command_message)
+            deleted = await ctx.channel.purge(
+                limit=number, before=end or command_message, after=start,
+                check=lambda message: not command_message or message.id != command_message.id,
+            )
             if command_message:
                 try:
                     await command_message.delete()

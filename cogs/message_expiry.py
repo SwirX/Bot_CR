@@ -14,6 +14,18 @@ from data.store import StoreError, store
 LOG = logging.getLogger("bot.message_expiry")
 SETTING = "message_expiry_queue"
 MEMBERS = frozenset({1545453299015094283, 1410407463152386071})
+VERIFIED_ROLE_ID = 1333113498669940905
+BUREAU_CATEGORY_ID = 1336709394926141532
+
+
+def public_channel(channel):
+    if not isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel)):
+        return False
+    if channel.category_id == BUREAU_CATEGORY_ID:
+        return False
+    verified = channel.guild.get_role(VERIFIED_ROLE_ID)
+    return (channel.permissions_for(channel.guild.default_role).view_channel
+            or bool(verified and channel.permissions_for(verified).view_channel))
 
 
 class MessageExpiry(commands.Cog):
@@ -58,7 +70,7 @@ class MessageExpiry(commands.Cog):
     async def on_message(self, message):
         if (not message.guild or message.author.bot or message.author.id not in MEMBERS
                 or (config.GUILD_ID and message.guild.id != config.GUILD_ID)
-                or message.is_system()):
+                or message.is_system() or not public_channel(message.channel)):
             return
         async with self.lock:
             await self.load()
@@ -83,6 +95,10 @@ class MessageExpiry(commands.Cog):
                     channel = self.bot.get_channel(entry["channel"])
                     if channel is None:
                         channel = await self.bot.fetch_channel(entry["channel"])
+                    if not public_channel(channel):
+                        del self.pending[message_id]
+                        self.dirty = True
+                        continue
                     await channel.get_partial_message(int(message_id)).delete()
                 except discord.NotFound:
                     pass
