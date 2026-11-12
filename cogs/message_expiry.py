@@ -36,9 +36,11 @@ class MessageExpiry(commands.Cog):
         self.dirty = False
         self.lock = asyncio.Lock()
         self.poll.start()
+        self.scan_history.start()
 
     def cog_unload(self):
         self.poll.cancel()
+        self.scan_history.cancel()
 
     async def load(self):
         if self.loaded:
@@ -111,6 +113,18 @@ class MessageExpiry(commands.Cog):
 
     @poll.before_loop
     async def before_poll(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(hours=6)
+    async def scan_history(self):
+        from cogs._expiry_history import scan_guild
+
+        for guild in self.bot.guilds:
+            if not config.GUILD_ID or guild.id == config.GUILD_ID:
+                await scan_guild(self, guild)
+
+    @scan_history.before_loop
+    async def before_scan(self):
         await self.bot.wait_until_ready()
 
 
