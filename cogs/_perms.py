@@ -248,7 +248,7 @@ def mod_perms(**perms):
         if is_bot_admin(ctx.author):
             return True
         required = discord.Permissions(**perms)
-        if not ctx.bot.user.guild_permissions.is_superset(required):
+        if not ctx.guild or not ctx.guild.me.guild_permissions.is_superset(required):
             raise commands.BotMissingPermissions(list(perms))
         if not ctx.author.guild_permissions.is_superset(required):
             raise commands.MissingPermissions(list(perms))

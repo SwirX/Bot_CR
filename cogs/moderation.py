@@ -57,17 +57,22 @@ class Moderation(commands.Cog):
     @commands.cooldown(1, 3, commands.BucketType.user)
     async def delete_messages(self, ctx, number: int):
         """Delete the last N messages in this channel plus the command itself."""
-        if not isinstance(ctx.channel, discord.TextChannel):
-            await ctx.send("This command can only be used in text channels.")
+        if not isinstance(ctx.channel, (discord.TextChannel, discord.VoiceChannel,
+                                        discord.StageChannel, discord.Thread)):
+            await ctx.send("This command can only be used in server channel chats.")
             return
 
         number = max(1, min(number, 100))
         try:
-            deleted = await ctx.channel.purge(limit=number, before=ctx.message)
-            try:
-                await ctx.message.delete()
-            except discord.HTTPException:
-                pass
+            if ctx.interaction:
+                await ctx.defer(ephemeral=True)
+            command_message = ctx.message if not ctx.interaction else None
+            deleted = await ctx.channel.purge(limit=number, before=command_message)
+            if command_message:
+                try:
+                    await command_message.delete()
+                except discord.HTTPException:
+                    pass
             await ctx.send(f"Deleted {len(deleted)} message(s) in #{ctx.channel.name}.", delete_after=3)
         except discord.Forbidden:
             await ctx.send("I don't have permission to delete messages here.", delete_after=5)
