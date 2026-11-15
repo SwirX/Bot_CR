@@ -11,7 +11,7 @@ from data.store import StoreError, store
 
 LOG = logging.getLogger("bot.pending_access")
 ENTRY_CATEGORY = 1333113499664126012
-SUPPORT_CATEGORY = 1333113499664126021
+SUPPORT_CATEGORY = ids.SUPPORT_CATEGORY
 _LOCKS: dict[int, asyncio.Lock] = {}
 
 
