@@ -42,5 +42,6 @@ class PendingAccessTests(unittest.IsolatedAsyncioTestCase):
 
     def test_entry_and_support_channels_are_allowed(self):
         self.assertTrue(pending.allowed_while_pending(SimpleNamespace(id=ids.RULES, category_id=0)))
+        self.assertTrue(pending.allowed_while_pending(SimpleNamespace(id=pending.ENTRY_CATEGORY, category_id=None)))
         self.assertTrue(pending.allowed_while_pending(SimpleNamespace(id=88, category_id=pending.SUPPORT_CATEGORY)))
         self.assertFalse(pending.allowed_while_pending(SimpleNamespace(id=88, category_id=None)))
