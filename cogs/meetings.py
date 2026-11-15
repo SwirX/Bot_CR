@@ -29,6 +29,7 @@ from discord.ext import commands
 
 import config
 from cogs import _meetings as meetlib
+from cogs._meeting_delete import DeleteMeetingView
 from cogs._perms import (
     is_bot_developer,
     is_cell_chief,
@@ -634,13 +635,16 @@ class Meetings(commands.Cog):
             await channel.connect()
 
     async def _invite_audience(self, channel: discord.VoiceChannel,
-                               audience: list[discord.Member]) -> None:
+                               audience: list[discord.Member],
+                               message: str | None = None) -> None:
+        invitation = ((message.strip() + "\n\n") if message else "Meeting started.\n")
+        invitation += (f"Join here: https://discord.com/channels/"
+                       f"{channel.guild.id}/{channel.id}")
         for member in audience:
             if not hasattr(member, "send"):
                 continue
             try:
-                await member.send(f"Meeting started: {channel.mention}. Join here: "
-                                  f"https://discord.com/channels/{channel.guild.id}/{channel.id}")
+                await member.send(invitation, allowed_mentions=discord.AllowedMentions.none())
             except (discord.Forbidden, discord.HTTPException):
                 LOG.info("Meetings: DM unavailable for %s", member.id)
 
@@ -782,6 +786,7 @@ class Meetings(commands.Cog):
                 "`/meeting schedule` — set a start time with timezone\n"
                 "`/meeting cancel` — remove a scheduled meeting\n"
                 "`/meeting list` — browse past meetings\n"
+                "`/meeting delete` — delete a finished meeting\n"
                 "`/meeting last` — stats for the most recent meeting\n"
                 "`/meeting lock` / `/meeting unlock` — manage the lockout\n"
                 "\n**Private voice rooms**\n"
@@ -1287,20 +1292,23 @@ class Meetings(commands.Cog):
     @meeting.command(name="start", description="Start attendance tracking now.")
     @app_commands.describe(channel="Optional voice channel; leave blank to create one",
                            audience="Optional audience; defaults to everyone or your cell",
-                           name="Name for a newly created voice channel")
+                           name="Name for a newly created voice channel",
+                           message="Optional message sent privately with the meeting link")
     @commands.guild_only()
     @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
-                            audience: str | None = None, name: str | None = None):
-        await self._start_meeting(ctx, channel, audience=audience, name=name)
+                            audience: str | None = None, name: str | None = None,
+                            message: str | None = None):
+        await self._start_meeting(ctx, channel, audience=audience, name=name, message=message)
 
     async def _start_meeting(self, ctx, channel: discord.VoiceChannel = None, *,
                              audience: str | None = None,
                              minutes: int | None = None,
                              also: discord.Member | None = None,
                              role: discord.Role | None = None,
-                             name: str | None = None):
+                             name: str | None = None,
+                             message: str | None = None):
         """Start a meeting and track who attends.
 
         **channel** is optional. Pick an existing voice channel to scope it to
@@ -1336,6 +1344,12 @@ class Meetings(commands.Cog):
             await ctx.send(
                 f"❓ Unknown audience `{audience}`. Pick one of: "
                 + ", ".join(f"`{c}`" for c in meetlib.SCOPE_CHOICES) + ".")
+            return
+        if message is not None and len(message.strip()) > 1800:
+            await ctx.send("The invitation message must be at most 1800 characters.", ephemeral=True)
+            return
+        if scope == "new_members" and ctx.guild.get_role(config.ROLE_NEW_MEMBER_ID) is None:
+            await ctx.send("The New Member role is missing; cannot start this meeting.", ephemeral=True)
             return
         if minutes is not None and not 1 <= minutes <= 24 * 60:
             await ctx.send("❌ `minutes` must be between 1 and 1440.")
@@ -1462,6 +1476,9 @@ class Meetings(commands.Cog):
                 await self._discard_channel(channel)
             return
 
+        if scope == "new_members" and ctx.author.id not in {member.id for member in audience_members}:
+            extras.append(ctx.author)
+
         async with ctx.typing():
             # A channel the bot just made has no prior state to restore, so its
             # snapshot is empty *and* flagged. The flag is what stops
@@ -1499,9 +1516,17 @@ class Meetings(commands.Cog):
                 # assumed nothing had happened.
                 await meetlib.ensure_bot_access(channel)
                 written.add(str(ctx.guild.me.id))
-                await meetlib.apply_meeting_permissions(
-                    channel, audience=audience_members, everyone=scope == "all",
-                    grant_extra=extras, written=written)
+                if scope == "new_members":
+                    await meetlib.apply_meeting_permissions(
+                        channel, audience=extras, written=written)
+                    new_member_role = ctx.guild.get_role(config.ROLE_NEW_MEMBER_ID)
+                    await channel.set_permissions(new_member_role, **meetlib.ATTENDEE_KWARGS,
+                                                  reason="Meeting audience")
+                    written.add(str(new_member_role.id))
+                else:
+                    await meetlib.apply_meeting_permissions(
+                        channel, audience=audience_members, everyone=scope == "all",
+                        grant_extra=extras, written=written)
             except StoreError as exc:
                 LOG.error("Meetings: /meeting start failed: %s", exc)
                 # Roll the channel back: a half-started meeting with a narrowed
@@ -1554,7 +1579,7 @@ class Meetings(commands.Cog):
             if not occupant.bot:
                 await self._record_join({"id": meeting_id, "scope": scope,
                                          "granted": [], "title": "Meeting"}, occupant)
-        await self._invite_audience(channel, audience_members)
+        await self._invite_audience(channel, audience_members, message)
         self._watch_empty(channel)
 
     @meeting_start.autocomplete("audience")
@@ -1568,6 +1593,9 @@ class Meetings(commands.Cog):
     @require_meeting_creator()
     async def meeting_end(self, ctx):
         """End the running meeting, restore the channel, keep the attendance."""
+        interaction = getattr(ctx, "interaction", None)
+        if interaction and not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         meeting = await self._live_meeting()
         if meeting is None:
             await ctx.send("⏳ No meeting is running right now.")
@@ -1636,6 +1664,8 @@ class Meetings(commands.Cog):
                    *(meeting.get("granted") or [])}
         if channel is not None:
             granted |= {str(ctx.guild.default_role.id), str(ctx.guild.me.id)}
+            if meeting.get("scope") == "new_members":
+                granted.add(str(config.ROLE_NEW_MEMBER_ID))
         decision = meetlib.end_plan(snapshot, channel_exists=channel is not None,
                                     granted=set(granted))
         if decision["problem"]:
@@ -1803,6 +1833,44 @@ class Meetings(commands.Cog):
         await ctx.send(
             f"✅ {member.mention} can rejoin. They're recorded as readmitted "
             f"in the attendance report.")
+
+    @meeting.command(name="delete", description="Delete a finished meeting and its attendance.")
+    @app_commands.describe(meeting="Select a finished meeting")
+    @commands.guild_only()
+    async def meeting_delete(self, ctx, meeting: str):
+        if not is_meeting_report_viewer(ctx.author):
+            await ctx.send("Only bureau and the IT chief can delete meeting records.", ephemeral=True)
+            return
+        interaction = getattr(ctx, "interaction", None)
+        if interaction and not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        try:
+            record = await store.get_meeting(meeting)
+        except StoreError as exc:
+            await ctx.send(f"Could not find the meeting: {exc}", ephemeral=True)
+            return
+        if not record:
+            await ctx.send("Meeting not found. Select one from the dropdown.", ephemeral=True)
+        elif record.get("live"):
+            await ctx.send("End the meeting before deleting it.", ephemeral=True)
+        else:
+            await ctx.send(f"Delete **{record.get('title') or 'Meeting'}** "
+                           f"({meetlib.friendly_time(record.get('started_at'))}) and all its attendance?",
+                           view=DeleteMeetingView(record, ctx.author.id), ephemeral=True)
+
+    @meeting_delete.autocomplete("meeting")
+    async def _delete_meeting_choices(self, interaction: discord.Interaction, current: str):
+        if not is_meeting_report_viewer(interaction.user):
+            return []
+        try:
+            records = await store.list_meetings(25, live=False)
+        except StoreError:
+            return []
+        needle = current.casefold()
+        return [app_commands.Choice(
+            name=f"{record.get('title') or 'Meeting'} · {meetlib.friendly_time(record.get('started_at'))}"[:100],
+            value=str(record["id"])) for record in records
+            if needle in (record.get("title") or "Meeting").casefold() or needle in str(record["id"]).casefold()]
 
     @meeting.command(
         name="last",

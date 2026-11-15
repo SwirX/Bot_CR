@@ -101,6 +101,7 @@ class _DeletableChannel(_Channel):
 class _GuildStub:
     def __init__(self):
         self._members = {}
+        self.id = 123
         # ensure_bot_access() grants the bot itself attendee permissions, so the
         # stub needs a `me` to hand to set_permissions.
         self.me = _Member("Bot", 999, bot=True)
@@ -468,7 +469,7 @@ def _check_command_tree(*, check) -> None:
         return
 
     want = {"start", "end", "lock", "unlock", "last", "list", "create",
-            "endroom", "schedule", "cancel"}
+            "endroom", "schedule", "cancel", "delete"}
     check("every subcommand hangs off it",
           {c.name for c in roots[0].commands}, want)
     payload = roots[0].to_dict(bot.tree)
@@ -483,7 +484,7 @@ def _check_command_tree(*, check) -> None:
               audience_option.get("autocomplete"), True)
     start_option = next(o for o in payload["options"] if o["name"] == "start")
     check("start has only simple optional choices",
-          {o["name"] for o in start_option["options"]}, {"channel", "audience", "name"})
+          {o["name"] for o in start_option["options"]}, {"channel", "audience", "name", "message"})
     developer = _Member("Developer", 8, config.ROLE_BOT_DEVELOPER)
     manager = _Member("Manager", 1, config.ROLE_MANAGER)
     developer_choices = {c.value for c in Meetings._audience_choices(developer, "")}
