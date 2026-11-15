@@ -51,6 +51,7 @@ def build_plan(guild):
         set_values(channel, roles[ids.PENDING], view_channel=allowed_pending)
         if channel.id in (ids.RULES, ids.VERIFICATION):
             set_values(channel, guild.default_role, view_channel=True, read_message_history=True)
+            set_values(channel, roles[ids.PENDING], read_message_history=True)
         if channel.id == ids.STAFF_CATEGORY:
             set_values(channel, guild.default_role, view_channel=False)
             for role_id in (*CELL_MEMBERS, *CELL_HEADS, *BUREAU):
