@@ -899,7 +899,7 @@ class Meetings(commands.Cog):
                           member_id, exc)
         return True, None
 
-    async def _make_meeting_channel(self, ctx, scope: str) -> discord.VoiceChannel | None:
+    async def _make_meeting_channel(self, ctx, scope: str, name: str | None = None) -> discord.VoiceChannel | None:
         """Create the meeting's own voice channel, or ``None`` after explaining.
 
         The guild's dedicated Team Meeting category keeps private rooms out of
@@ -910,7 +910,7 @@ class Meetings(commands.Cog):
         error path; every failure here is a Discord-side one worth reporting in
         the user's language rather than a traceback.
         """
-        name = meetlib.meeting_channel_name(scope)
+        name = name or meetlib.meeting_channel_name(scope)
         kwargs: dict = {"name": name, "reason": f"Meeting room for {scope}",
                         "overwrites": {
                             ctx.guild.default_role: discord.PermissionOverwrite(
@@ -1286,19 +1286,21 @@ class Meetings(commands.Cog):
 
     @meeting.command(name="start", description="Start attendance tracking now.")
     @app_commands.describe(channel="Optional voice channel; leave blank to create one",
-                           audience="Optional audience; defaults to everyone or your cell")
+                           audience="Optional audience; defaults to everyone or your cell",
+                           name="Name for a newly created voice channel")
     @commands.guild_only()
     @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
-                            audience: str | None = None):
-        await self._start_meeting(ctx, channel, audience=audience)
+                            audience: str | None = None, name: str | None = None):
+        await self._start_meeting(ctx, channel, audience=audience, name=name)
 
     async def _start_meeting(self, ctx, channel: discord.VoiceChannel = None, *,
                              audience: str | None = None,
                              minutes: int | None = None,
                              also: discord.Member | None = None,
-                             role: discord.Role | None = None):
+                             role: discord.Role | None = None,
+                             name: str | None = None):
         """Start a meeting and track who attends.
 
         **channel** is optional. Pick an existing voice channel to scope it to
@@ -1320,6 +1322,14 @@ class Meetings(commands.Cog):
         can show planned vs actual. `also` adds one member who does not qualify
         for a wider audience. Use **Custom** to pick several members.
         """
+        if name is not None:
+            name = name.strip()
+            if not name or len(name) > 100:
+                await ctx.send("The channel name must contain 1 to 100 characters.", ephemeral=True)
+                return
+            if channel is not None:
+                await ctx.send("Use `name` when creating a channel; leave `channel` empty.", ephemeral=True)
+                return
         scope = ("my_cell" if is_cell_chief(ctx.author) and not is_meeting_admin(ctx.author)
                  else "all") if audience is None else meetlib.normalise_scope(audience)
         if scope is None:
@@ -1417,7 +1427,8 @@ class Meetings(commands.Cog):
                 return
 
             if channel is None:
-                channel = await self._make_meeting_channel(ctx, scope)
+                channel = (await self._make_meeting_channel(ctx, scope, name)
+                           if name else await self._make_meeting_channel(ctx, scope))
                 if channel is None:
                     return  # the helper already explained itself
                 created = True
@@ -1463,7 +1474,7 @@ class Meetings(commands.Cog):
             written: set[str] = set()
             try:
                 meeting_id = await store.create_meeting({
-                    "title": f"{meetlib.scope_label(scope)} meeting",
+                    "title": name or f"{meetlib.scope_label(scope)} meeting",
                     "channel_id": str(channel.id),
                     "channel_name": channel.name,
                     "scope": scope,
@@ -1690,12 +1701,29 @@ class Meetings(commands.Cog):
         if interaction and not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
         try:
+            sessions = await store.list_meeting_sessions(meeting["id"])
+        except StoreError as exc:
+            await ctx.send(f"Could not read attendance; the meeting was not locked: {exc}", ephemeral=True)
+            return
+        attendee_ids = {str(row["discord_user"]) for row in sessions if row.get("discord_user")}
+        attendee_ids.update(str(member.id) for member in channel.members if not member.bot)
+        attendees = [ctx.guild.get_member(int(uid)) for uid in attendee_ids]
+        attendees = [member for member in attendees if member is not None]
+        overwrites = dict(channel.overwrites)
+        new_overwrites = sum(member not in overwrites for member in attendees)
+        if len(overwrites) + new_overwrites + (ctx.guild.default_role not in overwrites) > 100:
+            await ctx.send("Cannot lock while allowing everyone to reconnect: Discord's channel permission limit would be exceeded.", ephemeral=True)
+            return
+        expected = {str(uid) for uid in (meeting.get("expected") or []) + (meeting.get("visitors") or [])}
+        try:
+            for member in attendees:
+                if str(member.id) not in expected:
+                    await store.grant_meeting_reentry(meeting["id"], member.id)
             await store.set_meeting_locked(meeting["id"], True)
         except StoreError as exc:
             await ctx.send(f"Could not save the lock: {exc}", ephemeral=True)
             return
         failures = []
-        overwrites = dict(channel.overwrites)
         overwrites.setdefault(ctx.guild.default_role, discord.PermissionOverwrite())
         for target, overwrite in overwrites.items():
             if target == ctx.guild.me:
@@ -1708,11 +1736,19 @@ class Meetings(commands.Cog):
             except discord.HTTPException as exc:
                 failures.append(str(target))
                 LOG.warning("Meetings: lock failed for %s: %s", target, exc)
+        for member in attendees:
+            overwrite = channel.overwrites_for(member)
+            overwrite.connect = True
+            try:
+                await channel.set_permissions(member, overwrite=overwrite, reason="Allow meeting attendee to reconnect")
+            except discord.HTTPException as exc:
+                failures.append(str(member))
+                LOG.warning("Meetings: reconnect grant failed for %s: %s", member, exc)
         if failures:
             await ctx.send("Lock incomplete; some permissions could not be changed. "
                            "Check the channel permissions before relying on it.", ephemeral=True)
         else:
-            await ctx.send("Meeting locked. People already inside can stay; new arrivals cannot join. "
+            await ctx.send("Meeting locked. Previous attendees can reconnect; first-time arrivals cannot join. "
                            "Use `/meeting unlock` to admit one member.", ephemeral=True)
 
     @meeting.command(

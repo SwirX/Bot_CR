@@ -483,7 +483,7 @@ def _check_command_tree(*, check) -> None:
               audience_option.get("autocomplete"), True)
     start_option = next(o for o in payload["options"] if o["name"] == "start")
     check("start has only simple optional choices",
-          {o["name"] for o in start_option["options"]}, {"channel", "audience"})
+          {o["name"] for o in start_option["options"]}, {"channel", "audience", "name"})
     developer = _Member("Developer", 8, config.ROLE_BOT_DEVELOPER)
     manager = _Member("Manager", 1, config.ROLE_MANAGER)
     developer_choices = {c.value for c in Meetings._audience_choices(developer, "")}
