@@ -108,7 +108,7 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
 
     full_name = discord.ui.TextInput(
         label="Real full name (as in your ID card)",
-        placeholder="e.g. Yasser El Joundi",
+        placeholder="Ali Bouyakhsass",
         max_length=64,
     )
     gender = discord.ui.TextInput(
@@ -118,7 +118,7 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
     )
     birthday = discord.ui.TextInput(
         label="Birthday (optional, YYYY-MM-DD)",
-        placeholder="e.g. 2004-12-25",
+        placeholder="2007-01-13",
         max_length=10,
         required=False,
     )
@@ -251,7 +251,7 @@ class BirthdayModal(discord.ui.Modal, title="Enter Your Birthday"):
         super().__init__()
         self.cog = cog
 
-    date = discord.ui.TextInput(label="Your birthdate", placeholder="e.g. 2004-12-25", max_length=16)
+    date = discord.ui.TextInput(label="Your birthdate", placeholder="2007-01-13", max_length=16)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
