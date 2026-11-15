@@ -973,7 +973,7 @@ class Meetings(commands.Cog):
         plan = "\n".join([
             f"**Custom** audience for {ctx.author.mention}.",
             f"Planned length: **{minutes} min**." if minutes else "",
-            "Pick who this meeting is for. Only they will be able to join, and "
+            "Use **Search members** to find people by name or ID. Pick who this meeting is for. Only they will be able to join, and "
             "nobody is added by virtue of their roles.",
         ])
         view = MemberPickerView(
@@ -1478,6 +1478,15 @@ class Meetings(commands.Cog):
 
         if scope == "new_members" and ctx.author.id not in {member.id for member in audience_members}:
             extras.append(ctx.author)
+        if scope == "new_members":
+            existing_ids = {target.id for target in channel.overwrites}
+            needed_ids = {member.id for member in audience_members + extras}
+            needed_ids.update((ctx.guild.default_role.id, ctx.guild.me.id))
+            if len(existing_ids | needed_ids) > 100:
+                if created:
+                    await self._discard_channel(channel)
+                await ctx.send("This audience exceeds Discord's channel permission limit; use a smaller custom audience.", ephemeral=True)
+                return
 
         async with ctx.typing():
             # A channel the bot just made has no prior state to restore, so its
@@ -1516,17 +1525,9 @@ class Meetings(commands.Cog):
                 # assumed nothing had happened.
                 await meetlib.ensure_bot_access(channel)
                 written.add(str(ctx.guild.me.id))
-                if scope == "new_members":
-                    await meetlib.apply_meeting_permissions(
-                        channel, audience=extras, written=written)
-                    new_member_role = ctx.guild.get_role(config.ROLE_NEW_MEMBER_ID)
-                    await channel.set_permissions(new_member_role, **meetlib.ATTENDEE_KWARGS,
-                                                  reason="Meeting audience")
-                    written.add(str(new_member_role.id))
-                else:
-                    await meetlib.apply_meeting_permissions(
-                        channel, audience=audience_members, everyone=scope == "all",
-                        grant_extra=extras, written=written)
+                await meetlib.apply_meeting_permissions(
+                    channel, audience=audience_members, everyone=scope == "all",
+                    grant_extra=extras, written=written)
             except StoreError as exc:
                 LOG.error("Meetings: /meeting start failed: %s", exc)
                 # Roll the channel back: a half-started meeting with a narrowed
@@ -1664,8 +1665,7 @@ class Meetings(commands.Cog):
                    *(meeting.get("granted") or [])}
         if channel is not None:
             granted |= {str(ctx.guild.default_role.id), str(ctx.guild.me.id)}
-            if meeting.get("scope") == "new_members":
-                granted.add(str(config.ROLE_NEW_MEMBER_ID))
+
         decision = meetlib.end_plan(snapshot, channel_exists=channel is not None,
                                     granted=set(granted))
         if decision["problem"]:

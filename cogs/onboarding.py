@@ -6,6 +6,9 @@ import discord
 from discord.ext import commands
 
 import config
+from cogs import _club_ids as ids
+from cogs._verification_panel import ensure_panel
+from cogs._pending_access import restrict_pending, release_pending
 from cogs._gender import normalize_gender
 from cogs._member_identity import member_for_interaction
 from cogs._message_moderation import delete_message
@@ -171,8 +174,8 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
 
         # Grant verified roles, drop the temp role.
         guild = member.guild
-        temp_role = discord.utils.get(guild.roles, name=config.ROLE_TEMP)
-        verified_role = discord.utils.get(guild.roles, name=config.ROLE_VERIFIED)
+        temp_role = guild.get_role(ids.PENDING) or discord.utils.get(guild.roles, name=config.ROLE_TEMP)
+        verified_role = guild.get_role(ids.VERIFIED) or discord.utils.get(guild.roles, name=config.ROLE_VERIFIED)
         member_role = discord.utils.get(guild.roles, name=config.ROLE_MEMBER)
         new_member_role = guild.get_role(config.ROLE_NEW_MEMBER_ID)
         gender_id = config.ROLE_MALE_ID if gender == "male" else config.ROLE_FEMALE_ID
@@ -187,12 +190,14 @@ class NameModal(discord.ui.Modal, title="Your real full name"):
             return
 
         try:
-            roles = [role for role in (new_member_role, gender_role, member_role, verified_role)
+            roles = [role for role in (new_member_role, gender_role, member_role)
                      if role is not None and role not in member.roles]
             if roles:
-                await member.add_roles(*roles, reason="Onboarding verified")
+                await member.add_roles(*roles, reason="Onboarding details completed")
             if other_gender_role and other_gender_role in member.roles:
                 await member.remove_roles(other_gender_role, reason="Onboarding gender selected")
+            if verified_role not in member.roles:
+                await member.add_roles(verified_role, reason="Onboarding verified")
             if temp_role and temp_role in member.roles:
                 await member.remove_roles(temp_role, reason="Verification complete")
         except discord.HTTPException as exc:
@@ -287,6 +292,26 @@ class Onboarding(commands.Cog):
         self.bot.add_view(StartOnboardingView(self))
         self.bot.add_view(BirthdayPromptView(self))
 
+    @commands.Cog.listener()
+    async def on_ready(self):
+        await ensure_panel(self.bot, lambda: StartOnboardingView(self))
+        guild = self.bot.get_guild(ids.GUILD)
+        if guild:
+            for member in guild.members:
+                if any(role.id == ids.PENDING for role in member.roles):
+                    await restrict_pending(member)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before, after):
+        if after.guild.id != ids.GUILD or before.roles == after.roles:
+            return
+        was_pending = any(role.id == ids.PENDING for role in before.roles)
+        is_pending = any(role.id == ids.PENDING for role in after.roles)
+        if is_pending:
+            await restrict_pending(after)
+        elif was_pending:
+            await release_pending(after)
+
     # ── join flow ─────────────────────────────────────────────
     @commands.Cog.listener()
     async def on_member_join(self, member):
@@ -294,7 +319,7 @@ class Onboarding(commands.Cog):
             return
 
         # 1. Assign the pending role.
-        temp_role = discord.utils.get(member.guild.roles, name=config.ROLE_TEMP)
+        temp_role = member.guild.get_role(ids.PENDING) or discord.utils.get(member.guild.roles, name=config.ROLE_TEMP)
         if temp_role is None:
             LOG.warning("Pending onboarding role is missing in guild %s", member.guild.id)
         else:
@@ -314,18 +339,14 @@ class Onboarding(commands.Cog):
 
         # 3. DM the onboarding button.
         try:
-            await member.send(
-                "👋 Welcome to the Robotics Club server!\n\n"
-                "To finish onboarding, tap the button and enter your **real full name** and gender. "
-                "You can also add your birthday for birthday messages. 🎨",
-                view=StartOnboardingView(self),
-            )
+            from cogs.details_reminder import MESSAGE, reminder_view
+            await member.send(MESSAGE, view=reminder_view(self))
         except discord.Forbidden:
             channel = find_text_channel(member.guild, config.CHANNEL_BOTLOG)
             if channel:
                 await channel.send(
                     f"⚠️ {member.mention} has DMs closed — they can't start onboarding from here. "
-                    "Ask them to open DMs for this server and re-join, or message an admin."
+                    f"They can use <#{ids.VERIFICATION}> to verify instead."
                 )
 
     async def prompt_birthday(self, member: discord.Member):

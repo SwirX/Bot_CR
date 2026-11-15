@@ -74,8 +74,8 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.merge_member.await_args_list[0].args,
                          (member.id, {"real_name": "Ada Lovelace", "gender": "female"}))
         self.assertTrue(store.merge_member.await_args_list[1].args[1]["verified"])
-        member.add_roles.assert_awaited_once()
-        assigned = member.add_roles.await_args.args
+        self.assertEqual(member.add_roles.await_count, 2)
+        assigned = member.add_roles.await_args_list[0].args
         assigned_ids = [role.id for role in assigned if hasattr(role, "id")]
         self.assertIn(config.ROLE_NEW_MEMBER_ID, assigned_ids)
         self.assertIn(config.ROLE_FEMALE_ID, assigned_ids)
@@ -96,7 +96,7 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
         modal.gender._value = "male"
         with patch.object(config, "GUILD_ID", guild.id), patch("cogs.onboarding.store", store):
             await modal.on_submit(interaction)
-        assigned_ids = [role.id for role in member.add_roles.await_args.args if hasattr(role, "id")]
+        assigned_ids = [role.id for call in member.add_roles.await_args_list for role in call.args if hasattr(role, "id")]
         self.assertIn(config.ROLE_MALE_ID, assigned_ids)
 
     async def test_birthday_is_optional_and_saved_when_entered(self):
@@ -112,7 +112,7 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.merge_member.await_args_list[0].args[1]["birthday"], "12-10")
         saved = store.merge_member.await_args_list[0].args[1]
         self.assertEqual(saved["birthday_full"], "2000-12-10")
-        member.add_roles.assert_awaited_once()
+        self.assertEqual(member.add_roles.await_count, 2)
 
     async def test_invalid_birthday_does_not_save_profile(self):
         interaction, member, _ = dm_interaction()
@@ -206,8 +206,8 @@ class DmNameModalTests(unittest.IsolatedAsyncioTestCase):
                       patch("cogs.onboarding.store", store)):
                     await modal.on_submit(interaction)
                 self.assertEqual(store.merge_member.await_args_list[0].args[1]["gender"], expected)
-                self.assertIn(role_id, [role.id for role in member.add_roles.await_args.args
-                                        if hasattr(role, "id")])
+                self.assertIn(role_id, [role.id for call in member.add_roles.await_args_list
+                                        for role in call.args if hasattr(role, "id")])
 
     def test_gender_english_and_french_synonyms(self):
         for answer in ("Femme", "Female", "Girl", "Woman", "FILLE", "féminin"):
