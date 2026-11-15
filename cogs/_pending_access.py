@@ -10,12 +10,13 @@ from cogs import _club_ids as ids
 from data.store import StoreError, store
 
 LOG = logging.getLogger("bot.pending_access")
+ENTRY_CATEGORY = 1333113499664126012
 SUPPORT_CATEGORY = 1333113499664126021
 _LOCKS: dict[int, asyncio.Lock] = {}
 
 
 def allowed_while_pending(channel):
-    return (channel.id in (ids.RULES, ids.VERIFICATION, SUPPORT_CATEGORY)
+    return (channel.id in (ENTRY_CATEGORY, ids.RULES, ids.VERIFICATION, SUPPORT_CATEGORY)
             or getattr(channel, "category_id", None) == SUPPORT_CATEGORY)
 
 
