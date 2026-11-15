@@ -122,10 +122,10 @@ class MeetingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         cog._scheduled = [item]
         calls = []
 
-        async def activate(_cog, ctx, meeting_channel, **_kwargs):
+        async def activate(ctx, meeting_channel, **_kwargs):
             calls.append((ctx.created_channel_id, meeting_channel.id))
 
-        with patch.object(cog, "meeting_start", SimpleNamespace(callback=activate)):
+        with patch.object(cog, "_start_meeting", activate):
             await cog._advance_schedules()
         self.assertEqual(calls, [(8, 8)])
         self.assertEqual(cog._scheduled, [])
