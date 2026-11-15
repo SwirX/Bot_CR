@@ -363,8 +363,8 @@ def start_meeting(cog, store, ctx, channel, *, audience="bureau", minutes=None,
         real = meetings_mod.store
         meetings_mod.store = store
         try:
-            task = asyncio.ensure_future(Meetings.meeting_start.callback(
-                cog, ctx, channel, audience=audience, minutes=minutes,
+            task = asyncio.ensure_future(cog._start_meeting(
+                ctx, channel, audience=audience, minutes=minutes,
                 also=also))
             for pick in picks:
                 view = await _wait_for_view(ctx)
@@ -482,8 +482,8 @@ def _check_command_tree(*, check) -> None:
         check(f"{command_name} offers role-aware audience suggestions",
               audience_option.get("autocomplete"), True)
     start_option = next(o for o in payload["options"] if o["name"] == "start")
-    also_option = next(o for o in start_option["options"] if o["name"] == "also")
-    check("also is a Discord member picker", also_option["type"], 6)
+    check("start has only simple optional choices",
+          {o["name"] for o in start_option["options"]}, {"channel", "audience"})
     developer = _Member("Developer", 8, config.ROLE_BOT_DEVELOPER)
     manager = _Member("Manager", 1, config.ROLE_MANAGER)
     developer_choices = {c.value for c in Meetings._audience_choices(developer, "")}
