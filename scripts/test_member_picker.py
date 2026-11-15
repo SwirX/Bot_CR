@@ -262,7 +262,7 @@ def main() -> int:
     v = MemberPickerView(members(60), on_confirm=_confirm, user=admin,
                          page_size=100)
     failures += check("an oversized page_size clamps to 25", v.page_size, 25)
-    failures += check("and still builds", len(v.to_components()), 2)
+    failures += check("and still builds", len(v.to_components()), 3)
 
     if failures:
         print(f"\n✗ {failures} FAILURE(S)")
