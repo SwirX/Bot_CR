@@ -73,9 +73,11 @@ def build_plan(guild):
                            send_messages=True, read_message_history=True)
         if channel.id == ids.OLD_MEMBERS_VOICE:
             set_values(channel, guild.default_role, view_channel=False, connect=False)
-            set_values(channel, roles[ids.VERIFIED], view_channel=True, connect=False)
+            set_values(channel, roles[ids.VERIFIED], view_channel=True, connect=False,
+                       read_message_history=False, send_messages=False)
             for role_id in (ids.OLD_MEMBER, *CELL_MEMBERS, *CELL_HEADS, *BUREAU):
-                set_values(channel, roles[role_id], view_channel=True, connect=True)
+                set_values(channel, roles[role_id], view_channel=True, connect=True,
+                           read_message_history=True, send_messages=True)
     return [item for item in changes.values() if item[2].pair() != item[3].pair()]
 
 
