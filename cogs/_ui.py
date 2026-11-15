@@ -112,6 +112,23 @@ def select_value(interaction: discord.Interaction) -> str:
     return str(values[0]) if values else ""
 
 
+class MemberSearchModal(discord.ui.Modal, title="Find a member"):
+    query = discord.ui.TextInput(label="Name, username or ID", required=False, max_length=100,
+                                 placeholder="Leave empty to show everyone")
+
+    def __init__(self, picker):
+        super().__init__()
+        self.picker = picker
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await self.picker._owned(interaction):
+            return
+        if not self.picker.filter_members(self.query.value):
+            await interaction.response.send_message("No members match that search. Try another name.", ephemeral=True)
+            return
+        await interaction.response.edit_message(view=self.picker)
+
+
 class MemberPickerView(OwnerView, LoggedView, discord.ui.View):
     """◀ ▶ multi-select over the guild's members, with a ✅ confirm step.
 
@@ -122,12 +139,7 @@ class MemberPickerView(OwnerView, LoggedView, discord.ui.View):
     option, because there is no app-command shape for it, and the members the
     user typed arrive as text that the converter then fails on.
 
-    A select menu can hold 25 chosen values, but only out of the 25 options on
-    the page it is showing, so a guild with more members than that needs paging
-    *and* per-page selection state. ``_per_page`` is what makes a choice survive
-    a page change instead of being silently replaced by whatever is on the new
-    page — the alternative, rebuilding from the menu's current ``values``, loses
-    every earlier page the moment the user turns the corner.
+    Search narrows the member list by name or ID while preserving selections.
 
     ``on_confirm`` is an async callable taking ``(interaction, members)``.
     """
@@ -153,7 +165,8 @@ class MemberPickerView(OwnerView, LoggedView, discord.ui.View):
         self.page_size = max(1, min(page_size, self._MAX, len(self.candidates) or 1))
         self.pages = max(1, -(-len(self.candidates) // self.page_size))
         self._page = 0
-        self._per_page: dict[int, set[str]] = {}
+        self._chosen: set[str] = set()
+        self.filtered = list(self.candidates)
         self.select: discord.ui.Select | None = None
         self.confirmed = False
         self.cancelled = False
@@ -167,20 +180,28 @@ class MemberPickerView(OwnerView, LoggedView, discord.ui.View):
         building the union defensively means a future re-ordering of
         ``candidates`` can't hand the caller the same person twice.
         """
-        chosen: dict[int, discord.Member] = {}
-        for ids in self._per_page.values():
-            for uid in ids:
-                member = next((m for m in self.candidates if str(m.id) == uid), None)
-                if member is not None:
-                    chosen[member.id] = member
-        return [m for m in self.candidates if m.id in chosen]
+        return [m for m in self.candidates if str(m.id) in self._chosen]
+
+    def filter_members(self, query: str) -> bool:
+        needle = query.strip().casefold()
+        matches = [member for member in self.candidates if not needle or any(
+            needle in str(value or "").casefold() for value in
+            (member.id, getattr(member, "display_name", ""), getattr(member, "name", ""),
+             getattr(member, "global_name", "")))]
+        if not matches:
+            return False
+        self.filtered = matches
+        self.pages = max(1, -(-len(matches) // self.page_size))
+        self._page = 0
+        self._rebuild()
+        return True
 
     def _page_members(self) -> list[discord.Member]:
         start = self._page * self.page_size
-        return self.candidates[start:start + self.page_size]
+        return self.filtered[start:start + self.page_size]
 
     def _make_select(self) -> discord.ui.Select:
-        picked = self._per_page.get(self._page, set())
+        picked = self._chosen
         options = []
         for member in self._page_members():
             options.append(discord.SelectOption(
@@ -239,9 +260,15 @@ class MemberPickerView(OwnerView, LoggedView, discord.ui.View):
         # Read through the raw payload: this select is multi-value, so
         # select_value() (first value only) would keep exactly one person.
         values = (interaction.data or {}).get("values") or []
-        self._per_page[self._page] = {str(v) for v in values}
+        self._chosen.difference_update(str(member.id) for member in self._page_members())
+        self._chosen.update(str(value) for value in values)
         self._rebuild()
         await self._edit(interaction)
+
+    @discord.ui.button(label="Search members", style=discord.ButtonStyle.primary, row=2)
+    async def search(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if await self._owned(interaction):
+            await interaction.response.send_modal(MemberSearchModal(self))
 
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def prev(self, interaction: discord.Interaction, _button: discord.ui.Button):

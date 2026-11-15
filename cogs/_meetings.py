@@ -62,7 +62,7 @@ SCOPE_SUMMARY = {
     "chiefs": "bureau + every cell chief",
     "cells": "bureau + every member of a unit/cell",
     "all": "every robotics member in the server",
-    "new_members": "members with the New Member role",
+    "new_members": "new members without an old-member or staff role",
     "custom": "only the people picked from the dropdown",
     "my_cell": "your cell + bureau",
     "test": "only the bot developer and the bot",
@@ -223,7 +223,9 @@ async def resolve_audience(guild: discord.Guild, scope: str, *,
             seen[member.id] = member
             continue
         if scope == "new_members":
-            if any(role.id == config.ROLE_NEW_MEMBER_ID for role in member.roles):
+            roles = {role.id for role in member.roles}
+            if (config.ROLE_NEW_MEMBER_ID in roles and 1333538424724127825 not in roles
+                    and meeting_tier(member) not in ("cells", "bureau")):
                 seen[member.id] = member
             continue
         # ``meeting_tier`` returns the member's *highest* tier; widen it to the

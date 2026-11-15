@@ -19,6 +19,20 @@ class MeetingInvitesTests(unittest.IsolatedAsyncioTestCase):
         result = await _meetings.resolve_audience(guild, _meetings.normalise_scope("New members"))
         self.assertEqual([person.id for person in result], [1])
 
+    async def test_new_members_excludes_old_members_and_cell_staff(self):
+        def role(uid, name):
+            return SimpleNamespace(id=uid, name=name, managed=False)
+        new = role(config.ROLE_NEW_MEMBER_ID, "New Member")
+        old = role(1333538424724127825, "Old Member")
+        staff = role(5, "Member of IT Unit")
+        chief = role(6, "Head of IT Unit")
+        def member(uid, roles):
+            return SimpleNamespace(id=uid, roles=roles, bot=False, display_name=str(uid))
+        guild = SimpleNamespace(members=[member(1, [new]), member(2, [new, old]),
+                                         member(3, [new, staff]), member(4, [new, chief])])
+        result = await _meetings.resolve_audience(guild, "new_members")
+        self.assertEqual([person.id for person in result], [1])
+
     async def test_custom_invitation_contains_message_and_link(self):
         person = SimpleNamespace(send=AsyncMock())
         channel = SimpleNamespace(guild=SimpleNamespace(id=123), id=456)
@@ -57,6 +71,6 @@ class MeetingInvitesTests(unittest.IsolatedAsyncioTestCase):
             await cog._start_meeting(ctx, channel, audience="new members", message="Hello")
         self.assertEqual(store.created[0]["expected"], ["11"])
         self.assertEqual(store.created[0]["visitors"], ["10"])
-        self.assertIn(new_role.id, [target for target, _ in channel.writes])
+        self.assertIn(attendee.id, [target for target, _ in channel.writes])
         self.assertIn(organizer.id, [target for target, _ in channel.writes])
         cog._invite_audience.assert_awaited_once_with(channel, [attendee], "Hello")
