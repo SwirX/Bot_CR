@@ -580,8 +580,8 @@ class Meetings(commands.Cog):
                 continue
             ctx = _MeetingSystemContext(guild, organizer, channel,
                                         created_channel_id=channel.id)
-            await self.meeting_start.callback(
-                self, ctx, channel, audience=item["audience"],
+            await self._start_meeting(
+                ctx, channel, audience=item["audience"],
                 minutes=item["minutes"], role=role)
             live = await self._live_meeting_for_channel(channel.id)
             if live is not None:
@@ -1284,19 +1284,21 @@ class Meetings(commands.Cog):
         await self._remove_schedule(item)
         await ctx.send("Scheduled meeting cancelled.", ephemeral=True)
 
-    @meeting.command(
-        name="start",
-        description=("Start a tracked meeting. Pick a voice channel to scope, "
-                     "or leave it blank and the bot makes one."))
-    @app_commands.describe(also="One extra member; use Custom to pick several")
+    @meeting.command(name="start", description="Start attendance tracking now.")
+    @app_commands.describe(channel="Optional voice channel; leave blank to create one",
+                           audience="Optional audience; defaults to everyone or your cell")
     @commands.guild_only()
     @require_meeting_creator()
     @commands.bot_has_permissions(manage_channels=True, manage_roles=True)
     async def meeting_start(self, ctx, channel: discord.VoiceChannel = None, *,
-                            audience: str | None = None,
-                            minutes: int | None = None,
-                            also: discord.Member | None = None,
-                            role: discord.Role | None = None):
+                            audience: str | None = None):
+        await self._start_meeting(ctx, channel, audience=audience)
+
+    async def _start_meeting(self, ctx, channel: discord.VoiceChannel = None, *,
+                             audience: str | None = None,
+                             minutes: int | None = None,
+                             also: discord.Member | None = None,
+                             role: discord.Role | None = None):
         """Start a meeting and track who attends.
 
         **channel** is optional. Pick an existing voice channel to scope it to
@@ -1530,6 +1532,7 @@ class Meetings(commands.Cog):
                          f"`/meeting end`. Attendance ID: `{meeting_id}`")
         else:
             lines.append(f"Attendance ID: `{meeting_id}`")
+        lines.append("Use `/meeting lock` to stop late arrivals, `/meeting last` for attendance, and `/meeting end` when finished.")
         await ctx.send("\n".join(lines))
         try:
             await self._claim_voice(channel)
@@ -1668,94 +1671,63 @@ class Meetings(commands.Cog):
         header += "\nRun `/meeting last` for the full report."
         await ctx.send(header)
 
-    @meeting.command(
-        name="lock",
-        description=("Lock the running meeting: anyone who has already left "
-                     "cannot rejoin until an admin unlocks them."))
+    @meeting.command(name="lock", description="Stop late arrivals joining the current meeting.")
     @commands.guild_only()
-    @require_meeting_admin()
+    @require_meeting_creator()
     async def meeting_lock(self, ctx):
-        """Deny rejoin to everyone who has left the meeting channel.
-
-        Only members who entered *and* left are locked out — they have an
-        attendance row with a ``left_at``. Anyone still in the channel (the
-        current attendees) and anyone who never joined at all are untouched.
-
-        The lock is implemented as a per-member ``connect`` deny (not a new
-        role) so it applies to exactly the people who left and evaporates
-        cleanly at ``/meeting end`` when their overwrite is deleted.
-        """
         meeting = await self._live_meeting()
         if meeting is None:
-            await ctx.send("⏳ No meeting is running right now.")
+            await ctx.send("No meeting is running right now.", ephemeral=True)
             return
-        channel = (self._find_channel(int(meeting["channel_id"]))
-                   if meeting["channel_id"] else None)
+        if not is_meeting_admin(ctx.author) and str(ctx.author.id) != str(meeting.get("created_by")):
+            await ctx.send("Only the organizer or bureau can lock this meeting.", ephemeral=True)
+            return
+        channel = self._find_channel(int(meeting["channel_id"])) if meeting.get("channel_id") else None
         if channel is None:
-            await ctx.send("❌ The meeting channel is gone; can't lock it.")
+            await ctx.send("The meeting channel no longer exists.", ephemeral=True)
             return
-
+        interaction = getattr(ctx, "interaction", None)
+        if interaction and not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         try:
-            sessions = await store.list_meeting_sessions(meeting["id"])
+            await store.set_meeting_locked(meeting["id"], True)
         except StoreError as exc:
-            LOG.error("Meetings: lock could not read attendance: %s", exc)
-            await ctx.send(f"⚠️ Couldn't read the attendance log: {exc}")
+            await ctx.send(f"Could not save the lock: {exc}", ephemeral=True)
             return
-
-        targets = meetlib.lock_targets(sessions, granted=meeting["granted"])
-        if not targets:
-            anyone_left = any(s["left_at"] for s in sessions)
-            hint = (" — nobody has left the meeting yet, so there is nothing "
-                    "to lock") if not anyone_left else \
-                   " — everyone who left is still in the channel or was readmitted"
-            await ctx.send(f"🔓 Nothing to lock{hint}.")
-            return
-        if len(targets) > config.MEETING_MAX_LOCKED_OUT:
-            await ctx.send(
-                f"❌ {len(targets)} members have left — that exceeds the "
-                f"{config.MEETING_MAX_LOCKED_OUT} lockout cap (Discord allows "
-                f"100 overwrites per channel).")
-            return
-
-        locked, failed = [], []
-        async with ctx.typing():
-            for uid in targets:
-                member = ctx.guild.get_member(int(uid))
-                if member is None:
-                    # Left the server; no overwrite to write.
-                    continue
-                try:
-                    await meetlib.deny_member(
-                        channel, member, reason="Meeting lockout")
-                    locked.append(uid)
-                except (discord.NotFound, discord.Forbidden,
-                        discord.HTTPException) as exc:
-                    failed.append(f"{member.display_name} ({exc.__class__.__name__})")
-
-        if locked:
+        failures = []
+        overwrites = dict(channel.overwrites)
+        overwrites.setdefault(ctx.guild.default_role, discord.PermissionOverwrite())
+        for target, overwrite in overwrites.items():
+            if target == ctx.guild.me:
+                continue
+            if target != ctx.guild.default_role and overwrite.connect is not True:
+                continue
+            overwrite.connect = False
             try:
-                await store.set_meeting_locked(meeting["id"], True)
-            except StoreError as exc:
-                LOG.error("Meetings: lock flag not saved: %s", exc)
-        names = ", ".join(f"<@{uid}>" for uid in locked[:10])
-        more = f" (+{len(locked) - 10} more)" if len(locked) > 10 else ""
-        msg = (f"🔒 Locked the meeting — {len(locked)} member(s) that left can no "
-               f"longer rejoin: {names}{more}.")
-        if failed:
-            msg += f"\n⚠️ Couldn't lock: {', '.join(failed[:5])}"
-        msg += "\nUse `/meeting unlock @member` to let anyone back in."
-        await ctx.send(msg)
+                await channel.set_permissions(target, overwrite=overwrite, reason="Meeting locked to late arrivals")
+            except discord.HTTPException as exc:
+                failures.append(str(target))
+                LOG.warning("Meetings: lock failed for %s: %s", target, exc)
+        if failures:
+            await ctx.send("Lock incomplete; some permissions could not be changed. "
+                           "Check the channel permissions before relying on it.", ephemeral=True)
+        else:
+            await ctx.send("Meeting locked. People already inside can stay; new arrivals cannot join. "
+                           "Use `/meeting unlock` to admit one member.", ephemeral=True)
 
     @meeting.command(
         name="unlock",
         description="Let a member back into a locked meeting.")
     @commands.guild_only()
-    @require_meeting_admin()
+    @require_meeting_creator()
     async def meeting_unlock(self, ctx, member: discord.Member):
         """Clear one member's lockout so they can rejoin the running meeting."""
         meeting = await self._live_meeting()
         if meeting is None:
             await ctx.send("⏳ No meeting is running right now.")
+            return
+        if not is_meeting_admin(ctx.author) and str(ctx.author.id) != str(meeting.get("created_by")):
+            await ctx.send("Only the organizer or bureau can admit members.", ephemeral=True)
             return
         channel = (self._find_channel(int(meeting["channel_id"]))
                    if meeting["channel_id"] else None)
