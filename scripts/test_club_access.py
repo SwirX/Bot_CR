@@ -41,5 +41,8 @@ class AccessPlanTests(unittest.TestCase):
         self.assertTrue(plan[(development.id, ids.IT_MEMBER)].send_messages)
         self.assertTrue(plan[(old_voice.id, ids.VERIFIED)].view_channel)
         self.assertFalse(plan[(old_voice.id, ids.VERIFIED)].connect)
+        self.assertFalse(plan[(old_voice.id, ids.VERIFIED)].read_message_history)
+        self.assertFalse(plan[(old_voice.id, ids.VERIFIED)].send_messages)
         self.assertTrue(plan[(old_voice.id, ids.OLD_MEMBER)].connect)
+        self.assertTrue(plan[(old_voice.id, ids.OLD_MEMBER)].read_message_history)
         self.assertTrue(plan[(rules.id, ids.PENDING)].view_channel)
