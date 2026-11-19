@@ -29,6 +29,7 @@ from discord.ext import commands
 
 import config
 from cogs import _meetings as meetlib
+from cogs import _voice_mute
 from cogs._meeting_delete import DeleteMeetingView
 from cogs._perms import (
     is_bot_developer,
@@ -783,6 +784,8 @@ class Meetings(commands.Cog):
                 "                         blank and the bot makes one, and pick\n"
                 "                         the audience from the dropdown\n"
                 "`/meeting end` — end the running meeting\n"
+                "`/meeting servermute` — mute a voice channel, optionally excluding someone\n"
+                "`/meeting undomute` — undo the last server-mute batch\n"
                 "`/meeting schedule` — set a start time with timezone\n"
                 "`/meeting cancel` — remove a scheduled meeting\n"
                 "`/meeting list` — browse past meetings\n"
@@ -794,6 +797,24 @@ class Meetings(commands.Cog):
                 "pick who gets in\n"
                 "`/meeting endroom` — end your room early"
             )
+
+    @meeting.command(name="servermute", description="Server-mute everyone in a voice channel.")
+    @app_commands.describe(channel="Voice channel; defaults to the one you joined",
+                           exclude="Member to leave unmuted, such as the presenter")
+    @commands.guild_only()
+    async def meeting_servermute(self, ctx, channel: discord.VoiceChannel | None = None,
+                                 exclude: discord.Member | None = None):
+        if ctx.interaction and not ctx.interaction.response.is_done():
+            await ctx.interaction.response.defer(ephemeral=True)
+        await _voice_mute.mute_all(ctx, channel, exclude)
+
+    @meeting.command(name="undomute", description="Undo the most recent server-mute batch.")
+    @app_commands.describe(channel="Original voice channel; defaults to the one you joined")
+    @commands.guild_only()
+    async def meeting_undomute(self, ctx, channel: discord.VoiceChannel | None = None):
+        if ctx.interaction and not ctx.interaction.response.is_done():
+            await ctx.interaction.response.defer(ephemeral=True)
+        await _voice_mute.undo_mute(ctx, channel)
 
     # ── tracked-meeting helpers ─────────────────────────────────────
     async def _sessions(self, meeting_id: str) -> list[dict]:
