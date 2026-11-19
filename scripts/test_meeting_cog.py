@@ -469,7 +469,7 @@ def _check_command_tree(*, check) -> None:
         return
 
     want = {"start", "end", "lock", "unlock", "last", "list", "create",
-            "endroom", "schedule", "cancel", "delete"}
+            "endroom", "schedule", "cancel", "delete", "servermute", "undomute"}
     check("every subcommand hangs off it",
           {c.name for c in roots[0].commands}, want)
     payload = roots[0].to_dict(bot.tree)
