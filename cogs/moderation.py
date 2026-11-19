@@ -156,7 +156,17 @@ class Moderation(commands.Cog):
             except discord.HTTPException as exc:
                 await interaction.followup.send(f"⚠️ Ban failed: {exc}", ephemeral=True)
                 return
+            try:
+                await member.send("You have been banned from the Robotics Club server.")
+                dm_failed = False
+            except discord.HTTPException as exc:
+                LOG.info("Could not send ban notice to %s: %s", member.id, exc)
+                dm_failed = True
             await interaction.followup.send(f"🔨 Banned **{member.display_name}** — {reason}")
+            if dm_failed:
+                await interaction.followup.send(
+                    "The ban succeeded, but I couldn't send the user a private notice.",
+                    ephemeral=True)
             await self._log(ctx, "ban", member, reason)
 
         view = ConfirmView(do_ban, user=ctx.author)
